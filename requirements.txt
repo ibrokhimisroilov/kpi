@@ -1,0 +1,12 @@
+aiogram>=3.20,<4
+SQLAlchemy[asyncio]>=2.0.30,<2.2
+aiosqlite>=0.20
+# PostgreSQL (DATABASE_URL=postgresql://..., например бесплатный Supabase для Render)
+asyncpg>=0.30
+APScheduler>=3.10,<4
+google-genai>=1.30
+pydantic>=2.7
+pydantic-settings>=2.3
+openpyxl>=3.1
+python-docx>=1.1
+tzdata>=2024.1

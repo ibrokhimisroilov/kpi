@@ -1,0 +1,16 @@
+# Окружение Python
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Секреты и данные бота
+.env
+data/
+
+# Готовые архивы для загрузки на хостинг (содержат .env с секретами)
+dist/
+
+# Настройки для Render с секретами (готовит deploy/make_render_env.py)
+deploy/render.env
+deploy/render.env.tmp

@@ -1,0 +1,21 @@
+# Не попадает в образ и в контекст сборки: секреты, данные, окружение, тесты, документация.
+.env
+.env.*
+data
+dist
+.venv
+.git
+.gitignore
+.github
+tests
+docs
+deploy
+*.md
+render.yaml
+docker-compose.yml
+run.bat
+**/__pycache__
+.pytest_cache
+*.pyc
+*.db
+*.db-*

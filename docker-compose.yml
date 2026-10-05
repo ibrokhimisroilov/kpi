@@ -1,0 +1,20 @@
+# Запуск на сервере: docker compose up -d
+# Логи: docker compose logs -f     Остановка: docker compose down
+# Обновление после замены файлов бота: docker compose up -d --build
+services:
+  bot:
+    build: .
+    image: kpi-telegram-bot
+    container_name: kpi-telegram-bot
+    # Настройки (BOT_TOKEN, ADMIN_IDS, GEMINI_API_KEY, ...) — из файла .env рядом с этим файлом.
+    env_file: .env
+    # База данных остаётся в папке ./data на сервере: её легко копировать для резервной копии.
+    volumes:
+      - ./data:/app/data
+    # Бот поднимается сам после сбоя и после перезагрузки сервера.
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

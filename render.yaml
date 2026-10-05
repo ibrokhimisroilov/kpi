@@ -1,0 +1,45 @@
+# Render Blueprint: бот «Эффективность» на бесплатном тарифе Render (без банковской карты).
+# Инструкция для руководителя — docs/DEPLOY_RENDER.md.
+#
+# Как это работает: Telegram присылает сообщения на веб-адрес бота (RUN_MODE=webhook),
+# данные хранятся в бесплатной базе Supabase (DATABASE_URL + DATABASE_PASSWORD).
+# Внешний «будильник» не нужен: бот сам раз в 10 минут обращается к своему адресу (Render не
+# усыпляет сервис) и каждые 5 минут проверяет напоминания, сводку и резервную копию.
+#
+# Секреты (sync: false) в этот файл НЕ пишутся: Render спросит их при создании сервиса.
+# Готовые значения разработчик кладёт в deploy/render.env (python deploy/make_render_env.py).
+# Поменять потом: Dashboard → сервис kpi-bot → Environment.
+services:
+  - type: web
+    name: kpi-bot
+    runtime: docker
+    # ВАЖНО: без строки «plan: free» Render создаёт ПЛАТНЫЙ сервер.
+    plan: free
+    # Франкфурт — рядом с базой Supabase (Central EU, Frankfurt). Регион потом не меняется.
+    region: frankfurt
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    # Render считает сервис живым, когда /health отвечает «ok» (и только тогда переключает на новую версию).
+    healthCheckPath: /health
+    # Новая версия кода в GitHub разворачивается сама.
+    autoDeploy: true
+    envVars:
+      - key: RUN_MODE
+        value: webhook
+      - key: TIMEZONE
+        value: Asia/Tashkent
+      - key: AI_PROVIDER
+        value: gemini
+      # --- Секреты: Render попросит вписать их при создании (всё есть в deploy/render.env) ---
+      - key: BOT_TOKEN
+        sync: false
+      - key: ADMIN_IDS
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      # Строка Supabase «Session pooler» (порт 5432) — как есть, можно с [YOUR-PASSWORD].
+      - key: DATABASE_URL
+        sync: false
+      # Пароль базы Supabase: бот сам подставит его в DATABASE_URL вместо [YOUR-PASSWORD].
+      - key: DATABASE_PASSWORD
+        sync: false
