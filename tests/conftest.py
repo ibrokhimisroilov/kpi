@@ -28,6 +28,12 @@ TEST_ENV: dict[str, str] = {
     "ADMIN_IDS": "1001",
     "AI_PROVIDER": "none",
     "GEMINI_API_KEY": "",
+    # Ключи запасных AI-провайдеров из .env разработчика не должны включать AI в тестах.
+    "GROQ_API_KEY": "",
+    "CLOUDFLARE_API_TOKEN": "",
+    "CLOUDFLARE_ACCOUNT_ID": "",
+    "MISTRAL_API_KEY": "",
+    "OPENROUTER_API_KEY": "",
     "TIMEZONE": "Asia/Tashkent",
     # Подстраховка: тесты никогда не трогают data/bot.db.
     "DATABASE_URL": "sqlite+aiosqlite:///:memory:",
@@ -94,12 +100,21 @@ _CLOCK_MODULES = (
 
 @pytest.fixture(autouse=True)
 def _test_settings(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    """Тестовые настройки на время каждого теста; кэш Settings сбрасывается до и после."""
+    """Тестовые настройки на время каждого теста; кэш Settings сбрасывается до и после.
+    Паузы AI-провайдеров (bot.ai.provider) тоже не переходят из теста в тест."""
     for key, value in TEST_ENV.items():
         monkeypatch.setenv(key, value)
     get_settings.cache_clear()
+    _reset_ai_state()
     yield
     get_settings.cache_clear()
+    _reset_ai_state()
+
+
+def _reset_ai_state() -> None:
+    provider = sys.modules.get("bot.ai.provider")
+    if provider is not None:
+        provider.reset_state()
 
 
 @pytest.fixture

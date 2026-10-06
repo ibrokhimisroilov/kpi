@@ -1,4 +1,4 @@
-"""bot.ai.provider: настройки запроса к Gemini и «пустые» ответы думающих моделей — без сети.
+"""bot.ai.gemini + bot.ai.provider: настройки запроса к Gemini и «пустые» ответы думающих моделей — без сети.
 
 * AFC (автоматический вызов функций SDK) выключен: иначе google-genai на КАЖДЫЙ запрос пишет в лог
   «AFC is enabled with max remote calls: 10» и предупреждение про AFC.
@@ -6,8 +6,8 @@
   маленьком max_output_tokens ``response.text`` приходит пустым (finish_reason=MAX_TOKENS).
 * Пустой/обрезанный ответ — повод попробовать следующую модель, а не «ошибка AI».
 
-Сеть не используется: либо фейковый ``client.aio.models``, либо настоящий ``genai.Client`` с подменённым
-транспортом (``_api_client.async_request``) — так проверяется реальный путь SDK, включая его логи.
+Сеть не используется: либо фейковый ``client.aio.models`` (``bot.ai.gemini._client``), либо настоящий
+``genai.Client`` с подменённым транспортом (``_api_client.async_request``) — так проверяется реальный путь SDK, включая его логи.
 """
 
 from __future__ import annotations
@@ -23,7 +23,7 @@ import pytest
 from google import genai
 from google.genai import types
 
-from bot.ai import provider
+from bot.ai import gemini as gemini_module
 from bot.ai.evaluate import evaluate_submission
 from bot.ai.formulate import suggest_expected_result
 from bot.ai.provider import MIN_OUTPUT_TOKENS, AIUnavailable, generate_json
@@ -70,7 +70,7 @@ class FakeModels:
 def fake_models(ai_on, monkeypatch) -> Callable[[dict[str, Any]], FakeModels]:
     def _install(script: dict[str, Any]) -> FakeModels:
         models = FakeModels(script)
-        monkeypatch.setattr(provider, "_client", SimpleNamespace(aio=SimpleNamespace(models=models)))
+        monkeypatch.setattr(gemini_module, "_client", SimpleNamespace(aio=SimpleNamespace(models=models)))
         return models
 
     return _install
@@ -206,7 +206,7 @@ def real_sdk(ai_on, monkeypatch) -> Callable[..., FakeTransport]:
         transport = FakeTransport(*answers)
         client = genai.Client(api_key=API_KEY, http_options=types.HttpOptions(timeout=60_000))
         monkeypatch.setattr(client._api_client, "async_request", transport)
-        monkeypatch.setattr(provider, "_client", client)
+        monkeypatch.setattr(gemini_module, "_client", client)
         return transport
 
     return _install
@@ -239,7 +239,7 @@ async def test_sdk_control_without_disable_logs_afc(real_sdk, caplog) -> None:
     real_sdk(rest_answer('{"score": 1}'))
     caplog.set_level(logging.DEBUG)
     config = types.GenerateContentConfig(response_mime_type="application/json", max_output_tokens=8192)
-    await provider._client.aio.models.generate_content(model="gemini-3.8-flash", contents=["p"], config=config)
+    await gemini_module._client.aio.models.generate_content(model="gemini-3.8-flash", contents=["p"], config=config)
     assert any("AFC is enabled" in message for message in afc_records(caplog))
 
 

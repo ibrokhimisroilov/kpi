@@ -58,6 +58,7 @@ MIN_FACT = 3               # совсем пустые ответы («да», �
 MAX_FILES = 20             # файлов в одной сдаче
 MAX_NOTES = 1500           # текстовое описание материалов (ссылки, «отправил по почте») на шаге файлов
 LIST_LIMIT = 50            # задач в списке «Сдать результат»
+_AI_BUDGET_MARGIN_SEC = 5  # запас до общего срока оценки: AI заканчивает раньше, чем его прервут
 ALBUM_DELAY_SEC = 1.0      # альбом приходит пачкой сообщений — отвечаем один раз, после последнего
 MSG_LIMIT = 4000           # запас до лимита Telegram 4096
 
@@ -889,12 +890,18 @@ def _ai_budget_sec() -> float:
 async def _ai_evaluation(bot: Bot, task: Task, sub: Submission) -> ai_evaluate.Evaluation | None:
     """Оценка AI (или правил — решает evaluate_submission). None — упало или не уложилось во время."""
 
+    loop = asyncio.get_running_loop()
+    budget = _ai_budget_sec()
+    ends_at = loop.time() + budget
+
     async def run() -> ai_evaluate.Evaluation:
         # Без AI файлы скачивать незачем: evaluate_submission всё равно посчитает по правилам.
         evidence = await ai_evidence.collect_evidence(bot, list(sub.attachments)) if ai_available() else []
-        return await ai_evaluate.evaluate_submission(task, sub, evidence)
+        # Перебор моделей — только в оставшееся после скачивания файлов время (с запасом), чтобы AI успел
+        # ответить или отказаться сам, а не был прерван по общему сроку ниже.
+        left = ends_at - loop.time() - _AI_BUDGET_MARGIN_SEC
+        return await ai_evaluate.evaluate_submission(task, sub, evidence, time_budget=left)
 
-    budget = _ai_budget_sec()
     try:
         return await asyncio.wait_for(run(), timeout=budget)
     except TimeoutError:

@@ -215,6 +215,41 @@ def test_empty_admins_and_gemini_are_allowed(tmp_path: Path, capsys: pytest.Capt
     assert "ADMIN_IDS пустой" in output and "без AI" in output
 
 
+GROQ = "gsk_SecretGroqKey0123456789"
+CF_TOKEN = "cfSecretToken0123456789"
+
+
+def test_optional_ai_keys_are_copied_only_when_set(tmp_path: Path, env_file: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """Ключи запасного AI из .env попадают в конец render.env (строки базы остаются на своих местах);
+    незаданные — не пишутся; значения на экран не выводятся. AI_PROVIDER=gemini (прежнее название «auto»)
+    не считается «настройкой, которую надо перенести»."""
+    env_file.write_text(
+        env_file.read_text(encoding="utf-8")
+        + f"GROQ_API_KEY={GROQ}\nCLOUDFLARE_API_TOKEN={CF_TOKEN}\nMISTRAL_API_KEY=\nAI_PROVIDER=gemini\n",
+        encoding="utf-8",
+    )
+    out = tmp_path / "render.env"
+    code, output = _run(capsys, "--env", str(env_file), "--out", str(out))
+    assert code == 0
+    lines = _lines(out)
+    assert lines[4].startswith("DATABASE_URL=") and lines[5].startswith("DATABASE_PASSWORD=")
+    assert lines[6:] == [f"GROQ_API_KEY={GROQ}", f"CLOUDFLARE_API_TOKEN={CF_TOKEN}"]
+    _assert_no_secrets(output, GROQ, CF_TOKEN)
+    assert "GROQ_API_KEY" in output and "CLOUDFLARE_API_TOKEN" in output
+    assert "MISTRAL_API_KEY" not in output and "AI_PROVIDER" not in output
+
+
+def test_only_backup_ai_key_still_means_ai_on(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    env = tmp_path / ".env"
+    env.write_text(f"BOT_TOKEN={TOKEN}\nADMIN_IDS=1\nGEMINI_API_KEY=\nGROQ_API_KEY={GROQ}\n", encoding="utf-8")
+    out = tmp_path / "render.env"
+    code, output = _run(capsys, "--env", str(env), "--out", str(out))
+    assert code == 0
+    assert "запасных провайдеров" in output and "без AI" not in output
+    assert _lines(out)[-1] == f"GROQ_API_KEY={GROQ}"
+    _assert_no_secrets(output, GROQ)
+
+
 def test_risky_password_is_warned(tmp_path: Path, env_file: Path, capsys: pytest.CaptureFixture[str]) -> None:
     out = tmp_path / "render.env"
     code, output = _run(capsys, "--env", str(env_file), "--out", str(out), "--database-password", "pa#ss$word")
@@ -253,11 +288,16 @@ def test_render_env_is_git_and_docker_ignored() -> None:
 
 
 def test_keys_match_render_yaml() -> None:
-    """Секреты, которые Render спрашивает (sync: false), — ровно те, что пишет скрипт (кроме RUN_MODE)."""
+    """Секреты, которые Render спрашивает (sync: false), — ровно обязательные строки скрипта (кроме RUN_MODE).
+
+    Ключи запасного AI в Blueprint намеренно не входят (при создании — только 5 полей); их добавляют
+    потом в Render → Environment.
+    """
     text = (ROOT / "render.yaml").read_text(encoding="utf-8")
     secret_keys = set(re.findall(r"- key: (\w+)\s*\n\s*sync: false", text))
     fixed = dict(re.findall(r"- key: (\w+)\s*\n\s*value: (\S+)", text))
     assert secret_keys == set(mre.OUTPUT_KEYS) - {"RUN_MODE"}
+    assert not secret_keys & set(mre.OPTIONAL_AI_KEYS)
     assert fixed == mre.RENDER_YAML_VALUES
     assert re.search(r"^\s+plan: free$", text, re.MULTILINE)
     assert re.search(r"^\s+region: frankfurt$", text, re.MULTILINE)

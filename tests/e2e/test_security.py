@@ -102,7 +102,9 @@ def gemini(monkeypatch: pytest.MonkeyPatch) -> FakeGemini:
     """«Включить» AI оценки: ai_available() -> True, generate_json -> FakeGemini (без сети)."""
     fake = FakeGemini()
 
-    async def generate_json(*, system: str, parts: list, schema: dict, max_output_tokens: int = 2048):
+    async def generate_json(
+        *, system: str, parts: list, schema: dict, max_output_tokens: int = 2048, time_budget: float | None = None
+    ):
         fake.calls.append({"system": system, "parts": list(parts), "schema": schema})
         return dict(fake.answer), "gemini-test"
 

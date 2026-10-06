@@ -28,8 +28,9 @@ services:
         value: webhook
       - key: TIMEZONE
         value: Asia/Tashkent
+      # AI: бесплатные тарифы по цепочке (Gemini → запасные провайдеры с ключами → расчёт по правилам).
       - key: AI_PROVIDER
-        value: gemini
+        value: auto
       # --- Секреты: Render попросит вписать их при создании (всё есть в deploy/render.env) ---
       - key: BOT_TOKEN
         sync: false
@@ -43,3 +44,6 @@ services:
       # Пароль базы Supabase: бот сам подставит его в DATABASE_URL вместо [YOUR-PASSWORD].
       - key: DATABASE_PASSWORD
         sync: false
+      # Запасной бесплатный AI (GROQ_API_KEY, CLOUDFLARE_*, MISTRAL_API_KEY, OPENROUTER_API_KEY)
+      # не входит в Blueprint, чтобы при создании было только 5 полей. Добавляется потом:
+      # Render → kpi-bot → Environment (docs/DEPLOY_RENDER.md, «Запасной бесплатный AI»).

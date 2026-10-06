@@ -7,7 +7,8 @@
 ## 0. Стек и принципы
 
 * Python 3.12, **aiogram 3.31** (polling), **SQLAlchemy 2.1 async + aiosqlite** (SQLite, файл `data/bot.db`),
-  **APScheduler 3.11** (AsyncIOScheduler), **google-genai** (бесплатный тариф Gemini), openpyxl, python-docx.
+  **APScheduler 3.11** (AsyncIOScheduler), **google-genai** (бесплатный тариф Gemini), **httpx** (запасные
+  бесплатные OpenAI-совместимые AI: Groq, Cloudflare Workers AI, Mistral, OpenRouter), openpyxl, python-docx.
   Всё бесплатно. Платных сервисов нет.
 * Интерфейс бота — **только на русском**. Parse mode — **HTML** (`DefaultBotProperties(parse_mode="HTML")`).
   Любой пользовательский текст в сообщениях экранируется `html.escape` (хелпер `bot.utils.text.esc`).
@@ -17,7 +18,8 @@
 * Время: в БД — **naive UTC**; пользователю — местное время `settings.timezone` (по умолчанию Asia/Tashkent).
   Хелперы — `bot/utils/dates.py` (`utcnow`, `to_local`, `to_utc`, `deadline_from_local_date`, `fmt_*`).
 * **AI только предлагает** оценку, окончательное решение — за руководителем. При недоступности AI
-  (нет ключа, исчерпан бесплатный лимит, ошибка сети) всё работает на правилах — бот никогда не «ломается» из-за AI.
+  (нет ключа, исчерпан бесплатный лимит, бесплатный тариф закрыт, ошибка сети) бот сам переходит к следующему
+  бесплатному провайдеру, а если не ответил никто — работает на правилах; бот никогда не «ломается» из-за AI.
 * Всё, что меняет задачу, пишется в журнал `TaskEvent` («все изменения фиксируются в системе»).
 
 ## 1. Структура проекта (владельцы файлов)
@@ -36,7 +38,10 @@ bot/
   services/kpi.py              # расчёт коэффициента эффективности                      [A2]
   services/reminders.py        # какие напоминания пора отправить                      [A2]
   services/export.py           # выгрузка в Excel                                      [A2]
-  ai/provider.py               # вызов Gemini + перебор моделей                         [A3]
+  ai/provider.py               # цепочка бесплатных AI-провайдеров, паузы, проверка JSON [A3]
+  ai/base.py                   # классы сбоев AI (Failure, ProviderError, classify_http) [A3]
+  ai/gemini.py                 # провайдер Google Gemini (google-genai)                  [A3]
+  ai/openai_compat.py          # Groq, Cloudflare, Mistral, OpenRouter (httpx)           [A3]
   ai/formulate.py              # подсказка измеримого ожидаемого результата              [A3]
   ai/evaluate.py               # сравнение план↔факт, предварительная оценка             [A3]
   ai/evidence.py               # извлечение содержимого приложенных файлов               [A3]
@@ -321,25 +326,81 @@ async def build_report_xlsx(session, period: Period, now: datetime | None = None
 Комментарий), **«Журнал»** (Дата, Задача, Кто, Событие, Детали) — события задач периода.
 Шапка жирная, автоширина колонок, закреплённая первая строка, проценты числами.
 
-## 4. AI (бесплатный Gemini) [A3]
+## 4. AI (только бесплатные тарифы; цепочка провайдеров) [A3]
+
+Модули: `bot/ai/provider.py` (публичный API, цепочка, паузы, проверка JSON), `bot/ai/gemini.py` (Google Gemini,
+google-genai), `bot/ai/openai_compat.py` (Groq, Cloudflare Workers AI, Mistral, OpenRouter — httpx,
+`POST {base_url}/chat/completions`), `bot/ai/base.py` (классы сбоев `Failure`, `ProviderError`, `classify_http`).
 
 ### 4.1 `bot/ai/provider.py`
 ```python
 class AIUnavailable(Exception): ...
+MIN_OUTPUT_TOKENS = 8192
 def ai_available() -> bool                 # settings.ai_enabled
-async def generate_json(*, system: str, parts: list, schema: dict, max_output_tokens: int = 8192) -> tuple[dict, str]
-    # max_output_tokens меньше MIN_OUTPUT_TOKENS=8192 поднимается до него («думающим» моделям нужен запас);
-    # automatic_function_calling отключён; пустой/обрезанный (MAX_TOKENS) ответ — следующая модель.
-    # -> (данные, имя_модели). parts — список str и/или google.genai.types.Part.
-    # Перебирает settings.gemini_models по порядку: при 429 (лимит бесплатного тарифа), 404 (модель недоступна),
-    # 5xx, таймауте — следующая модель. Если все не смогли / ответ не JSON -> raise AIUnavailable.
-    # Клиент genai.Client(api_key=..., http_options=types.HttpOptions(timeout=settings.ai_timeout_sec*1000)) — один на процесс.
-    # Вызов: await client.aio.models.generate_content(model=m, contents=parts,
-    #   config=types.GenerateContentConfig(system_instruction=system, response_mime_type="application/json",
-    #          response_json_schema=schema, temperature=0.2, max_output_tokens=...))
-    # Ошибки: google.genai.errors.ClientError / ServerError / APIError (атрибут .code), asyncio.TimeoutError, httpx/aiohttp ошибки.
-    # Глобальный asyncio.Semaphore(2) — не превышать бесплатные лимиты. Ключ API никогда не логировать.
+def chain_budget_sec(settings=None) -> float   # 2 × ai_timeout_sec — весь перебор моделей и провайдеров
+def active_chain(settings=None) -> list[Provider]  # провайдеры с ключами в порядке AI_PROVIDERS
+async def generate_json(*, system: str, parts: list, schema: dict, max_output_tokens: int = 8192,
+                        time_budget: float | None = None) -> tuple[dict, str]
+    # -> (данные, имя_модели): для Gemini — имя модели («gemini-3.8-flash»), для остальных — «провайдер:модель»
+    # («groq:openai/gpt-oss-120b»; Submission.ai_model ≤ 64 симв.). parts — список str и/или google.genai.types.Part.
+    # Очередь попыток: провайдеры из settings.active_ai_providers по порядку × их модели по порядку
+    # (если в parts есть изображения — сначала модели, которые их видят). Следующая попытка — при:
+    #   429 (лимит), «нужна оплата» (402; 400/403 c billing / FAILED_PRECONDITION / free tier; 429 «limit: 0»),
+    #   404 / «модель не поддерживается», 5xx/408, таймаут, сеть, пустой ответ, ответ не JSON-объект,
+    #   ответ не по схеме (нет обязательного поля, которое не может быть null; не тот тип; число строкой — годится).
+    # Весь провайдер пропускается (scope="provider"): неверный ключ (401, «API key not valid»), 402, дневной лимит
+    # на аккаунт (Cloudflare — поле code=4006 или «daily free allocation»/«neurons», а не цифры 4006 в тексте;
+    # OpenRouter free-models-per-day), доступ к проекту закрыт (400/403: регион не поддерживается, API не включён /
+    # SERVICE_DISABLED, API_KEY_SERVICE_BLOCKED, FAILED_PRECONDITION / PERMISSION_DENIED / billing account без
+    # названия модели), прочие 4xx. Запрос слишком большой (413; 400/429 «request too large», «reduce your message
+    # size», context length) — только эта модель, без паузы: следующая (без фото, с бо́льшим лимитом) может принять.
+    # Таймаут / сеть: оставшиеся модели провайдера уходят в конец очереди (время сначала другим провайдерам).
+    # Паузы (в памяти процесса; cooldown_sec): лимит — retry-after сервиса (30 с…6 ч) или 10 мин, дневной — ≥ 1 ч;
+    # оплата / ключ / нет модели — 6 ч; 5xx и таймаут — 2 мин (таймаут — только если попытке досталось полное
+    # время ai_timeout_sec + 5 с, а не урезанный остаток); плохой ответ, сеть, запрос слишком большой — без паузы.
+    # Модель / провайдер на паузе не спрашиваются; все на паузе — сразу AIUnavailable (без запросов).
+    # Время: весь перебор ≤ min(chain_budget_sec(), time_budget), включая ожидание свободного места у провайдера;
+    # одна попытка (с повтором без необязательных параметров) ≤ min(ai_timeout_sec + 5 с, остаток). Не ответил
+    # никто -> AIUnavailable. Ответ: первый целый JSON-объект (текст до/после, ```json, <think> — отбрасываются).
+    # Не больше 2 одновременных запросов к одному провайдеру. Ключи API никогда не логируются (тексты ошибок
+    # проходят через _safe: все ключи из settings.ai_secrets -> «***»); при старте в журнал — цепочка (только имена).
+async def close_client() -> None           # закрыть клиентов Gemini и httpx (при остановке бота)
 ```
+* **Gemini** (`gemini.GeminiProvider`): клиент `genai.Client(api_key=..., http_options=HttpOptions(timeout=ai_timeout_sec*1000))`
+  — один на процесс; `await client.aio.models.generate_content(model=m, contents=parts, config=GenerateContentConfig(
+  system_instruction=system, response_mime_type="application/json", response_json_schema=schema, temperature=0.2,
+  max_output_tokens=max(max_output_tokens, 8192), automatic_function_calling=disable))`. Пустой / обрезанный
+  (MAX_TOKENS) ответ — следующая модель. Модели `gemma-…`: без response_mime_type/схемы и без system_instruction (инструкция и схема — первой частью contents),
+  PDF заменяется пометкой «файл приложен», изображения передаются.
+* **OpenAI-совместимые** (`openai_compat.SPECS`): `response_format` json_schema (схема запроса, strict=false) или
+  json_object (OpenRouter); схема всегда и в системной инструкции; 400 из-за response_format / reasoning_effort —
+  один повтор с json_object без доп. параметров. `max_tokens` = min(запрошенное, потолок провайдера), текст
+  запроса вместе с системной инструкцией ужимается до `max_input_chars` (Groq 12 000, ≤ 1 изображения и −6000 символов
+  за изображение — бесплатные 8000 токенов/мин, фото = 2048 токенов; Cloudflare 24 000; OpenRouter 40 000; Mistral 60 000).
+  Сокращаются только части `base.DataText` (данные сотрудника в «<<< … >>>»): сначала тексты файлов (самые длинные —
+  до общего потолка), потом, если мало, блок факта; вырезается середина данных — всё до «<<<» и от последней «>>>» до
+  конца части остаётся (блок всегда закрыт). Задача и указания бота не сокращаются никогда. В блоке факта сначала
+  фактическое значение, имена файлов и результат, длинное «что сделано» — последним.
+  Изображения — data-URL только моделям из `settings.ai_vision_models` (≤ 5 шт., у Groq ≤ 1; ≤ 4 МБ); PDF и изображения для
+  остальных моделей — пометка «[… приложен, но его содержимое этой модели AI не передано (причина)…]».
+  Ответ: `choices[0].message.content` (без `<think>…</think>`); ошибка с кодом 200 (OpenRouter) — по коду из тела.
+
+| Провайдер | Ключ (env) | Модели по умолчанию | Адрес |
+|---|---|---|---|
+| gemini | `GEMINI_API_KEY` | gemini-3.8-flash, 3.7-flash, 3.6-flash, 3.5-flash, 3.5-flash-lite, 3.1-flash-lite, gemma-4-31b-it | google-genai |
+| groq | `GROQ_API_KEY` | openai/gpt-oss-120b, qwen/qwen3.8-27b, openai/gpt-oss-20b | https://api.groq.com/openai/v1 |
+| cloudflare | `CLOUDFLARE_API_TOKEN` + `CLOUDFLARE_ACCOUNT_ID` | @cf/google/gemma-4-26b-a4b-it, @cf/mistralai/mistral-small-3.1-24b-instruct, @cf/openai/gpt-oss-120b | https://api.cloudflare.com/client/v4/accounts/{id}/ai/v1 |
+| mistral | `MISTRAL_API_KEY` | mistral-medium-latest, mistral-small-latest | https://api.mistral.ai/v1 |
+| openrouter | `OPENROUTER_API_KEY` | google/gemma-4-31b-it:free, nvidia/nemotron-3-super-120b-a12b:free, openrouter/free | https://openrouter.ai/api/v1 |
+
+Настройки (`bot/config.py`): `ai_provider` / `AI_PROVIDER` = `auto` (по умолчанию) | `none`; прежнее `gemini` = `auto`.
+`ai_providers` / `AI_PROVIDERS` = `gemini,groq,cloudflare,mistral,openrouter` (регистр не важен, неизвестные имена
+пропускаются с предупреждением в журнале). `<провайдер>_models` / `<ПРОВАЙДЕР>_MODELS`, `ai_vision_models` /
+`AI_VISION_MODELS` — списки через запятую. Ключи — `repr=False`. Свойства: `ai_key_for(name)`, `ai_models_for(name)`,
+`active_ai_providers` (по порядку, с ключом и моделями), `ai_secrets`, `ai_enabled` = `ai_provider != "none"` и есть
+хотя бы один активный провайдер. GitHub Models (закрыт 30.07.2026), Cerebras, SambaNova, Together (нужна карта) —
+не используются.
+
 JSON-схемы: только `type, properties, required, items, enum, description, minimum, maximum`; для «может быть null»
 — `"type": ["number", "null"]`. Ответ всё равно валидировать в коде (типы, диапазоны).
 
@@ -373,7 +434,12 @@ def rules_score(plan_value: float | None, fact_value: float | None, late_days: f
     # штраф = min(late_days * settings.late_penalty_per_day, settings.late_penalty_max);
     # оценка = clamp(round(база - штраф), 0, max_score). Возвращает (оценка, объяснение по-русски).
 async def evaluate_submission(task: Task, submission: Submission,
-                              evidence: list[EvidenceItem] | None = None) -> Evaluation
+                              evidence: list[EvidenceItem] | None = None, *,
+                              time_budget: float | None = None) -> Evaluation
+    # time_budget — сколько секунд осталось на AI (после скачивания файлов) -> generate_json(time_budget=...).
+    # Блок «ФАКТ ОТ СОТРУДНИКА» (base.DataText): данные строго между «<<<» и «>>>» — фактическое значение,
+    # имена файлов, результат, «что сделано» (длинное — последним); после «>>>» — строки бота («факт / план»,
+    # «Приложено файлов»). Тексты файлов — тоже DataText в своих «<<< … >>>».
     # никогда не бросает. Промпт: роль — помощник руководителя, оценивает КОНЕЧНЫЙ РЕЗУЛЬТАТ, а не усилия;
     # 100 % = план выполнен полностью и в срок; > 100 % — только при измеримом перевыполнении/доп. ценности
     # (обычно ≤ 120 %); частичное выполнение — пропорционально; просрочка — штраф по правилу выше как ориентир;
@@ -397,7 +463,7 @@ async def collect_evidence(bot: Bot, attachments: Sequence[Attachment]) -> list[
     # пропускает файлы > ai_max_file_mb и > 20 МБ (лимит Bot API). PDF и изображения (jpeg/png/webp) — как байты;
     # .docx — текст python-docx (абзацы + таблицы); .xlsx — openpyxl (read_only, data_only, до 200 строк на лист);
     # .txt/.csv/.md/.json — decode utf-8/cp1251. Остальное — "skipped". Никогда не бросает.
-def evidence_to_parts(items: list[EvidenceItem]) -> list    # -> str и types.Part.from_bytes(...) для Gemini
+def evidence_to_parts(items: list[EvidenceItem]) -> list    # -> str и types.Part.from_bytes(...) (провайдеры — §4.1)
 ```
 
 ## 5. Утилиты и UI [A4]
@@ -670,7 +736,8 @@ async def notify_user_decision(bot, user: User, approved: bool) -> bool    # п�
   `record_evaluation` → commit → `notify_submission` → сотруднику: «✅ Результат отправлен руководителю на проверку»
   (оценку AI сотруднику не показывать до решения руководителя).
 * Если AI упал/долго — всё равно `rules_score` (evaluate_submission сам не бросает). Бюджет всей оценки —
-  `ai_evaluate.evaluation_budget_sec()` = `ai_timeout_sec × 2 + 30` с.
+  `ai_evaluate.evaluation_budget_sec()` = `ai_timeout_sec × 2 + 30` с; AI получает `time_budget` = остаток после
+  скачивания файлов минус 5 с, чтобы перебор моделей закончился сам, а не был прерван общим сроком.
 * Бота остановили посреди оценки (деплой, сбой) — сдача сохранена без оценки, руководитель не уведомлён:
   её находит `jobs.recover_stalled_evaluations` (§8) и доводит до конца.
 
@@ -932,15 +999,18 @@ def tick_schedule_summary(interval_sec: float | None = None) -> str   # расп
 
 * `render.yaml` (Blueprint): один `type: web`, `runtime: docker`, `plan: free`, `region: frankfurt`,
   `healthCheckPath: /health`, `autoDeploy: true`; `envVars`: `RUN_MODE=webhook`, `TIMEZONE=Asia/Tashkent`,
-  `AI_PROVIDER=gemini` и `sync: false` (Render спрашивает при создании) — `BOT_TOKEN`, `ADMIN_IDS`,
-  `GEMINI_API_KEY`, `DATABASE_URL`, `DATABASE_PASSWORD`. Тест `tests/test_make_render_env.py` сверяет этот
-  список со строками, которые пишет `deploy/make_render_env.py`.
+  `AI_PROVIDER=auto` и `sync: false` (Render спрашивает при создании) — `BOT_TOKEN`, `ADMIN_IDS`,
+  `GEMINI_API_KEY`, `DATABASE_URL`, `DATABASE_PASSWORD` и необязательные ключи запасного AI `GROQ_API_KEY`,
+  `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_API_TOKEN`, `MISTRAL_API_KEY`, `OPENROUTER_API_KEY` (поля можно оставить
+  пустыми). Тест `tests/test_make_render_env.py` сверяет этот список со строками, которые пишет
+  `deploy/make_render_env.py`.
 * `deploy/make_render_env.py [--env .env] [--out deploy/render.env] [--database-url СТРОКА|-]
   [--database-password ПАРОЛЬ|-]` — только стандартная библиотека (+ python-dotenv, если есть). Из `.env`
-  берёт `BOT_TOKEN` (проверка формата), `ADMIN_IDS` (числа через запятую), `GEMINI_API_KEY`; пишет ровно
+  берёт `BOT_TOKEN` (проверка формата), `ADMIN_IDS` (числа через запятую), `GEMINI_API_KEY`; пишет
   6 строк `KEY=значение`: эти три, `RUN_MODE=webhook`, `DATABASE_URL`, `DATABASE_PASSWORD` (значения из
   параметров, `-` — скрытый ввод; иначе — значения из прежнего `deploy/render.env`; иначе заглушки
-  `ВСТАВЬТЕ_СЮДА_…`, которые владелец заменяет в Блокноте). На экран — только названия настроек и
+  `ВСТАВЬТЕ_СЮДА_…`, которые владелец заменяет в Блокноте), а после них — заданные в `.env` ключи запасного AI
+  (`OPTIONAL_AI_KEYS`; пустые не пишутся). На экран — только названия настроек и
   пояснения, **никогда значения**; ошибка — код 2, файл не создаётся; в сам `.env` не пишет.
   `deploy/render.env` — в `.gitignore`, папка `deploy` — в `.dockerignore`.
 * Владелец (`docs/DEPLOY_RENDER.md`): GitHub (вход через Google; один раз «Authorize» в окне Git Credential

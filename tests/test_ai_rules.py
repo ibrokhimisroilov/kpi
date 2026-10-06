@@ -17,7 +17,7 @@ from openpyxl import Workbook
 
 from bot.ai import evaluate as evaluate_module
 from bot.ai import formulate as formulate_module
-from bot.ai import provider
+from bot.ai import gemini as gemini_module
 from bot.ai.evaluate import Evaluation, evaluate_submission, rules_score
 from bot.ai.evidence import EvidenceItem, collect_evidence, evidence_to_parts
 from bot.ai.formulate import ResultSuggestion, rules_suggestion, suggest_expected_result
@@ -243,7 +243,7 @@ async def test_suggest_with_empty_ai_answer_falls_back(ai_on, monkeypatch) -> No
     assert (await suggest_expected_result("Анализ", "сдать 5 актов")).source == "rules"
 
 
-# --- provider.generate_json: перебор моделей на фейковом клиенте -------------------------------------
+# --- provider.generate_json: перебор моделей Gemini на фейковом клиенте -------------------------------------
 
 
 class FakeModels:
@@ -267,7 +267,7 @@ class FakeModels:
 def fake_client(ai_on, monkeypatch) -> Callable[[dict[str, Any]], FakeModels]:
     def _install(script: dict[str, Any]) -> FakeModels:
         models = FakeModels(script)
-        monkeypatch.setattr(provider, "_client", SimpleNamespace(aio=SimpleNamespace(models=models)))
+        monkeypatch.setattr(gemini_module, "_client", SimpleNamespace(aio=SimpleNamespace(models=models)))
         return models
 
     return _install

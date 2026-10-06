@@ -45,7 +45,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from bot import notify
 from bot.ai.provider import close_client
-from bot.config import Settings, get_settings
+from bot.config import AI_KEY_ENV, AI_PROVIDER_NAMES, Settings, get_settings
 from bot.db.base import (
     init_db,
     is_password_placeholder,
@@ -317,10 +317,7 @@ def _log_startup_hints(settings: Settings) -> None:
             "ADMIN_IDS не задан: никто не станет руководителем автоматически и заявки некому подтвердить. "
             "Впишите свой Telegram ID в .env (ADMIN_IDS=...)."
         )
-    if settings.ai_enabled:
-        log.info("AI: Google Gemini (бесплатный тариф), модели по порядку: %s", ", ".join(settings.gemini_models))
-    else:
-        log.info("AI выключен (нет GEMINI_API_KEY или AI_PROVIDER=none) — оценки и подсказки по правилам")
+    _log_ai_chain(settings)
     if settings.run_mode == "webhook":
         if settings.database_url.startswith("sqlite"):
             log.warning(
@@ -328,6 +325,45 @@ def _log_startup_hints(settings: Settings) -> None:
                 "каждом перезапуске — задачи и оценки пропадут. Укажите в DATABASE_URL базу PostgreSQL "
                 "(например, бесплатный Supabase)."
             )
+
+
+def _log_ai_chain(settings: Settings) -> None:
+    """Какие бесплатные AI-провайдеры будут спрашиваться и в каком порядке (только названия, без ключей)."""
+    unknown = [name for name in settings.ai_providers if name not in AI_PROVIDER_NAMES]
+    if unknown:
+        log.warning(
+            "AI_PROVIDERS: неизвестные провайдеры %s пропущены (известны: %s)",
+            ", ".join(unknown),
+            ", ".join(AI_PROVIDER_NAMES),
+        )
+    if bool(settings.cloudflare_api_token.strip()) != bool(settings.cloudflare_account_id.strip()):
+        log.warning("Cloudflare не используется: нужны оба значения — CLOUDFLARE_API_TOKEN и CLOUDFLARE_ACCOUNT_ID")
+    if settings.ai_provider == "none":
+        log.info("AI выключен (AI_PROVIDER=none) — оценки и подсказки по правилам")
+        return
+    active = settings.active_ai_providers
+    if not active:
+        log.info(
+            "AI выключен: не задан ни один ключ (%s) — оценки и подсказки по правилам",
+            ", ".join(AI_KEY_ENV.values()),
+        )
+        return
+    chain = " → ".join(f"{name} ({', '.join(settings.ai_models_for(name))})" for name in active)
+    log.info("AI: %s → расчёт по правилам", chain)
+    unused = [
+        name for name in AI_PROVIDER_NAMES
+        if name not in active and settings.ai_key_for(name) and name not in settings.ai_providers
+    ]
+    if unused:
+        log.warning("AI: ключ задан, но провайдера нет в AI_PROVIDERS — не используется: %s", ", ".join(unused))
+    if len(active) == 1:
+        spare = AI_KEY_ENV["groq"] if active[0] != "groq" else AI_KEY_ENV["cloudflare"]
+        log.info(
+            "AI: запасного провайдера нет — если «%s» станет недоступен, бот перейдёт на расчёт по правилам. "
+            "Бесплатный запасной AI без карты: %s (docs/DEPLOY_RENDER.md, «Запасной бесплатный AI»)",
+            active[0],
+            spare,
+        )
 
 
 # --- Dispatcher и обработчик ошибок ------------------------------------------------------------

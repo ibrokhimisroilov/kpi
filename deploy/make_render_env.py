@@ -15,6 +15,8 @@ deploy/render.env ровно те строки, которые руководи�
     RUN_MODE=webhook
     DATABASE_URL=...        строка Supabase «Session pooler» (или заглушка — её заменят)
     DATABASE_PASSWORD=...   пароль базы Supabase (или заглушка — его заменят)
+    GROQ_API_KEY=...        ключи запасных бесплатных AI-провайдеров — только те, что заданы в .env
+    CLOUDFLARE_ACCOUNT_ID=..., CLOUDFLARE_API_TOKEN=..., MISTRAL_API_KEY=..., OPENROUTER_API_KEY=...
 
 Значения секретов на экран НЕ выводятся — только названия настроек. Читается только файл .env
 (переменные окружения не учитываются). Сам .env не меняется. deploy/render.env внесён в .gitignore
@@ -47,8 +49,19 @@ SUPABASE_PASSWORD_MARK = "[YOUR-PASSWORD]"
 
 # Порядок строк в deploy/render.env.
 OUTPUT_KEYS = ("BOT_TOKEN", "ADMIN_IDS", "GEMINI_API_KEY", "RUN_MODE", "DATABASE_URL", "DATABASE_PASSWORD")
+# Ключи запасных бесплатных AI-провайдеров (bot/config.py): необязательные — в файл попадают (в конец)
+# только заданные в .env. В render.yaml они тоже есть (sync: false), их поля можно оставить пустыми.
+OPTIONAL_AI_KEYS = (
+    "GROQ_API_KEY",
+    "CLOUDFLARE_ACCOUNT_ID",
+    "CLOUDFLARE_API_TOKEN",
+    "MISTRAL_API_KEY",
+    "OPENROUTER_API_KEY",
+)
 # Значения, которые уже заданы в render.yaml: переносить их нужно, только если в .env они другие.
-RENDER_YAML_VALUES = {"RUN_MODE": "webhook", "TIMEZONE": "Asia/Tashkent", "AI_PROVIDER": "gemini"}
+RENDER_YAML_VALUES = {"RUN_MODE": "webhook", "TIMEZONE": "Asia/Tashkent", "AI_PROVIDER": "auto"}
+# Значения из .env, равносильные значениям render.yaml (AI_PROVIDER=gemini — прежнее название «auto»).
+_SAME_AS_RENDER_YAML = {"AI_PROVIDER": frozenset({"auto", "gemini"})}
 # Настройки .env, которые на Render не нужны или задаются иначе (о них не напоминаем).
 _NOT_FOR_RENDER = frozenset(
     {"DATABASE_URL", "DATABASE_PASSWORD", "RUN_MODE", "PUBLIC_URL", "PORT", "RENDER_EXTERNAL_URL", "TAKEOVER_WEBHOOK"}
@@ -153,9 +166,17 @@ def _check_gemini(values: dict[str, str], report: Report) -> str:
     key = values.get("GEMINI_API_KEY", "").strip()
     if key:
         report.status["GEMINI_API_KEY"] = "из .env"
+    elif _optional_ai_keys(values):
+        report.status["GEMINI_API_KEY"] = "пусто — AI на Render будет работать через запасных провайдеров"
     else:
         report.status["GEMINI_API_KEY"] = "пусто — бот на Render будет работать без AI (по правилам)"
     return key
+
+
+def _optional_ai_keys(values: dict[str, str]) -> dict[str, str]:
+    """Заданные в .env ключи запасных AI-провайдеров (в порядке OPTIONAL_AI_KEYS)."""
+    found = {key: values.get(key, "").strip() for key in OPTIONAL_AI_KEYS}
+    return {key: value for key, value in found.items() if value}
 
 
 def _url_parts(url: str) -> tuple[str, str, str]:
@@ -216,9 +237,10 @@ def _other_settings(values: dict[str, str]) -> list[str]:
     """Названия прочих настроек из .env, которые не попадут на Render (их можно добавить в Environment)."""
     names = []
     for key, value in values.items():
-        if not value or key in OUTPUT_KEYS or key in _NOT_FOR_RENDER:
+        if not value or key in OUTPUT_KEYS or key in OPTIONAL_AI_KEYS or key in _NOT_FOR_RENDER:
             continue
-        if key in RENDER_YAML_VALUES and value.strip().lower() == RENDER_YAML_VALUES[key].lower():
+        same = _SAME_AS_RENDER_YAML.get(key, frozenset({RENDER_YAML_VALUES.get(key, "").lower()}))
+        if key in RENDER_YAML_VALUES and value.strip().lower() in same:
             continue
         names.append(key)
     return sorted(names)
@@ -282,7 +304,11 @@ def build_lines(
         "DATABASE_URL": url,
         "DATABASE_PASSWORD": password,
     }
-    return [f"{key}={lines[key]}" for key in OUTPUT_KEYS]
+    optional = _optional_ai_keys(values)
+    for key, value in optional.items():
+        _check_single_line(key, value)
+        report.status[key] = "из .env"
+    return [f"{key}={lines[key]}" for key in OUTPUT_KEYS] + [f"{key}={value}" for key, value in optional.items()]
 
 
 def write_secret_file(path: Path, lines: Sequence[str]) -> None:
@@ -324,7 +350,9 @@ def build_parser() -> argparse.ArgumentParser:
             "  BOT_TOKEN, ADMIN_IDS, GEMINI_API_KEY — из .env;\n"
             "  RUN_MODE=webhook;\n"
             "  DATABASE_URL, DATABASE_PASSWORD — из параметров ниже или заглушки, которые\n"
-            "  руководитель заменит сам (docs/DEPLOY_RENDER.md, шаг 2).\n"
+            "  руководитель заменит сам (docs/DEPLOY_RENDER.md, шаг 2);\n"
+            "  GROQ_API_KEY, CLOUDFLARE_ACCOUNT_ID, CLOUDFLARE_API_TOKEN, MISTRAL_API_KEY,\n"
+            "  OPENROUTER_API_KEY — запасной бесплатный AI, из .env, если заданы.\n"
             "Значения секретов на экран не выводятся. Файл .env не меняется."
         ),
         epilog=(
@@ -364,8 +392,9 @@ def _ask(value: str | None, prompt: str) -> str | None:
 
 def _print_report(out: Path, report: Report, other: list[str], covered: bool | None) -> None:
     print(f"Готово: {out}")
-    width = max(len(key) for key in OUTPUT_KEYS)
-    for key in OUTPUT_KEYS:
+    keys = [*OUTPUT_KEYS, *(key for key in OPTIONAL_AI_KEYS if key in report.status)]
+    width = max(len(key) for key in keys)
+    for key in keys:
         print(f"  {key.ljust(width)}  — {report.status.get(key, '')}")
     print("Значения секретов на экран не выводятся. Файл никому не пересылайте.")
     if covered is False:

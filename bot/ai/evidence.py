@@ -1,8 +1,13 @@
 """Извлечение содержимого файлов-подтверждений для AI-оценки.
 
-PDF и изображения передаются Gemini как байты, Word/Excel/текст — как извлечённый
+PDF и изображения передаются AI как байты (types.Part), Word/Excel/текст — как извлечённый
 текст. Всё остальное (видео, архивы, старые .doc/.xls) помечается «skipped» с причиной,
 чтобы AI знал, что файл был, но прочитать его не удалось.
+
+Gemini читает PDF и изображения сам. Запасным провайдерам (bot.ai.openai_compat) изображения уходят
+data-URL только моделям, которые их видят; PDF и изображения для остальных моделей заменяются
+пометкой «файл приложен, содержимое не передано». Текст файла — base.DataText: провайдер с маленьким
+лимитом может сократить его середину, блок «<<< … >>>» при этом остаётся закрытым.
 """
 
 from __future__ import annotations
@@ -23,6 +28,7 @@ from docx.table import Table
 from google.genai import types
 from openpyxl import load_workbook
 
+from bot.ai.base import TRIM_FILES, DataText
 from bot.config import get_settings
 from bot.db.models import Attachment, AttachmentKind
 
@@ -115,12 +121,14 @@ async def collect_evidence(bot: Bot, attachments: Sequence[Attachment]) -> list[
 
 
 def evidence_to_parts(items: list[EvidenceItem]) -> list:
-    """Превратить вложения в части запроса Gemini: строки и types.Part.from_bytes(...)."""
+    """Превратить вложения в части запроса AI: строки и types.Part.from_bytes(...) (bot.ai.provider)."""
     parts: list = []
     for number, item in enumerate(items, 1):
         label = f"Файл {number}: {defuse_markers(item.name)} ({_format_label(item)})"
         if item.kind == "text" and item.text:
-            parts.append(f"{label}. Текст файла (данные от сотрудника):\n<<<\n{defuse_markers(item.text)}\n>>>")
+            # Запасной провайдер с маленьким лимитом может сократить середину текста (base.DataText).
+            text = f"{label}. Текст файла (данные от сотрудника):\n<<<\n{defuse_markers(item.text)}\n>>>"
+            parts.append(DataText(text, TRIM_FILES))
         elif item.kind in _BINARY_KINDS and item.data:
             mime_type = item.mime_type or "application/octet-stream"
             parts.append(f"{label}. Содержимое файла — следующей частью.")

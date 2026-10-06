@@ -40,6 +40,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot import notify
 from bot.ai import formulate
+from bot.ai.provider import chain_budget_sec
 from bot.config import get_settings
 from bot.db.models import Priority, Role, User
 from bot.filters import IsManager, TextInput
@@ -809,11 +810,10 @@ async def _run_suggestion(
 
 
 def _ai_busy_stale_sec() -> float:
-    """Через сколько секунд ai_busy точно брошен: каждая модель Gemini — не дольше ai_timeout_sec + 5 с
-    (bot.ai.provider.generate_json), модели пробуются по очереди; плюс запас."""
+    """Через сколько секунд ai_busy точно брошен: перебор моделей и провайдеров (с ожиданием свободного
+    места у провайдера) укладывается в chain_budget_sec(); плюс с запасом ещё одна попытка и _AI_BUSY_MARGIN_SEC."""
     settings = get_settings()
-    models = max(1, len([model for model in settings.gemini_models if model.strip()]))
-    return (settings.ai_timeout_sec + 5) * models + _AI_BUSY_MARGIN_SEC
+    return chain_budget_sec(settings) + settings.ai_timeout_sec + 5 + _AI_BUSY_MARGIN_SEC
 
 
 def _ai_busy_stale(data: dict[str, Any]) -> bool:

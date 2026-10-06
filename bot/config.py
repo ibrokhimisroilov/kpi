@@ -20,6 +20,18 @@ def _split_csv(value: object) -> object:
     return value
 
 
+# Бесплатные AI-провайдеры, которые знает бот (bot.ai.provider). Порядок по умолчанию — AI_PROVIDERS.
+AI_PROVIDER_NAMES = ("gemini", "groq", "cloudflare", "mistral", "openrouter")
+# Переменные с ключами (для подсказок в журнале и документации).
+AI_KEY_ENV = {
+    "gemini": "GEMINI_API_KEY",
+    "groq": "GROQ_API_KEY",
+    "cloudflare": "CLOUDFLARE_API_TOKEN + CLOUDFLARE_ACCOUNT_ID",
+    "mistral": "MISTRAL_API_KEY",
+    "openrouter": "OPENROUTER_API_KEY",
+}
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
@@ -38,16 +50,55 @@ class Settings(BaseSettings):
     database_password: str = Field(default="", repr=False)
     timezone: str = "Asia/Tashkent"
 
-    # --- AI (бесплатный тариф Google Gemini) ---
-    # "gemini" — подсказки и оценки через Gemini; "none" — только правила (без AI).
-    ai_provider: Literal["gemini", "none"] = "gemini"
-    gemini_api_key: str = ""
-    # Модели пробуются по порядку: если у первой исчерпан бесплатный лимит, берётся следующая.
+    # --- AI (только бесплатные тарифы; цепочка провайдеров — bot.ai.provider) ---
+    # "auto" — AI включён: провайдеры из AI_PROVIDERS по порядку, у которых задан ключ;
+    # "none" — только правила (без AI). "gemini" — прежнее значение, работает как "auto".
+    ai_provider: Literal["auto", "gemini", "none"] = "auto"
+    # Порядок провайдеров. Провайдер без ключа пропускается; не ответил никто — расчёт по правилам.
+    ai_providers: Annotated[list[str], NoDecode] = list(AI_PROVIDER_NAMES)
+    # Модели каждого провайдера пробуются по порядку: у первой исчерпан бесплатный лимит — берётся следующая.
+    gemini_api_key: str = Field(default="", repr=False)
     gemini_models: Annotated[list[str], NoDecode] = [
         "gemini-3.8-flash",
+        "gemini-3.7-flash",
         "gemini-3.6-flash",
         "gemini-3.5-flash",
         "gemini-3.5-flash-lite",
+        "gemini-3.1-flash-lite",
+        "gemma-4-31b-it",
+    ]
+    # Groq (console.groq.com): бесплатно, без карты; данные не используются для обучения.
+    groq_api_key: str = Field(default="", repr=False)
+    groq_models: Annotated[list[str], NoDecode] = ["openai/gpt-oss-120b", "qwen/qwen3.8-27b", "openai/gpt-oss-20b"]
+    # Cloudflare Workers AI (dash.cloudflare.com): бесплатно 10 000 «нейронов» в сутки, без карты.
+    cloudflare_account_id: str = Field(default="", repr=False)
+    cloudflare_api_token: str = Field(default="", repr=False)
+    cloudflare_models: Annotated[list[str], NoDecode] = [
+        "@cf/google/gemma-4-26b-a4b-it",
+        "@cf/mistralai/mistral-small-3.1-24b-instruct",
+        "@cf/openai/gpt-oss-120b",
+    ]
+    # Mistral (console.mistral.ai, бесплатный режим Free/Experiment).
+    mistral_api_key: str = Field(default="", repr=False)
+    mistral_models: Annotated[list[str], NoDecode] = ["mistral-medium-latest", "mistral-small-latest"]
+    # OpenRouter (openrouter.ai): бесплатные модели «:free», до 50 запросов в сутки.
+    openrouter_api_key: str = Field(default="", repr=False)
+    openrouter_models: Annotated[list[str], NoDecode] = [
+        "google/gemma-4-31b-it:free",
+        "nvidia/nemotron-3-super-120b-a12b:free",
+        "openrouter/free",
+    ]
+    # Модели Groq / Cloudflare / Mistral / OpenRouter, которым можно передавать изображения
+    # (остальным — только текст и пометка «файл приложен»). Модели Gemini видят изображения все.
+    ai_vision_models: Annotated[list[str], NoDecode] = [
+        "qwen/qwen3.8-27b",
+        "@cf/google/gemma-4-26b-a4b-it",
+        "@cf/mistralai/mistral-small-3.1-24b-instruct",
+        "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "mistral-medium-latest",
+        "mistral-large-latest",
+        "google/gemma-4-31b-it:free",
+        "google/gemma-4-26b-a4b-it:free",
     ]
     ai_timeout_sec: int = 60
     # Передавать ли AI содержимое приложенных файлов (PDF, фото, Word, Excel, текст).
@@ -95,18 +146,87 @@ class Settings(BaseSettings):
 
     log_level: str = "INFO"
 
-    @field_validator("admin_ids", "gemini_models", "reminder_days_before", mode="before")
+    @field_validator(
+        "admin_ids",
+        "gemini_models",
+        "groq_models",
+        "cloudflare_models",
+        "mistral_models",
+        "openrouter_models",
+        "ai_vision_models",
+        "reminder_days_before",
+        mode="before",
+    )
     @classmethod
     def _parse_csv(cls, value: object) -> object:
         return _split_csv(value)
+
+    @field_validator("ai_providers", mode="before")
+    @classmethod
+    def _parse_providers(cls, value: object) -> object:
+        """«Gemini, groq» -> ["gemini", "groq"] (регистр и пробелы не важны)."""
+        items = _split_csv(value)
+        return [item.lower() for item in items if isinstance(item, str)] if isinstance(items, list) else items
+
+    @field_validator("ai_provider", mode="before")
+    @classmethod
+    def _parse_ai_provider(cls, value: object) -> object:
+        return value.strip().lower() if isinstance(value, str) else value
 
     @property
     def tz(self) -> ZoneInfo:
         return ZoneInfo(self.timezone)
 
+    # --- AI: какие провайдеры работают ---
+
+    def ai_key_for(self, name: str) -> str:
+        """Ключ провайдера ("" — не задан). У Cloudflare нужен ещё CLOUDFLARE_ACCOUNT_ID."""
+        if name == "cloudflare":
+            return self.cloudflare_api_token.strip() if self.cloudflare_account_id.strip() else ""
+        keys = {
+            "gemini": self.gemini_api_key,
+            "groq": self.groq_api_key,
+            "mistral": self.mistral_api_key,
+            "openrouter": self.openrouter_api_key,
+        }
+        return keys.get(name, "").strip()
+
+    def ai_models_for(self, name: str) -> list[str]:
+        models = {
+            "gemini": self.gemini_models,
+            "groq": self.groq_models,
+            "cloudflare": self.cloudflare_models,
+            "mistral": self.mistral_models,
+            "openrouter": self.openrouter_models,
+        }.get(name, [])
+        return [model.strip() for model in models if model.strip()]
+
+    @property
+    def active_ai_providers(self) -> list[str]:
+        """Провайдеры из AI_PROVIDERS (по порядку, без повторов), у которых задан ключ и есть модели."""
+        result: list[str] = []
+        for name in self.ai_providers:
+            if name in AI_PROVIDER_NAMES and name not in result and self.ai_key_for(name) and self.ai_models_for(name):
+                result.append(name)
+        return result
+
+    @property
+    def ai_secrets(self) -> list[str]:
+        """Все ключи AI (и номер аккаунта Cloudflare) — чтобы вырезать их из текстов для журнала."""
+        values = (
+            self.gemini_api_key,
+            self.groq_api_key,
+            self.cloudflare_api_token,
+            self.cloudflare_account_id,
+            self.mistral_api_key,
+            self.openrouter_api_key,
+        )
+        return [value.strip() for value in values if len(value.strip()) >= 6]
+
     @property
     def ai_enabled(self) -> bool:
-        return self.ai_provider == "gemini" and bool(self.gemini_api_key)
+        """AI включён: AI_PROVIDER не none и хотя бы у одного провайдера задан ключ."""
+        return self.ai_provider != "none" and bool(self.active_ai_providers)
 
     @property
     def base_url(self) -> str:

@@ -26,6 +26,11 @@ E2E_ENV: dict[str, str] = {
     "ADMIN_IDS": "1001",
     "AI_PROVIDER": "none",
     "GEMINI_API_KEY": "",
+    "GROQ_API_KEY": "",
+    "CLOUDFLARE_API_TOKEN": "",
+    "CLOUDFLARE_ACCOUNT_ID": "",
+    "MISTRAL_API_KEY": "",
+    "OPENROUTER_API_KEY": "",
     "TIMEZONE": "Asia/Tashkent",
     # Подстраховка: бот в тестах не должен трогать data/bot.db, даже если кто-то создаст engine сам.
     "DATABASE_URL": "sqlite+aiosqlite:///:memory:",

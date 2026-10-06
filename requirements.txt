@@ -5,6 +5,9 @@ aiosqlite>=0.20
 asyncpg>=0.30
 APScheduler>=3.10,<4
 google-genai>=1.30
+# Запасные бесплатные AI-провайдеры (Groq, Cloudflare, Mistral, OpenRouter) — OpenAI-совместимый HTTP API.
+# httpx и так ставится вместе с google-genai; указан явно, потому что бот вызывает его напрямую.
+httpx>=0.27
 pydantic>=2.7
 pydantic-settings>=2.3
 openpyxl>=3.1
