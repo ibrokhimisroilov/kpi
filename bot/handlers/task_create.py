@@ -39,11 +39,12 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot import notify
-from bot.ai import formulate
-from bot.ai.provider import chain_budget_sec
+from bot.ai import formulate, progress
+from bot.ai.provider import attempt_timeout_sec, chain_budget_sec
 from bot.config import get_settings
 from bot.db.models import Priority, Role, User
 from bot.filters import IsManager, TextInput
+from bot.fsm_storage import refresh_state
 from bot.handlers import common
 from bot.services import tasks, users
 from bot.services.errors import DomainError
@@ -110,6 +111,7 @@ NO_EMPLOYEES_TEXT = (
     "Сначала подтвердите сотрудников (👥 Сотрудники) — после этого им можно ставить задачи."
 )
 STALE_BUTTON = "Эта кнопка уже неактуальна — продолжите в последнем сообщении."
+DRAFT_GONE_TEXT = "Черновик задачи уже закрыт. Воспользуйтесь меню 👇"
 AI_BUSY_TEXT = "⏳ Подождите, формулирую вариант…"
 AI_LOST_NOTICE = (
     "⚠️ Вариант от AI не пришёл (бот перезапускался) — ниже вариант по вашим словам. "
@@ -207,12 +209,14 @@ async def on_result_raw(message: Message, state: FSMContext, session: AsyncSessi
         await _show_step(message, state, session, "result",
                          notice=f"⚠️ Слишком длинно ({len(raw)} симв.). Опишите результат короче — до {RESULT_MAX} символов.")
         return
-    await state.update_data(raw_result=raw)
-    await session.commit()  # перед долгим запросом к AI не держим транзакцию
-    await _strip_prompt(message, state)
-    data = await state.get_data()
+    # «⏳» — сразу, до обращений к базе и к AI: руководитель видит, что бот уже работает.
     wait = await message.answer("⏳ Формулирую измеримый результат…")
-    await _run_suggestion(state, wait, title=data.get("title") or "", raw_for_ai=raw, raw=raw, retry=False)
+    await session.commit()  # перед долгим запросом к AI не держим транзакцию
+    data = await state.get_data()
+    await _strip_prompt(message, state, data)
+    await _run_suggestion(
+        state, wait, title=data.get("title") or "", raw_for_ai=raw, raw=raw, retry=False, saved={"raw_result": raw}
+    )
 
 
 @router.callback_query(CreateTaskSG.result_choice, PickCB.filter(F.field == "ai"))
@@ -226,6 +230,11 @@ async def on_ai_choice(
     if not await _guard_cb(callback, state, user):
         return
     data = await state.get_data()
+    if data.get("ai_busy"):
+        refreshed = await _reread_busy(callback, state, CreateTaskSG.result_choice)
+        if refreshed is None:
+            return
+        data = refreshed
     if data.get("ai_busy"):
         if not _ai_busy_stale(data):
             await callback.answer(AI_BUSY_TEXT)
@@ -242,15 +251,17 @@ async def on_ai_choice(
 
     if action == "retry":
         await callback.answer()
-        await session.commit()
+        # «⏳» — до обращений к базе и к AI.
         msg = await common.edit_or_answer(
             callback, f"{_header('result', bool(data.get('editing')))}\n\n⏳ Формулирую другой вариант…"
         )
+        await session.commit()
         if msg is None:
             return
         previous = suggestion.get("expected_result") or ""
         raw_for_ai = f"{raw}\n\nПредыдущий вариант: {previous}. Предложи другую формулировку."
-        await _run_suggestion(state, msg, title=title, raw_for_ai=raw_for_ai, raw=raw, retry=True)
+        # Диалог уже в result_choice (фильтр хендлера) — состояние не переписываем.
+        await _run_suggestion(state, msg, title=title, raw_for_ai=raw_for_ai, raw=raw, retry=True, set_state=False)
         return
 
     if action == "manual":
@@ -464,8 +475,13 @@ async def on_confirm(
 
     data = await state.get_data()
     if data.get("creating"):  # защита от двойного нажатия «Создать»
-        await callback.answer("⏳ Задача уже создаётся…")
-        return
+        refreshed = await _reread_busy(callback, state, CreateTaskSG.confirm)
+        if refreshed is None:
+            return
+        data = refreshed
+        if data.get("creating"):
+            await callback.answer("⏳ Задача уже создаётся…")
+            return
     deadline = common.dt_from_state(data.get("deadline"))
     if deadline is None or deadline <= utcnow():
         await _reask_deadline(callback, state, session)
@@ -689,9 +705,12 @@ async def _show(
         await state.update_data(prompt_id=msg.message_id)
 
 
-async def _strip_prompt(message: Message, state: FSMContext) -> None:
-    """Убрать кнопки у последнего вопроса диалога (prompt_id), если он есть."""
-    prompt_id = (await state.get_data()).get("prompt_id")
+async def _strip_prompt(message: Message, state: FSMContext, data: dict[str, Any] | None = None) -> None:
+    """Убрать кнопки у последнего вопроса диалога (prompt_id), если он есть. data — уже прочитанные
+    данные диалога (чтобы не читать хранилище ещё раз)."""
+    if data is None:
+        data = await state.get_data()
+    prompt_id = data.get("prompt_id")
     if not isinstance(prompt_id, int) or message.bot is None:
         return
     try:
@@ -735,6 +754,14 @@ async def _reshow(message: Message, state: FSMContext, session: AsyncSession, hi
     """Повторить вопрос текущего шага новым сообщением (кнопки могли уехать вверх)."""
     current = await state.get_state()
     data = await state.get_data()
+    if current == CreateTaskSG.result_choice.state and data.get("ai_busy"):
+        # Перед «подождите» — сверить диалог с базой (см. _reread_busy).
+        await refresh_state(state)
+        current = await state.get_state()
+        data = await state.get_data()
+        if current is None or current not in CreateTaskSG:
+            await message.answer(DRAFT_GONE_TEXT)
+            return
     step = next((name for name, st in STEP_STATES.items() if st.state == current), None)
     if step is not None:
         await _show_step(message, state, session, step, notice=hint)
@@ -760,22 +787,35 @@ async def _reshow(message: Message, state: FSMContext, session: AsyncSession, hi
 
 
 async def _run_suggestion(
-    state: FSMContext, msg: Message, *, title: str, raw_for_ai: str, raw: str, retry: bool
+    state: FSMContext,
+    msg: Message,
+    *,
+    title: str,
+    raw_for_ai: str,
+    raw: str,
+    retry: bool,
+    set_state: bool = True,
+    saved: dict[str, Any] | None = None,
 ) -> None:
-    """Запросить формулировку и показать её в ``msg`` с ai_suggestion_kb.
+    """Запросить формулировку и показать её в ``msg`` (сообщение «⏳ …») с ai_suggestion_kb.
 
-    Пока идёт запрос, ``ai_busy`` блокирует кнопки выбора. Если за это время диалог отменили
-    или начали заново, результат молча отбрасывается. Бот останавливается посреди запроса
+    Пока идёт запрос, ``ai_busy`` блокирует кнопки выбора, а в чате — «печатает…». Если за это время
+    диалог отменили или начали заново, результат молча отбрасывается. Бот останавливается посреди запроса
     (обновление на хостинге) — вместо ответа AI сохраняется вариант по правилам (его покажет
     следующее сообщение руководителя); жёсткую остановку покрывает ai_busy_since (_ai_busy_stale).
+
+    ``saved`` — значения диалога, которые записываются вместе с ai_busy (одной операцией с хранилищем);
+    ``set_state=False`` — диалог уже в result_choice.
     """
     token = msg.message_id
-    await state.set_state(CreateTaskSG.result_choice)
+    if set_state:
+        await state.set_state(CreateTaskSG.result_choice)
     await state.update_data(
-        ai_busy=True, ai_busy_since=common.dt_to_state(utcnow()), prompt_id=token, suggestion=None
+        **(saved or {}), ai_busy=True, ai_busy_since=common.dt_to_state(utcnow()), prompt_id=token, suggestion=None
     )
     try:
-        suggestion = await formulate.suggest_expected_result(title, raw_for_ai, deadline_text=None)
+        async with progress.typing(msg.bot, msg.chat.id):
+            suggestion = await formulate.suggest_expected_result(title, raw_for_ai, deadline_text=None)
     except asyncio.CancelledError:
         try:
             await _settle_cancelled(state, token, title, raw)
@@ -800,20 +840,27 @@ async def _run_suggestion(
         await _safe_delete(msg)  # диалог отменён или начат заново
         return
 
-    await state.update_data(suggestion=_suggestion_dict(suggestion))
-    data = await state.get_data()
+    # Сначала показать вариант, потом одной записью сохранить его и снять ai_busy (и при сбое показа).
+    saved_suggestion = _suggestion_dict(suggestion)
     shown = msg
     try:
-        shown = await _edit_message(msg, _suggestion_text(data, notice=notice), _ai_kb())
+        shown = await _edit_message(
+            msg, _suggestion_text({**data, "suggestion": saved_suggestion}, notice=notice), _ai_kb()
+        )
     finally:
-        await state.update_data(ai_busy=False, ai_busy_since=None, prompt_id=shown.message_id)
+        await state.update_data(
+            suggestion=saved_suggestion, ai_busy=False, ai_busy_since=None, prompt_id=shown.message_id
+        )
 
 
 def _ai_busy_stale_sec() -> float:
-    """Через сколько секунд ai_busy точно брошен: перебор моделей и провайдеров (с ожиданием свободного
-    места у провайдера) укладывается в chain_budget_sec(); плюс с запасом ещё одна попытка и _AI_BUSY_MARGIN_SEC."""
+    """Через сколько секунд ai_busy точно брошен: подсказка формулировки (перебор моделей и провайдеров
+    с ожиданием свободного места у провайдера) укладывается в chain_budget_sec(..., "formulate"); плюс
+    с запасом ещё одна попытка и _AI_BUSY_MARGIN_SEC."""
     settings = get_settings()
-    return chain_budget_sec(settings) + settings.ai_timeout_sec + 5 + _AI_BUSY_MARGIN_SEC
+    return (
+        chain_budget_sec(settings, "formulate") + attempt_timeout_sec(settings, "formulate") + _AI_BUSY_MARGIN_SEC
+    )
 
 
 def _ai_busy_stale(data: dict[str, Any]) -> bool:
@@ -823,6 +870,22 @@ def _ai_busy_stale(data: dict[str, Any]) -> bool:
     except (TypeError, ValueError):
         since = None
     return since is None or (utcnow() - since).total_seconds() > _ai_busy_stale_sec()
+
+
+async def _reread_busy(callback: CallbackQuery, state: FSMContext, expected: State) -> dict[str, Any] | None:
+    """Флаг «занято» (ai_busy, creating) — перед ответом «подождите» сверить диалог с базой (1 обмен, только
+    в этом редком случае). При обновлении бота на хостинге флаг мог уже снять другой экземпляр (ответ AI
+    готов), а в памяти этого экземпляра он ещё стоит (bot.fsm_storage): без сверки руководитель минуты
+    получал бы «подождите», а потом ответ AI затёрся бы вариантом по правилам (_unstick_ai).
+    -> свежие данные диалога; None — диалог тем временем ушёл с этого шага или кнопка уже не из последнего
+    вопроса (ответ «кнопка неактуальна» дан)."""
+    await refresh_state(state)
+    data = await state.get_data()
+    message_id = callback.message.message_id if callback.message is not None else None
+    if await state.get_state() != expected.state or message_id is None or message_id != data.get("prompt_id"):
+        await callback.answer(STALE_BUTTON)
+        return None
+    return data
 
 
 async def _unstick_ai(state: FSMContext, data: dict[str, Any]) -> dict[str, Any]:

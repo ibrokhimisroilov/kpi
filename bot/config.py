@@ -31,6 +31,43 @@ AI_KEY_ENV = {
     "openrouter": "OPENROUTER_API_KEY",
 }
 
+# Для чего запрос к AI (bot.ai.provider.ai_purpose): «formulate» — подсказка измеримой формулировки
+# (короткий ответ, важна скорость), «evaluate» — предварительная оценка сдачи (важно качество суждения).
+AI_PURPOSES = ("formulate", "evaluate")
+# В каком порядке спрашивать модели Gemini для каждой задачи, если GEMINI_FORMULATE_MODELS /
+# GEMINI_EVALUATE_MODELS не заданы: модели из GEMINI_MODELS переставляются в этом порядке (моделей, которых
+# здесь нет, — после, в порядке GEMINI_MODELS; моделей не из GEMINI_MODELS бот не спрашивает).
+# Замеры (10.2026): 3.5-flash-lite отвечает за ~0,7–1 с, 3.6-flash — за ~1,7–2 с, 3.5-flash — за 1,7–12 с,
+# 3.8-flash часто отвечает 503 «high demand» через несколько секунд.
+GEMINI_PURPOSE_ORDER: dict[str, tuple[str, ...]] = {
+    # Короткая переформулировка — сначала самые быстрые.
+    "formulate": (
+        "gemini-3.5-flash-lite",
+        "gemini-3.1-flash-lite",
+        "gemini-3.6-flash",
+        "gemini-3.5-flash",
+        "gemini-3.7-flash",
+        "gemini-3.8-flash",
+        "gemma-4-31b-it",
+    ),
+    # Суждение о результате — сначала сильные и при этом быстрые, облегчённые — запасом.
+    "evaluate": (
+        "gemini-3.6-flash",
+        "gemini-3.5-flash",
+        "gemini-3.8-flash",
+        "gemini-3.7-flash",
+        "gemini-3.5-flash-lite",
+        "gemini-3.1-flash-lite",
+        "gemma-4-31b-it",
+    ),
+}
+
+
+def _by_preference(models: list[str], preferred: tuple[str, ...]) -> list[str]:
+    """Модели в порядке ``preferred``; моделей не из него — после, в исходном порядке (сортировка устойчивая)."""
+    rank = {model: index for index, model in enumerate(preferred)}
+    return sorted(models, key=lambda model: rank.get(model, len(preferred)))
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
@@ -67,6 +104,10 @@ class Settings(BaseSettings):
         "gemini-3.1-flash-lite",
         "gemma-4-31b-it",
     ]
+    # Свой порядок моделей Gemini для подсказки формулировки / оценки сдачи (через запятую). Пусто — модели
+    # GEMINI_MODELS в порядке GEMINI_PURPOSE_ORDER (для формулировки — сначала быстрые flash-lite).
+    gemini_formulate_models: Annotated[list[str], NoDecode] = []
+    gemini_evaluate_models: Annotated[list[str], NoDecode] = []
     # Groq (console.groq.com): бесплатно, без карты; данные не используются для обучения.
     groq_api_key: str = Field(default="", repr=False)
     groq_models: Annotated[list[str], NoDecode] = ["openai/gpt-oss-120b", "qwen/qwen3.8-27b", "openai/gpt-oss-20b"]
@@ -100,7 +141,15 @@ class Settings(BaseSettings):
         "google/gemma-4-31b-it:free",
         "google/gemma-4-26b-a4b-it:free",
     ]
+    # Сколько секунд ждать ответа одной модели (потолок для всех запросов); весь перебор — 2 × AI_TIMEOUT_SEC.
     ai_timeout_sec: int = 60
+    # Подсказка формулировки — короткий ответ: модель, не ответившая за AI_FORMULATE_TIMEOUT_SEC, уступает
+    # следующей; вся подсказка — не дольше AI_FORMULATE_BUDGET_SEC, потом формулировка по правилам.
+    ai_formulate_timeout_sec: int = 9
+    ai_formulate_budget_sec: int = 25
+    # Оценка сдачи: одна модель — не дольше AI_EVALUATE_TIMEOUT_SEC (если приложены PDF или фото — до
+    # AI_TIMEOUT_SEC + 5 с: чтение файлов дольше), весь перебор — 2 × AI_TIMEOUT_SEC.
+    ai_evaluate_timeout_sec: int = 30
     # Передавать ли AI содержимое приложенных файлов (PDF, фото, Word, Excel, текст).
     ai_read_files: bool = True
     ai_max_file_mb: int = 10
@@ -149,6 +198,8 @@ class Settings(BaseSettings):
     @field_validator(
         "admin_ids",
         "gemini_models",
+        "gemini_formulate_models",
+        "gemini_evaluate_models",
         "groq_models",
         "cloudflare_models",
         "mistral_models",
@@ -191,7 +242,10 @@ class Settings(BaseSettings):
         }
         return keys.get(name, "").strip()
 
-    def ai_models_for(self, name: str) -> list[str]:
+    def ai_models_for(self, name: str, purpose: str | None = None) -> list[str]:
+        """Модели провайдера по порядку. purpose («formulate» / «evaluate», AI_PURPOSES) меняет порядок
+        моделей Gemini: GEMINI_FORMULATE_MODELS / GEMINI_EVALUATE_MODELS, если заданы, иначе GEMINI_MODELS
+        в порядке GEMINI_PURPOSE_ORDER. У остальных провайдеров порядок один для всех задач."""
         models = {
             "gemini": self.gemini_models,
             "groq": self.groq_models,
@@ -199,7 +253,12 @@ class Settings(BaseSettings):
             "mistral": self.mistral_models,
             "openrouter": self.openrouter_models,
         }.get(name, [])
-        return [model.strip() for model in models if model.strip()]
+        result = [model.strip() for model in models if model.strip()]
+        if name != "gemini" or purpose not in AI_PURPOSES:
+            return result
+        explicit = self.gemini_formulate_models if purpose == "formulate" else self.gemini_evaluate_models
+        own = list(dict.fromkeys(model.strip() for model in explicit if model.strip()))
+        return own or _by_preference(result, GEMINI_PURPOSE_ORDER[purpose])
 
     @property
     def active_ai_providers(self) -> list[str]:

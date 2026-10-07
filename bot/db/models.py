@@ -1,6 +1,20 @@
 """ORM-модели.
 
 Все даты хранятся как naive UTC (без tzinfo). Перевод в местное время — bot.utils.dates.
+
+Загрузка связей (все загружаются сразу, ленивых загрузок нет — в async они падали бы с MissingGreenlet):
+
+* «многие к одному» (``task.assignee``, ``task.created_by``, ``task.manager``, ``sub.task``,
+  ``sub.reviewer``, ``attachment.submission``, ``event.actor``) — ``lazy="joined"``: LEFT JOIN в том же
+  SELECT, без отдельного запроса на каждую связь. Каждый обмен с базой в облаке стоит 130–190 мс
+  (Render → Supabase), а selectin давал по запросу на связь: загрузка задачи стоила 7 запросов.
+* коллекции (``task.submissions``, ``sub.attachments``) — ``lazy="selectin"``: один запрос на уровень
+  (``... WHERE task_id IN (...)``) для всех загруженных объектов сразу; JOIN коллекции размножил бы строки.
+
+По кругу жадная загрузка не идёт: у задачи, полученной через ``sub.task``, список
+``task.submissions`` не загружается (SQLAlchemy не возвращается к уже пройденному классу).
+Поэтому ``bot.services.tasks.get_submission`` грузит сдачу через её задачу, а
+``_ensure_submissions_loaded`` догружает список сдач, если задача пришла через ``sub.task``.
 """
 
 from __future__ import annotations
@@ -174,9 +188,9 @@ class Task(Base):
     final_score: Mapped[float | None] = mapped_column(Float)  # окончательная оценка руководителя
     rework_count: Mapped[int] = mapped_column(Integer, default=0)
 
-    assignee: Mapped[User] = relationship(foreign_keys=[assignee_id], lazy="selectin")
-    created_by: Mapped[User] = relationship(foreign_keys=[created_by_id], lazy="selectin")
-    manager: Mapped[User | None] = relationship(foreign_keys=[manager_id], lazy="selectin")
+    assignee: Mapped[User] = relationship(foreign_keys=[assignee_id], lazy="joined")
+    created_by: Mapped[User] = relationship(foreign_keys=[created_by_id], lazy="joined")
+    manager: Mapped[User | None] = relationship(foreign_keys=[manager_id], lazy="joined")
     submissions: Mapped[list[Submission]] = relationship(
         back_populates="task",
         order_by="Submission.id",
@@ -226,8 +240,8 @@ class Submission(Base):
     reviewer_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"))
     reviewed_at: Mapped[datetime | None] = mapped_column(DateTime)
 
-    task: Mapped[Task] = relationship(back_populates="submissions", lazy="selectin")
-    reviewer: Mapped[User | None] = relationship(lazy="selectin")
+    task: Mapped[Task] = relationship(back_populates="submissions", lazy="joined")
+    reviewer: Mapped[User | None] = relationship(lazy="joined")
     attachments: Mapped[list[Attachment]] = relationship(
         back_populates="submission",
         order_by="Attachment.id",
@@ -251,7 +265,7 @@ class Attachment(Base):
     file_size: Mapped[int | None] = mapped_column(Integer)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
-    submission: Mapped[Submission] = relationship(back_populates="attachments", lazy="selectin")
+    submission: Mapped[Submission] = relationship(back_populates="attachments", lazy="joined")
 
 
 class TaskEvent(Base):
@@ -266,7 +280,7 @@ class TaskEvent(Base):
     data: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
 
-    actor: Mapped[User | None] = relationship(lazy="selectin")
+    actor: Mapped[User | None] = relationship(lazy="joined")
 
 
 class ReminderLog(Base):

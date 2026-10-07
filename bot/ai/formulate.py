@@ -9,7 +9,7 @@ import time
 from collections import OrderedDict
 from dataclasses import dataclass
 
-from bot.ai.provider import AIUnavailable, ai_available, generate_json
+from bot.ai.provider import AIUnavailable, ai_available, ai_purpose, generate_json
 
 __all__ = ["ResultSuggestion", "suggest_expected_result", "rules_suggestion"]
 
@@ -120,11 +120,13 @@ async def suggest_expected_result(
         return fallback
     key = (_clean(title), _clean(raw_result))
     try:
-        data, model = await generate_json(
-            system=_SYSTEM_PROMPT,
-            parts=[_user_prompt(title, raw_result, deadline_text, _seen_variants(key))],
-            schema=_SCHEMA,
-        )
+        # Назначение «formulate»: сначала самые быстрые модели, короткие попытки (bot.ai.provider).
+        with ai_purpose("formulate"):
+            data, model = await generate_json(
+                system=_SYSTEM_PROMPT,
+                parts=[_user_prompt(title, raw_result, deadline_text, _seen_variants(key))],
+                schema=_SCHEMA,
+            )
     except AIUnavailable as exc:
         logger.info("Формулировка результата по правилам: %s", exc)
         return fallback

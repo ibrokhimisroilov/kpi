@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import logging
 
-from sqlalchemy import ColumnElement, func, select, update
+from sqlalchemy import ColumnElement, func, inspect, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.attributes import set_committed_value
 
@@ -47,9 +47,27 @@ def require_manager(actor: User | None) -> None:
 
 
 async def get_by_tg(session: AsyncSession, tg_id: int) -> User | None:
+    """Пользователь по Telegram ID. Уже загруженный в эту сессию (его читает UserMiddleware в начале
+    каждого апдейта) возвращается без повторного запроса: обмен с облачной базой — 130–190 мс."""
     if not is_db_id(tg_id, big=True):
         return None
+    cached = _loaded_by_tg(session, tg_id)
+    if cached is not None:
+        return cached
     return await session.scalar(select(User).where(User.tg_id == tg_id))
+
+
+def _loaded_by_tg(session: AsyncSession, tg_id: int) -> User | None:
+    """Пользователь с этим tg_id среди объектов сессии (identity map) — как его вернул бы запрос."""
+    for obj in session.sync_session.identity_map.values():
+        if not isinstance(obj, User):
+            continue
+        state = inspect(obj)
+        if state.expired or state.deleted or state.was_deleted or "tg_id" in state.unloaded:
+            continue
+        if obj.tg_id == tg_id:
+            return obj
+    return None
 
 
 async def get_user(session: AsyncSession, user_id: int) -> User | None:

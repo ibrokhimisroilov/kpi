@@ -115,16 +115,18 @@ async def test_bigger_budget_is_not_cut(fake_models) -> None:
 
 async def test_evaluation_and_formulation_requests_use_big_budget(fake_models) -> None:
     """И оценка сдачи, и подсказка формулировки идут с лимитом ≥ 8192 и без AFC."""
-    models = fake_models({
-        "gemini-3.8-flash": gemini_response(
-            '{"score": 110, "rationale": "План 100, факт 110.", "completeness": "exceeded",'
-            ' "expected_result": "Проверить 100 договоров", "plan_value": 100, "plan_unit": "договоров",'
-            ' "note": null}'
-        )
-    })
+    answer = gemini_response(
+        '{"score": 110, "rationale": "План 100, факт 110.", "completeness": "exceeded",'
+        ' "expected_result": "Проверить 100 договоров", "plan_value": 100, "plan_unit": "договоров",'
+        ' "note": null}'
+    )
+    models = fake_models({"gemini-3.8-flash": answer, "gemini-3.6-flash": answer})
     task, sub = make_pair()
     assert (await evaluate_submission(task, sub)).source == "ai"
     assert (await suggest_expected_result("Анализ", "посмотреть 100 договоров")).source == "ai"
+    # GEMINI_MODELS=3.8-flash,3.6-flash: и для оценки, и для формулировки 3.6-flash спрашивается раньше
+    # (3.8-flash часто отвечает 503 «high demand» через несколько секунд).
+    assert models.calls == ["gemini-3.6-flash", "gemini-3.6-flash"]
     assert len(models.configs) == 2
     for config in models.configs:
         assert config.max_output_tokens >= 8192

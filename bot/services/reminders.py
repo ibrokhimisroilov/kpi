@@ -12,7 +12,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
-from sqlalchemy import delete, select
+from sqlalchemy import and_, delete, or_, select
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError
@@ -78,11 +78,11 @@ async def due_reminders(session: AsyncSession, now: datetime | None = None) -> l
     """
     now = naive_utc(now or utcnow())  # колонки — naive UTC; aware-дату PostgreSQL не примет
     thresholds = _before_thresholds()
-    open_tasks = await _open_tasks(session, now, thresholds)
-    review_tasks = await _review_tasks(session, now)
+    open_tasks, review_tasks = await _candidate_tasks(session, now, thresholds)
     sent = await _sent_kinds(session, [t.id for t in (*open_tasks, *review_tasks)])
 
     reminders: list[Reminder] = []
+    skipped_all: list[tuple[int, str]] = []
     for task in open_tasks:
         if task.deadline < now:
             found, skipped = _overdue_reminders(task, now, sent[task.id])
@@ -90,8 +90,9 @@ async def due_reminders(session: AsyncSession, now: datetime | None = None) -> l
             found, skipped = _before_deadline(task, now, thresholds, sent[task.id])
         for kind in skipped:
             logger.debug("Задача #%s: напоминание %s не нужно, помечаем отправленным", task.id, kind)
-            await mark_sent(session, task.id, kind)
+            skipped_all.append((task.id, kind))
         reminders += found
+    await _mark_sent_many(session, skipped_all)
 
     review_kind = f"review_{to_local(now).date().isoformat()}"
     for task in review_tasks:
@@ -100,26 +101,30 @@ async def due_reminders(session: AsyncSession, now: datetime | None = None) -> l
     return reminders
 
 
-async def _open_tasks(session: AsyncSession, now: datetime, thresholds: list[_Threshold]) -> list[Task]:
-    """ACTIVE/REWORK, у которых срок истёк или подошёл к наибольшему порогу."""
+async def _candidate_tasks(
+    session: AsyncSession, now: datetime, thresholds: list[_Threshold]
+) -> tuple[list[Task], list[Task]]:
+    """(открытые, на проверке) — одним запросом:
+
+    * ACTIVE/REWORK, у которых срок истёк или подошёл к наибольшему порогу (по сроку);
+    * SUBMITTED, которые ждут проверки дольше review_reminder_days (по времени сдачи).
+
+    Задания по времени идут каждые 5 минут, а каждый запрос к облачной базе — 130–190 мс.
+    """
     horizon_days = max((t.days for t in thresholds), default=0.0)
-    stmt = (
-        select(Task)
-        .where(Task.status.in_(OPEN_STATUSES), Task.deadline <= now + timedelta(days=horizon_days))
-        .order_by(Task.deadline, Task.id)
-    )
-    return list((await session.scalars(stmt)).all())
-
-
-async def _review_tasks(session: AsyncSession, now: datetime) -> list[Task]:
-    """SUBMITTED, которые ждут проверки дольше review_reminder_days."""
     cutoff = now - timedelta(days=get_settings().review_reminder_days)
-    stmt = (
-        select(Task)
-        .where(Task.status == TaskStatus.SUBMITTED, Task.submitted_at < cutoff)
-        .order_by(Task.submitted_at, Task.id)
+    stmt = select(Task).where(
+        or_(
+            and_(Task.status.in_(OPEN_STATUSES), Task.deadline <= now + timedelta(days=horizon_days)),
+            and_(Task.status == TaskStatus.SUBMITTED, Task.submitted_at < cutoff),
+        )
     )
-    return list((await session.scalars(stmt)).all())
+    tasks = list((await session.scalars(stmt)).all())
+    open_tasks = sorted((t for t in tasks if t.status in OPEN_STATUSES), key=lambda t: (t.deadline, t.id))
+    review_tasks = sorted(
+        (t for t in tasks if t.status == TaskStatus.SUBMITTED), key=lambda t: (t.submitted_at, t.id)
+    )
+    return open_tasks, review_tasks
 
 
 async def _sent_kinds(session: AsyncSession, task_ids: list[int]) -> defaultdict[int, set[str]]:
@@ -196,6 +201,22 @@ async def mark_sent(session: AsyncSession, task_id: int, kind: str) -> None:
             session.add(ReminderLog(task_id=task_id, kind=kind))
     except IntegrityError:
         pass  # отметку только что записал параллельный процесс
+
+
+async def _mark_sent_many(session: AsyncSession, items: list[tuple[int, str]]) -> None:
+    """mark_sent для нескольких (task_id, kind) сразу: SQLite и PostgreSQL — одним
+    INSERT … VALUES (…), (…) ON CONFLICT DO NOTHING; прочие СУБД — по одному."""
+    if not items:
+        return
+    dialect = session.get_bind().dialect.name
+    if dialect not in ("sqlite", "postgresql"):
+        for task_id, kind in items:
+            await mark_sent(session, task_id, kind)
+        return
+    insert = sqlite_insert if dialect == "sqlite" else postgresql_insert
+    rows = [{"task_id": task_id, "kind": kind} for task_id, kind in dict.fromkeys(items)]
+    index = [ReminderLog.task_id, ReminderLog.kind]
+    await session.execute(insert(ReminderLog).values(rows).on_conflict_do_nothing(index_elements=index))
 
 
 async def reset_reminders(session: AsyncSession, task_id: int) -> None:

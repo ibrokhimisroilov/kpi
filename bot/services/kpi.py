@@ -14,7 +14,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 
-from sqlalchemy import select
+from sqlalchemy import ColumnElement, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot.config import get_settings
@@ -22,6 +22,7 @@ from bot.db.models import (
     EXCLUDED_FROM_KPI,
     OPEN_STATUSES,
     Role,
+    Submission,
     Task,
     TaskSource,
     TaskStatus,
@@ -149,6 +150,17 @@ def compute_kpi(
     return res
 
 
+def _period_filters(period: Period, assignee_ids: Sequence[int] | None) -> list[ColumnElement[bool]]:
+    conditions = [
+        Task.deadline >= period.start,
+        Task.deadline < period.end,
+        Task.status.not_in(EXCLUDED_FROM_KPI),
+    ]
+    if assignee_ids is not None:
+        conditions.append(Task.assignee_id.in_(assignee_ids))
+    return conditions
+
+
 async def period_tasks(
     session: AsyncSession, period: Period, *, assignee_ids: Sequence[int] | None = None
 ) -> list[Task]:
@@ -156,19 +168,60 @@ async def period_tasks(
 
     assignee_ids — ограничить исполнителями (None — все). Сортировка по сроку.
     """
-    stmt = select(Task).where(
-        Task.deadline >= period.start,
-        Task.deadline < period.end,
-        Task.status.not_in(EXCLUDED_FROM_KPI),
-    )
-    if assignee_ids is not None:
-        stmt = stmt.where(Task.assignee_id.in_(assignee_ids))
-    stmt = stmt.order_by(Task.deadline, Task.id)
+    stmt = select(Task).where(*_period_filters(period, assignee_ids)).order_by(Task.deadline, Task.id)
     return list((await session.scalars(stmt)).all())
 
 
-def _compute_for_tasks(tasks: Sequence[Task], now: datetime) -> KpiResult:
-    snapshots = [TaskSnapshot.from_task(task) for task in tasks]
+async def _period_snapshots(
+    session: AsyncSession, period: Period, assignee_ids: Sequence[int] | None
+) -> list[tuple[int, TaskSnapshot]]:
+    """(assignee_id, снимок) задач периода — одним запросом, в порядке period_tasks.
+
+    Расчёту KPI не нужны ни люди, ни файлы, ни все сдачи задачи — только поля задачи и признак
+    опоздания последней сдачи (подзапрос). Загрузка задач целиком стоила бы ещё 2 запроса (сдачи и
+    файлы), а каждый обмен с облачной базой — 130–190 мс.
+    """
+    last_late = (
+        select(Submission.is_late)
+        .where(Submission.task_id == Task.id)
+        .order_by(Submission.id.desc())  # последняя сдача — как Task.last_submission
+        .limit(1)
+        .scalar_subquery()
+    )
+    stmt = (
+        select(
+            Task.assignee_id,
+            Task.id,
+            Task.title,
+            Task.weight,
+            Task.status,
+            Task.deadline,
+            Task.final_score,
+            Task.source,
+            last_late,
+        )
+        .where(*_period_filters(period, assignee_ids))
+        .order_by(Task.deadline, Task.id)
+    )
+    return [
+        (
+            row[0],
+            TaskSnapshot(
+                task_id=row[1],
+                title=row[2],
+                weight=row[3],
+                status=row[4],
+                deadline=row[5],
+                final_score=row[6],
+                source=row[7],
+                last_late=None if row[8] is None else bool(row[8]),
+            ),
+        )
+        for row in await session.execute(stmt)
+    ]
+
+
+def _compute(snapshots: Sequence[TaskSnapshot], now: datetime) -> KpiResult:
     return compute_kpi(snapshots, now, get_settings().overdue_counts_as_zero)
 
 
@@ -176,8 +229,8 @@ async def kpi_for_user(
     session: AsyncSession, user_id: int, period: Period, now: datetime | None = None
 ) -> KpiResult:
     """KPI одного сотрудника за период."""
-    tasks = await period_tasks(session, period, assignee_ids=[user_id])
-    return _compute_for_tasks(tasks, now or utcnow())
+    rows = await _period_snapshots(session, period, [user_id])
+    return _compute([snapshot for _assignee, snapshot in rows], now or utcnow())
 
 
 async def kpi_for_team(
@@ -197,11 +250,12 @@ async def kpi_for_team(
             )
         ).all()
     )
-    by_assignee: dict[int, list[Task]] = defaultdict(list)
-    for task in await period_tasks(session, period, assignee_ids=[u.id for u in employees]):
-        by_assignee[task.assignee_id].append(task)
+    by_assignee: dict[int, list[TaskSnapshot]] = defaultdict(list)
+    if employees:  # нет сотрудников — нет и их задач: запрос не нужен
+        for assignee_id, snapshot in await _period_snapshots(session, period, [u.id for u in employees]):
+            by_assignee[assignee_id].append(snapshot)
 
-    rows = [(user, _compute_for_tasks(by_assignee[user.id], now)) for user in employees]
+    rows = [(user, _compute(by_assignee[user.id], now)) for user in employees]
     rows.sort(key=lambda row: (row[1].kpi is None, -(row[1].kpi or 0.0), row[0].full_name))
     return rows
 

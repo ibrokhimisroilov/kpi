@@ -23,21 +23,25 @@ import logging
 import math
 import os
 import ssl
+import time
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from typing import Any
 from urllib.parse import quote
 
 import pytest
-from sqlalchemy import func, select, text
+from sqlalchemy import event, func, select, text, update
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from sqlalchemy.pool import AsyncAdaptedQueuePool, StaticPool
 
 from bot.config import get_settings
+from bot.db import base as db_base
 from bot.db.base import (
+    PG_POOL_RECYCLE_SEC,
     Base,
     apply_password,
     describe_url,
@@ -63,7 +67,8 @@ from bot.db.models import (
     User,
     UserStatus,
 )
-from bot.services import dbsafe, reminders, users
+from bot.middlewares import load_user
+from bot.services import dbsafe, kpi, periods, reminders, users
 from bot.services import tasks as svc
 from bot.services.errors import DomainError
 from bot.services.tasks import PROPOSAL_ALREADY_PROCESSED, REVIEW_ALREADY_PROCESSED, AttachmentIn
@@ -662,7 +667,10 @@ def test_supabase_session_pooler_defaults() -> None:
     engine = make_engine(f"postgresql://postgres.ref:pw@{SUPABASE_HOST}:5432/postgres")
     pool = engine.pool
     assert isinstance(pool, AsyncAdaptedQueuePool)
-    assert (pool.size(), pool._max_overflow, pool._recycle, pool._pre_ping) == (3, 1, 300, True)
+    # Без pre-ping на каждую выдачу (3 обмена) — простоявшее соединение проверяет движок сам (1 обмен);
+    # пересоздание раз в 30 мин; LIFO — снова выдаётся «тёплое» соединение.
+    assert (pool.size(), pool._max_overflow, pool._recycle, pool._pre_ping) == (3, 1, PG_POOL_RECYCLE_SEC, False)
+    assert PG_POOL_RECYCLE_SEC == 1800 and pool._pool.use_lifo
 
 
 def test_dialog_storage_gets_own_single_connection_pool() -> None:
@@ -673,7 +681,7 @@ def test_dialog_storage_gets_own_single_connection_pool() -> None:
     assert engine is not None
     pool = engine.pool
     assert isinstance(pool, AsyncAdaptedQueuePool)
-    assert (pool.size(), pool._max_overflow, pool._recycle, pool._pre_ping) == (1, 0, 300, True)
+    assert (pool.size(), pool._max_overflow, pool._recycle, pool._pre_ping) == (1, 0, PG_POOL_RECYCLE_SEC, False)
     assert engine.url.password == "pw" and engine.url.drivername == "postgresql+asyncpg"
     main_pool = make_engine(raw, password="pw").pool
     assert main_pool.size() + main_pool._max_overflow + pool.size() + pool._max_overflow == 5  # type: ignore[attr-defined]
@@ -891,3 +899,458 @@ async def test_database_password_connects_to_real_postgres(
     assert wrong not in caplog.text
     if password not in describe_url(_test_url()):  # короткий пароль вроде «postgres» совпал бы с именем
         assert password not in caplog.text
+
+
+# --- Обмены с базой: отложенный BEGIN, проверка соединения после простоя, число запросов --------------
+#
+# Бот на Render ходит в Supabase в другом регионе: каждый обмен с базой — 130–190 мс. Здесь проверяется,
+# что меньше обменов не стоит ни атомарности записи, ни устойчивости к оборванным соединениям.
+
+
+class _Statements:
+    """SQL-выражения, ушедшие в базу через движок (подсчёт запросов)."""
+
+    def __init__(self, engine: AsyncEngine) -> None:
+        self.engine = engine
+        self.items: list[str] = []
+
+    def _on_execute(self, _conn: Any, _cursor: Any, statement: str, *_args: Any) -> None:
+        self.items.append(" ".join(statement.split()))
+
+    def __enter__(self) -> list[str]:
+        event.listen(self.engine.sync_engine, "before_cursor_execute", self._on_execute)
+        return self.items
+
+    def __exit__(self, *_exc: object) -> None:
+        event.remove(self.engine.sync_engine, "before_cursor_execute", self._on_execute)
+
+
+async def _adapter(session: AsyncSession) -> Any:
+    """DBAPI-адаптер asyncpg соединения сессии: ``_transaction`` — открыта ли транзакция (был ли BEGIN)."""
+    conn = await session.connection()
+    return (await conn.get_raw_connection()).dbapi_connection
+
+
+async def _backend_pid(engine: AsyncEngine) -> int:
+    async with engine.connect() as conn:
+        return int(await conn.scalar(text("SELECT pg_backend_pid()")))
+
+
+async def _kill_backend(admin: AsyncEngine, pid: int) -> None:
+    """Оборвать серверное соединение (как перезапуск пулера или обрыв сети) и дождаться, пока его не станет."""
+    async with admin.connect() as conn:
+        assert await conn.scalar(text("SELECT pg_terminate_backend(:pid)"), {"pid": pid})
+        for _ in range(50):
+            gone = await conn.scalar(text("SELECT count(*) = 0 FROM pg_stat_activity WHERE pid = :pid"), {"pid": pid})
+            if gone:
+                return
+            await asyncio.sleep(0.05)
+    raise AssertionError("серверное соединение не завершилось")
+
+
+async def test_read_only_session_sends_no_begin_and_writes_stay_atomic(pg_engine: AsyncEngine) -> None:
+    """Сессия, которая только читает, не открывает транзакцию (минус BEGIN и COMMIT/ROLLBACK — 2 обмена);
+    первая запись открывает обычную транзакцию: откат отменяет запись, commit — сохраняет."""
+    sm = make_sessionmaker(pg_engine)
+    team = await seed_team(sm)
+    async with sm() as s:
+        assert (await users.get_user(s, team.employee_id)).position is None
+        await svc.count_tasks(s)
+        adapter = await _adapter(s)
+        assert adapter._transaction is None, "чтение — без BEGIN"
+        employee = await s.get(User, team.employee_id)
+        employee.position = "Юрист"
+        await s.flush()
+        assert adapter._transaction is not None, "первая запись открыла транзакцию"
+        assert await s.scalar(select(User.position).where(User.id == team.employee_id)) == "Юрист"
+        await s.rollback()
+    async with sm() as s:
+        assert (await users.get_user(s, team.employee_id)).position is None, "откат отменил запись"
+        assert (await _adapter(s))._transaction is None, "после отката соединение снова без транзакции"
+        (await s.get(User, team.employee_id)).position = "Юрист"
+        await s.commit()
+    async with sm() as s:
+        assert (await users.get_user(s, team.employee_id)).position == "Юрист"
+        assert (await _adapter(s))._transaction is None, "после commit следующая сессия снова читает без BEGIN"
+
+
+async def test_locking_reads_and_raw_sql_still_run_in_transaction(pg_engine: AsyncEngine) -> None:
+    """SELECT … FOR UPDATE и текстовый SQL (advisory-блокировки init_db и т. п.) открывают транзакцию:
+    блокировка строки держится до commit, как раньше."""
+    sm = make_sessionmaker(pg_engine)
+    team = await seed_team(sm)
+    for stmt in (select(User).where(User.id == team.boss_id).with_for_update(), text("SELECT 1")):
+        async with sm() as s:
+            await s.execute(stmt)
+            assert (await _adapter(s))._transaction is not None, stmt
+    async with sm() as first, sm() as second:
+        await first.execute(select(User).where(User.id == team.employee_id).with_for_update())
+        waiting = asyncio.create_task(
+            second.execute(update(User).where(User.id == team.employee_id).values(position="Экономист"))
+        )
+        await asyncio.sleep(LOCK_WAIT_SEC)
+        assert not waiting.done(), "строка заблокирована до commit первой сессии"
+        await first.commit()
+        await waiting
+        await second.commit()
+
+
+async def test_transaction_pooler_keeps_every_query_in_transaction(pg_engine: AsyncEngine) -> None:
+    """Transaction pooler (порт 6543 / pgbouncer=true): вне транзакции подготовка и выполнение выражения
+    могут уйти на разные серверные соединения — там BEGIN не откладывается."""
+    engine = make_engine(
+        make_url(_test_url()).update_query_dict({"pgbouncer": "true"}).render_as_string(hide_password=False),
+        connect_args={"server_settings": {"search_path": await _search_path(pg_engine)}},
+    )
+    try:
+        async with make_sessionmaker(engine)() as s:
+            await s.scalar(select(func.count(User.id)))
+            assert (await _adapter(s))._transaction is not None
+    finally:
+        await engine.dispose()
+
+
+async def test_idle_connection_is_checked_and_replaced_before_use(
+    pg_engine: AsyncEngine, pg_engine_factory: Callable[..., AsyncEngine], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Только что использованное соединение не проверяется; простоявшее (дольше PG_PING_IDLE_SEC)
+    проверяется одним «;», а оборванное — тихо заменяется новым: апдейт ошибки не видит."""
+    engine = pg_engine_factory()
+    sm = make_sessionmaker(engine)
+    pings: list[int] = []
+    real_ping = db_base._ping
+
+    def counting_ping(record: Any) -> None:
+        pings.append(1)
+        real_ping(record)
+
+    monkeypatch.setattr(db_base, "_ping", counting_ping)
+    pid = await _backend_pid(engine)
+    for _ in range(3):
+        async with sm() as s:
+            await s.scalar(select(func.count(User.id)))
+    assert pings == [], "соединение использовалось только что — без проверки"
+
+    await _kill_backend(pg_engine, pid)
+    # «Простояло» дольше порога (часы Windows идут шагами ~16 мс: с порогом 0 и без паузы разница бывала 0 —
+    # тогда проверки не было), а новое соединение — только что открыто, его не проверяют.
+    monkeypatch.setattr(db_base, "PG_PING_IDLE_SEC", 0.05)
+    await asyncio.sleep(0.1)
+    async with sm() as s:
+        assert await s.scalar(select(func.count(User.id))) == 0
+    assert pings == [1]
+    assert await _backend_pid(engine) != pid
+
+
+async def test_healthy_idle_connection_is_pinged_and_kept(
+    pg_engine_factory: Callable[..., AsyncEngine], monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Простоявшее, но живое соединение проверка оставляет в пуле — то же серверное соединение. Проверка
+    не должна падать сама (пустой запрос «;» asyncpg.execute не принимает) и менять живое соединение на
+    новое: новое до облачной базы — 1–1,4 с вместо одного обмена."""
+    engine = pg_engine_factory()
+    sm = make_sessionmaker(engine)
+    pid = await _backend_pid(engine)
+    pings: list[int] = []
+    real_ping = db_base._ping
+
+    def counting_ping(record: Any) -> None:
+        pings.append(1)
+        real_ping(record)
+
+    monkeypatch.setattr(db_base, "_ping", counting_ping)
+    # «Простояло» — любое соединение (меньше нуля: часы Windows идут шагами ~16 мс, разница бывает 0).
+    monkeypatch.setattr(db_base, "PG_PING_IDLE_SEC", -1.0)
+    with caplog.at_level(logging.INFO, logger="bot.db.base"):
+        async with sm() as s:
+            assert await s.scalar(select(func.count(User.id))) == 0
+        assert await _backend_pid(engine) == pid, "живое соединение не заменяется"
+    assert len(pings) == 2
+    assert "не отвечает" not in caplog.text
+
+
+async def test_dropped_connection_is_retried_by_user_middleware(
+    pg_engine: AsyncEngine, pg_engine_factory: Callable[..., AsyncEngine], caplog: pytest.LogCaptureFixture
+) -> None:
+    """Соединение оборвалось меньше чем через PG_PING_IDLE_SEC после использования (без проверки):
+    первый запрос апдейта — чтение пользователя — повторяется на новом соединении."""
+    engine = pg_engine_factory()
+    sm = make_sessionmaker(engine)
+    team = await seed_team(sm)
+    pid = await _backend_pid(engine)
+    await _kill_backend(pg_engine, pid)
+    with caplog.at_level(logging.INFO, logger="bot.middlewares"):
+        async with sm() as s:
+            user = await load_user(s, 2001)
+            assert user is not None and user.id == team.employee_id
+    assert "повторяю запрос на новом" in caplog.text
+    assert await _backend_pid(engine) != pid
+
+
+class _SilentProxy:
+    """TCP-прокси до тестового PostgreSQL. ``silence()``: связь по уже открытым соединениям молча
+    пропадает — данные теряются в обе стороны, ни FIN, ни RST (NAT или балансировщик забыл соединение,
+    сеть разорвана); новые соединения работают."""
+
+    def __init__(self, host: str, port: int) -> None:
+        self.target = (host, port)
+        self.port = 0
+        self.links: list[dict[str, Any]] = []
+        self._server: asyncio.Server | None = None
+
+    async def start(self) -> None:
+        self._server = await asyncio.start_server(self._handle, "127.0.0.1", 0)
+        self.port = self._server.sockets[0].getsockname()[1]
+
+    def silence(self) -> None:
+        for link in self.links:
+            link["silent"] = True
+
+    async def close(self) -> None:
+        if self._server is not None:
+            self._server.close()
+        for link in self.links:
+            for writer in link["writers"]:
+                writer.transport.abort()
+
+    async def _handle(self, client_reader: asyncio.StreamReader, client_writer: asyncio.StreamWriter) -> None:
+        server_reader, server_writer = await asyncio.open_connection(*self.target)
+        link: dict[str, Any] = {"silent": False, "writers": [client_writer, server_writer]}
+        self.links.append(link)
+        await asyncio.gather(
+            self._pipe(client_reader, server_writer, link),
+            self._pipe(server_reader, client_writer, link),
+            return_exceptions=True,
+        )
+
+    @staticmethod
+    async def _pipe(reader: asyncio.StreamReader, writer: asyncio.StreamWriter, link: dict[str, Any]) -> None:
+        try:
+            while data := await reader.read(65536):
+                if not link["silent"]:
+                    writer.write(data)
+                    await writer.drain()
+        finally:
+            if not link["silent"]:
+                writer.close()
+
+
+@pytest.mark.parametrize("factory", [make_engine, make_storage_engine], ids=["main", "storage"])
+async def test_silently_dead_idle_connection_is_replaced_within_ping_timeout(
+    pg_engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch, factory: Callable[..., AsyncEngine]
+) -> None:
+    """Связь с простоявшим соединением пропала молча (без RST): проверка не ответила за PG_PING_TIMEOUT_SEC —
+    соединение обрывается сразу и заменяется новым, запрос апдейта проходит. Раньше пул закрывал его
+    «вежливо», а asyncpg перед закрытием ждал ответа на отмену проверки — без ограничения по времени и по
+    той же мёртвой связи: выдача соединения висела, пока ОС не признает связь мёртвой (~15 мин на Linux),
+    держа апдейт, блокировку пользователя и место в пуле (у пула хранилища диалогов оно единственное)."""
+    url = make_url(_test_url())
+    proxy = _SilentProxy(url.host or "127.0.0.1", url.port or 5432)
+    await proxy.start()
+    engine = factory(
+        url.set(host="127.0.0.1", port=proxy.port).render_as_string(hide_password=False),
+        connect_args={"server_settings": {"search_path": await _search_path(pg_engine)}},
+    )
+    sm = make_sessionmaker(engine)
+
+    async def count_users() -> int:
+        async with sm() as s:
+            return int(await s.scalar(select(func.count(User.id))))
+
+    try:
+        assert await count_users() == 0
+        monkeypatch.setattr(db_base, "PG_PING_IDLE_SEC", -1.0)  # «простояло»
+        monkeypatch.setattr(db_base, "PG_PING_TIMEOUT_SEC", 0.5)
+        proxy.silence()
+        started = time.monotonic()
+        assert await asyncio.wait_for(count_users(), 30) == 0
+        assert time.monotonic() - started < 5, "проверка 0,5 с + новое соединение, а не ожидание мёртвой связи"
+    finally:
+        await proxy.close()
+        await asyncio.wait_for(engine.dispose(), 10)
+
+
+def test_only_plain_selects_skip_the_transaction() -> None:
+    """Какие выражения идут без BEGIN: только собранный SQLAlchemy SELECT без блокировок и побочных эффектов."""
+
+    def ctx(**flags: bool) -> SimpleNamespace:
+        base = {"is_text": False, "isinsert": False, "isupdate": False, "isdelete": False, "isddl": False}
+        return SimpleNamespace(compiled=object(), **{**base, **flags})
+
+    plain = db_base._is_plain_read
+    assert plain("SELECT users.id FROM users WHERE users.tg_id = $1", ctx())
+    assert plain("  select count(*) from tasks", ctx())
+    assert not plain("SELECT users.id FROM users WHERE users.id = $1 FOR UPDATE", ctx())
+    assert not plain("SELECT tasks.id FROM tasks FOR NO KEY UPDATE OF tasks", ctx())
+    assert not plain("SELECT 1 FROM users FOR SHARE", ctx())
+    assert not plain("SELECT pg_advisory_xact_lock($1)", ctx())
+    assert not plain("SELECT nextval('tasks_id_seq')", ctx())
+    assert not plain("SELECT 1", ctx(is_text=True))  # text(): неизвестно, что внутри
+    assert not plain("SELECT 1", SimpleNamespace(compiled=None))  # exec_driver_sql
+    assert not plain("INSERT INTO users (tg_id) VALUES ($1) RETURNING users.id", ctx(isinsert=True))
+    assert not plain("UPDATE tasks SET status=$1 WHERE tasks.id = $2 RETURNING tasks.status", ctx(isupdate=True))
+    assert not plain("WITH moved AS (DELETE FROM fsm_state RETURNING key) SELECT count(*) FROM moved", ctx())
+    assert not plain("SAVEPOINT sa_savepoint_1", ctx())
+
+
+async def test_task_with_people_submissions_and_files_loads_in_three_queries(engine: AsyncEngine, clock) -> None:
+    """Задача с людьми (JOIN), сдачами (+ проверивший) и файлами — 3 запроса, а не 7 (selectin на каждую
+    связь); повторно в той же сессии — без запросов. Сдача грузится вместе с задачей — тоже 3."""
+    sm = make_sessionmaker(engine)
+    team = await seed_team(sm)
+    task_id, sub_id = await submitted_task(sm, team, clock.now)
+    async with sm() as s:
+        with _Statements(engine) as sql:
+            task = await svc.get_task(s, task_id)
+            sub = task.last_submission
+            people = (task.assignee.full_name, task.created_by.full_name, task.manager.id)
+            assert people == ("Иванов Иван Иванович", "Петров Пётр Петрович", team.boss_id)
+            assert sub.task is task and sub.reviewer is None and sub.attachments == []
+        assert len(sql) == 3, sql
+        with _Statements(engine) as sql:
+            assert await svc.get_task(s, task_id) is task
+            assert await svc.get_submission(s, sub_id) is sub
+        assert sql == []
+    async with sm() as s:
+        with _Statements(engine) as sql:
+            sub = await svc.get_submission(s, sub_id)
+            assert sub.task.last_submission is sub and sub.task.assignee.full_name == "Иванов Иван Иванович"
+        assert len(sql) == 3, sql
+        assert await svc.get_submission(s, 10**6) is None
+
+
+async def test_status_change_writes_task_fields_in_the_same_update(engine: AsyncEngine, clock) -> None:
+    """Подтверждение оценки: статус, итоговая оценка и время — одним условным UPDATE (+ сдача и журнал),
+    без отдельного UPDATE задачи при flush; в памяти и в базе — одинаковые значения."""
+    sm = make_sessionmaker(engine)
+    team = await seed_team(sm)
+    task_id, sub_id = await submitted_task(sm, team, clock.now)
+    async with sm() as s:
+        boss = await s.get(User, team.boss_id)
+        await svc.get_submission(s, sub_id)
+        with _Statements(engine) as sql:
+            task = await svc.review_confirm(s, sub_id, boss)
+            await s.flush()
+        tables = [" ".join(q.split()[:3]).replace(" SET", "").replace("INSERT INTO", "INSERT") for q in sql]
+        assert tables == ["UPDATE tasks", "UPDATE submissions", "INSERT task_events"], sql
+        assert (task.status, task.final_score, task.completed_at) == (TaskStatus.DONE, 100, clock.now)
+        assert not s.dirty
+        await s.commit()
+    async with sm() as s:
+        stored = await svc.get_task(s, task_id)
+        sub = stored.last_submission
+        assert (stored.status, stored.final_score, stored.completed_at) == (TaskStatus.DONE, 100, clock.now)
+        assert (sub.decision, sub.final_score, sub.reviewer_id) == (ReviewDecision.APPROVED, 100, team.boss_id)
+
+
+async def test_rework_and_resubmit_keep_counters_and_dates(engine: AsyncEngine, clock) -> None:
+    """Доработка (rework_count + 1 в том же UPDATE, новый срок) и повторная сдача (дата сдачи, оценка сброшена)."""
+    sm = make_sessionmaker(engine)
+    team = await seed_team(sm)
+    task_id, sub_id = await submitted_task(sm, team, clock.now)
+    for attempt in (1, 2):
+        async with sm() as s:
+            boss = await s.get(User, team.boss_id)
+            new_deadline = clock.now + timedelta(days=5 + attempt)
+            task = await svc.review_rework(s, sub_id, boss, "Добавьте выводы", new_deadline)
+            assert (task.status, task.rework_count, task.deadline) == (TaskStatus.REWORK, attempt, new_deadline)
+            await s.commit()
+        clock.advance(hours=1)
+        async with sm() as s:
+            employee = await s.get(User, team.employee_id)
+            sub = await svc.submit_result(s, task_id, employee, fact_text=f"Попытка {attempt + 1}")
+            sub_id = sub.id
+            fields = (sub.task.status, sub.task.submitted_at, sub.task.ai_score)
+            assert fields == (TaskStatus.SUBMITTED, clock.now, None)
+            await s.commit()
+    async with sm() as s:
+        stored = await svc.get_task(s, task_id)
+        assert (stored.rework_count, stored.status, stored.submitted_at) == (2, TaskStatus.SUBMITTED, clock.now)
+        assert stored.deadline == clock.now - timedelta(hours=1) + timedelta(days=7)
+        assert [sub.attempt for sub in stored.submissions] == [1, 2, 3]
+        assert stored.accepted_at is not None
+
+
+async def test_kpi_is_one_query_and_matches_full_task_load(engine: AsyncEngine, clock) -> None:
+    """KPI периода считается одним запросом (поля задачи + опоздание последней сдачи) и совпадает с расчётом
+    по полностью загруженным задачам — в том числе когда опоздала не последняя сдача."""
+    sm = make_sessionmaker(engine)
+    team = await seed_team(sm)
+    now = clock.now
+    async with sm() as s:
+        boss = await s.get(User, team.boss_id)
+        employee = await s.get(User, team.employee_id)
+        fixed = await new_task(s, team, now, title="Опоздал, потом исправил", deadline=now + timedelta(hours=1))
+        # Срок — в этой же неделе (сейчас пятница, по умолчанию new_task ставит срок через 3 дня).
+        on_review = await new_task(s, team, now, title="На проверке", deadline=now + timedelta(days=1))
+        await new_task(s, team, now, title="В работе", deadline=now + timedelta(days=1))
+        overdue = await new_task(s, team, now, title="Просрочена", deadline=now + timedelta(hours=1))
+        await s.commit()
+        clock.advance(hours=2)  # сроки «Опоздал…» и «Просрочена» прошли
+        first = await svc.submit_result(s, fixed.id, employee, fact_text="Сделано")
+        assert first.is_late
+        await svc.record_evaluation(s, first.id, score=80, rationale="", source="rules")
+        await svc.review_rework(s, first.id, boss, "Доделать", clock.now + timedelta(days=1))
+        second = await svc.submit_result(s, fixed.id, employee, fact_text="Доделано")
+        assert not second.is_late
+        await svc.record_evaluation(s, second.id, score=110, rationale="", source="rules")
+        await svc.review_confirm(s, second.id, boss)
+        await svc.submit_result(s, on_review.id, employee, fact_text="Сделано")
+        await s.commit()
+        assert overdue.deadline < clock.now
+
+    period = periods.get_period("week", 0, clock.now)
+    async with sm() as s:
+        with _Statements(engine) as sql:
+            mine = await kpi.kpi_for_user(s, team.employee_id, period, clock.now)
+        assert len(sql) == 1, sql
+        with _Statements(engine) as sql:
+            rows = await kpi.kpi_for_team(s, period, clock.now)
+        assert len(sql) == 2, sql
+    async with sm() as s:
+        loaded = await kpi.period_tasks(s, period, assignee_ids=[team.employee_id])
+        expected = kpi.compute_kpi([kpi.TaskSnapshot.from_task(t) for t in loaded], clock.now)
+    assert mine == expected and [res for _user, res in rows] == [expected]
+    assert (mine.done, mine.done_on_time, mine.on_review, mine.overdue_open, mine.in_progress) == (1, 1, 1, 1, 1)
+
+
+async def test_due_reminders_marks_skipped_thresholds_in_one_insert(engine: AsyncEngine, clock) -> None:
+    """Подошли сразу три порога «до срока»: уходит ближайший, два других помечаются отправленными
+    одним INSERT (с датой записи у каждой строки); открытые и ждущие проверки задачи — одним запросом."""
+    sm = make_sessionmaker(engine)
+    team = await seed_team(sm)
+    async with sm() as s:
+        task = await new_task(s, team, clock.now, deadline=clock.now + timedelta(hours=2))
+        await s.commit()
+    async with sm() as s:
+        with _Statements(engine) as sql:
+            due = await reminders.due_reminders(s, clock.now)
+        assert [(r.task.id, r.kind) for r in due] == [(task.id, reminders.KIND_BEFORE_HOURS)]
+        assert sum(q.startswith("INSERT INTO reminder_log") for q in sql) == 1, sql
+        assert sum(q.startswith("SELECT tasks.") for q in sql) == 1, sql
+        await s.commit()
+    async with sm() as s:
+        stmt = select(ReminderLog.kind, ReminderLog.created_at).where(ReminderLog.task_id == task.id)
+        rows = (await s.execute(stmt)).all()
+    assert sorted(kind for kind, _ in rows) == ["before_1d", "before_3d"]
+    assert all(created is not None for _, created in rows)
+
+
+async def test_warm_up_opens_one_connection_and_never_fails(
+    engine: AsyncEngine, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Прогрев при запуске: по соединению в пулах (первый апдейт не ждёт подключения); база недоступна —
+    только предупреждение в лог, подключение повторится при первом обращении."""
+    fresh = make_engine("sqlite+aiosqlite:///:memory:") if engine.dialect.name == "sqlite" else engine
+    await db_base.warm_up(None, fresh)
+    if isinstance(fresh.pool, AsyncAdaptedQueuePool):
+        assert fresh.pool.checkedin() >= 1
+    unreachable = make_engine("postgresql://u:p@127.0.0.1:1/db", connect_args={"timeout": 2})
+    try:
+        with caplog.at_level(logging.WARNING, logger="bot.db.base"):
+            await db_base.warm_up(unreachable)
+    finally:
+        await unreachable.dispose()
+        if fresh is not engine:
+            await fresh.dispose()
+    assert "Не удалось заранее подключиться к базе" in caplog.text

@@ -29,6 +29,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from bot import notify
 from bot.ai import evaluate as ai_evaluate
 from bot.ai import evidence as ai_evidence
+from bot.ai import progress
 from bot.ai.provider import ai_available
 from bot.db.models import (
     OPEN_STATUSES,
@@ -40,6 +41,7 @@ from bot.db.models import (
     User,
 )
 from bot.filters import IsEmployee, TextInput
+from bot.fsm_storage import refresh_state
 from bot.handlers import common
 from bot.services import tasks as tasks_svc
 from bot.services.errors import DomainError
@@ -385,14 +387,15 @@ async def _reset(state: FSMContext, bot: Bot, chat_id: int) -> None:
         await _drop_kb(bot, chat_id, prompt_id)
 
 
-async def _stale(callback: CallbackQuery, state: FSMContext) -> bool:
+async def _stale(callback: CallbackQuery, state: FSMContext, data: dict[str, Any] | None = None) -> bool:
     """Кнопка не из текущего вопроса диалога (например, из прежней сдачи другой задачи) -> alert и True.
 
     Значения PickCB одинаковы во всех сдачах, поэтому без этой проверки старая кнопка
-    «📤 Отправить» отправила бы данные текущего диалога.
+    «📤 Отправить» отправила бы данные текущего диалога. data — уже прочитанные данные диалога.
     """
     msg = callback.message
-    if msg is not None and msg.message_id == await state.get_value("prompt_id"):
+    prompt_id = data.get("prompt_id") if data is not None else await state.get_value("prompt_id")
+    if msg is not None and msg.message_id == prompt_id:
         return False
     await callback.answer(STALE_BUTTON, show_alert=True)
     await common.remove_markup(callback)
@@ -747,8 +750,9 @@ async def on_confirm(
     state: FSMContext,
     bot: Bot,
 ) -> None:
+    data = await state.get_data()
     # Кнопка из старой сводки (в т.ч. по другой задаче) не должна отправить текущий диалог.
-    if await _stale(callback, state):
+    if await _stale(callback, state, data):
         return
     if callback_data.value != "yes":
         await callback.answer()
@@ -757,7 +761,21 @@ async def on_confirm(
         await state.clear()
         await common.deny(callback)
         return
-    data = await state.get_data()
+    # «Печатает…» — сразу после нажатия и до конца: сохранение, скачивание файлов, ответ AI.
+    chat_id = callback.message.chat.id if callback.message is not None else None
+    async with progress.typing(bot, chat_id):
+        await _send_result(callback, session, user, state, bot, data)
+
+
+async def _send_result(
+    callback: CallbackQuery,
+    session: AsyncSession,
+    user: User,
+    state: FSMContext,
+    bot: Bot,
+    data: dict[str, Any],
+) -> None:
+    """«📤 Отправить»: сохранить сдачу, предварительно оценить (AI или правила), уведомить руководителя."""
     await state.set_state(SubmitSG.sending)  # повторное нажатие не создаст вторую сдачу
     task_id = data.get("task_id")
     if not task_id or not data.get("fact"):
@@ -791,6 +809,9 @@ async def on_confirm(
         if await state.get_state() == SubmitSG.sending.state:
             await state.set_state(SubmitSG.confirm)
         raise
+    # Сдача сохранена — диалог закончен сразу, до обращений к Telegram: их сбой (сеть, RetryAfter,
+    # «query is too old») не должен оставить диалог в «отправляется» (кнопки старой сводки отвечали бы
+    # «⏳ уже отправляется…»). С хранилищем диалогов это изменение в памяти, без обмена с базой.
     await _clear_if(state, SubmitSG.sending)
     await callback.answer("📤 Отправлено")
 
@@ -798,10 +819,11 @@ async def on_confirm(
     title = task.title
     sub_id = sub.id
     task_line = f"📌 Задача #{task_id}: {esc(title)}"
+    # «⏳» — сразу после сохранения, до остальных обращений к базе.
     await common.edit_or_answer(
         callback,
         f"⏳ <b>Анализирую результат…</b>\n{task_line}\n"
-        "Это может занять до пары минут — сообщение обновится само.",
+        "Обычно это несколько секунд — сообщение обновится само.",
     )
 
     current: tuple[Task, Submission] | None = (task, sub)
@@ -973,8 +995,26 @@ async def _reload(session: AsyncSession, task_id: int, sub_id: int) -> tuple[Tas
 
 
 @router.callback_query(SubmitSG.sending, PickCB.filter(F.field != "cancel"))
-async def on_busy(callback: CallbackQuery) -> None:
-    await callback.answer("⏳ Результат уже отправляется…")
+async def on_busy(
+    callback: CallbackQuery,
+    callback_data: PickCB,
+    session: AsyncSession,
+    user: User | None,
+    state: FSMContext,
+    bot: Bot,
+) -> None:
+    # Перед «уже отправляется» — сверить диалог с базой (1 обмен, только в этом редком случае): при
+    # обновлении бота на хостинге отправку мог уже закончить другой экземпляр, а в памяти этого диалог
+    # ещё «отправляется» (bot.fsm_storage).
+    await refresh_state(state)
+    current = await state.get_state()
+    if current == SubmitSG.sending.state:
+        await callback.answer("⏳ Результат уже отправляется…")
+    elif current == SubmitSG.confirm.state and callback_data.field == "confirm":
+        # Отправка там не удалась (сбой базы) — сводка снова рабочая: это обычное нажатие «📤 Отправить».
+        await on_confirm(callback, callback_data, session, user, state, bot)
+    else:
+        await callback.answer(STALE_BUTTON)
 
 
 @router.callback_query(StateFilter(SubmitSG), PickCB.filter(F.field != "cancel"))

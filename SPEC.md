@@ -96,8 +96,12 @@ reviewer_id, reviewed_at)`; связи `task`, `reviewer`, `attachments`.
 `DigestLog(period_start UNIQUE, sent_at)` — отправленные еженедельные сводки (по одной на неделю, см. §8).
 Таблица добавлена позже: `init_db` (create_all) создаёт её в существующей базе, данные не трогаются.
 
-Все связи загружаются `selectin`, поэтому после `session.get(Task, id)` / `select(Task)` можно читать
-`task.assignee.full_name`, `task.submissions[-1].attachments` без MissingGreenlet. `expire_on_commit=False`.
+Все связи загружаются сразу (ленивых загрузок нет), поэтому после `session.get(Task, id)` / `select(Task)` можно
+читать `task.assignee.full_name`, `task.submissions[-1].attachments` без MissingGreenlet. «Многие к одному»
+(`task.assignee`, `created_by`, `manager`, `sub.task`, `sub.reviewer`, `attachment.submission`, `event.actor`) —
+`lazy="joined"` (LEFT JOIN в том же SELECT); коллекции (`task.submissions`, `sub.attachments`) — `selectin` (один
+запрос на уровень для всех загруженных объектов). Жадная загрузка не идёт по кругу: у задачи, полученной через
+`sub.task`, список сдач догружает `tasks._ensure_submissions_loaded`. `expire_on_commit=False`.
 
 ### Жизненный цикл задачи
 
@@ -337,14 +341,20 @@ google-genai), `bot/ai/openai_compat.py` (Groq, Cloudflare Workers AI, Mistral, 
 class AIUnavailable(Exception): ...
 MIN_OUTPUT_TOKENS = 8192
 def ai_available() -> bool                 # settings.ai_enabled
-def chain_budget_sec(settings=None) -> float   # 2 × ai_timeout_sec — весь перебор моделей и провайдеров
-def active_chain(settings=None) -> list[Provider]  # провайдеры с ключами в порядке AI_PROVIDERS
+Purpose = Literal["formulate", "evaluate"]  # назначение запроса: подсказка формулировки / оценка сдачи
+def ai_purpose(purpose) -> ContextManager  # with ai_purpose("formulate"): — назначение для generate_json в блоке
+def chain_budget_sec(settings=None, purpose=None) -> float  # 2 × ai_timeout_sec; formulate — ≤ AI_FORMULATE_BUDGET_SEC
+def attempt_timeout_sec(settings=None, purpose=None, *, with_files=False) -> float
+    # одна попытка: ai_timeout_sec + 5 с; formulate — ≤ AI_FORMULATE_TIMEOUT_SEC, evaluate без файлов — ≤ AI_EVALUATE_TIMEOUT_SEC
+def active_chain(settings=None, purpose=None) -> list[Provider]  # провайдеры с ключами в порядке AI_PROVIDERS
 async def generate_json(*, system: str, parts: list, schema: dict, max_output_tokens: int = 8192,
-                        time_budget: float | None = None) -> tuple[dict, str]
+                        time_budget: float | None = None, purpose: Purpose | None = None) -> tuple[dict, str]
     # -> (данные, имя_модели): для Gemini — имя модели («gemini-3.8-flash»), для остальных — «провайдер:модель»
     # («groq:openai/gpt-oss-120b»; Submission.ai_model ≤ 64 симв.). parts — список str и/или google.genai.types.Part.
     # Очередь попыток: провайдеры из settings.active_ai_providers по порядку × их модели по порядку
-    # (если в parts есть изображения — сначала модели, которые их видят). Следующая попытка — при:
+    # (settings.ai_models_for(name, purpose): у Gemini — свой порядок для formulate и evaluate, см. ниже;
+    # если в parts есть изображения — сначала модели, которые их видят). purpose — аргумент или ai_purpose().
+    # Следующая попытка — при:
     #   429 (лимит), «нужна оплата» (402; 400/403 c billing / FAILED_PRECONDITION / free tier; 429 «limit: 0»),
     #   404 / «модель не поддерживается», 5xx/408, таймаут, сеть, пустой ответ, ответ не JSON-объект,
     #   ответ не по схеме (нет обязательного поля, которое не может быть null; не тот тип; число строкой — годится).
@@ -356,14 +366,18 @@ async def generate_json(*, system: str, parts: list, schema: dict, max_output_to
     # size», context length) — только эта модель, без паузы: следующая (без фото, с бо́льшим лимитом) может принять.
     # Таймаут / сеть: оставшиеся модели провайдера уходят в конец очереди (время сначала другим провайдерам).
     # Паузы (в памяти процесса; cooldown_sec): лимит — retry-after сервиса (30 с…6 ч) или 10 мин, дневной — ≥ 1 ч;
-    # оплата / ключ / нет модели — 6 ч; 5xx и таймаут — 2 мин (таймаут — только если попытке досталось полное
-    # время ai_timeout_sec + 5 с, а не урезанный остаток); плохой ответ, сеть, запрос слишком большой — без паузы.
+    # оплата / ключ / нет модели — 6 ч; 5xx и таймаут — 4 мин (OVERLOAD_COOLDOWN_SEC; таймаут — только если
+    # попытке досталось полное время attempt_timeout_sec, а не урезанный остаток, и пауза касается только попыток
+    # не длиннее той: модель, не уложившаяся в 9 с формулировки, ещё спрашивается для оценки с 30 с);
+    # плохой ответ, сеть, запрос слишком большой — без паузы.
     # Модель / провайдер на паузе не спрашиваются; все на паузе — сразу AIUnavailable (без запросов).
-    # Время: весь перебор ≤ min(chain_budget_sec(), time_budget), включая ожидание свободного места у провайдера;
-    # одна попытка (с повтором без необязательных параметров) ≤ min(ai_timeout_sec + 5 с, остаток). Не ответил
-    # никто -> AIUnavailable. Ответ: первый целый JSON-объект (текст до/после, ```json, <think> — отбрасываются).
-    # Не больше 2 одновременных запросов к одному провайдеру. Ключи API никогда не логируются (тексты ошибок
-    # проходят через _safe: все ключи из settings.ai_secrets -> «***»); при старте в журнал — цепочка (только имена).
+    # Время: весь перебор ≤ min(chain_budget_sec(purpose), time_budget), включая ожидание свободного места у
+    # провайдера; одна попытка (с повтором без необязательных параметров) ≤ min(attempt_timeout_sec(purpose), остаток).
+    # Не ответил никто -> AIUnavailable. Ответ: первый целый JSON-объект (текст до/после, ```json, <think> —
+    # отбрасываются). Не больше 2 одновременных запросов к одному провайдеру для каждого назначения (формулировка
+    # не ждёт идущих оценок). Каждый ответ — в журнал со временем («AI <модель> (formulate): ответ за 0,8 с»).
+    # Ключи API никогда не логируются (тексты ошибок проходят через _safe: все ключи из settings.ai_secrets -> «***»);
+    # при старте в журнал — цепочка и порядок моделей Gemini для формулировки и оценки (только имена).
 async def close_client() -> None           # закрыть клиентов Gemini и httpx (при остановке бота)
 ```
 * **Gemini** (`gemini.GeminiProvider`): клиент `genai.Client(api_key=..., http_options=HttpOptions(timeout=ai_timeout_sec*1000))`
@@ -396,7 +410,13 @@ async def close_client() -> None           # закрыть клиентов Gem
 Настройки (`bot/config.py`): `ai_provider` / `AI_PROVIDER` = `auto` (по умолчанию) | `none`; прежнее `gemini` = `auto`.
 `ai_providers` / `AI_PROVIDERS` = `gemini,groq,cloudflare,mistral,openrouter` (регистр не важен, неизвестные имена
 пропускаются с предупреждением в журнале). `<провайдер>_models` / `<ПРОВАЙДЕР>_MODELS`, `ai_vision_models` /
-`AI_VISION_MODELS` — списки через запятую. Ключи — `repr=False`. Свойства: `ai_key_for(name)`, `ai_models_for(name)`,
+`AI_VISION_MODELS` — списки через запятую. Порядок моделей Gemini по назначению: `GEMINI_FORMULATE_MODELS` /
+`GEMINI_EVALUATE_MODELS` (точный порядок), иначе модели из `GEMINI_MODELS`, переставленные по
+`config.GEMINI_PURPOSE_ORDER`: формулировка — 3.5-flash-lite, 3.1-flash-lite, 3.6-flash, 3.5-flash, 3.7-flash,
+3.8-flash, gemma; оценка — 3.6-flash, 3.5-flash, 3.8-flash, 3.7-flash, затем облегчённые и gemma. Тайм-ауты:
+`AI_FORMULATE_TIMEOUT_SEC` = 9 (одна попытка формулировки), `AI_FORMULATE_BUDGET_SEC` = 25 (вся формулировка,
+потом правила), `AI_EVALUATE_TIMEOUT_SEC` = 30 (одна попытка оценки без файлов; с файлами — `AI_TIMEOUT_SEC` + 5 с);
+0 — без отдельного предела. Ключи — `repr=False`. Свойства: `ai_key_for(name)`, `ai_models_for(name, purpose=None)`,
 `active_ai_providers` (по порядку, с ключом и моделями), `ai_secrets`, `ai_enabled` = `ai_provider != "none"` и есть
 хотя бы один активный провайдер. GitHub Models (закрыт 30.07.2026), Cerebras, SambaNova, Together (нужна карта) —
 не используются.
@@ -829,7 +849,7 @@ async def send_backup(bot, sessionmaker, now: datetime | None = None) -> int
 | Задания по времени | APScheduler в процессе (`setup_scheduler`) | фоновый цикл `web.BackgroundLoop` каждые 5 мин → `jobs.run_due_jobs` (`GET /tick` — необязательный внешний резерв) |
 | Не уснуть на хостинге | — | `BackgroundLoop` каждые 10 мин: `GET <base_url>/health` через публичный адрес |
 | База | SQLite `data/bot.db` (по умолчанию) | PostgreSQL (Supabase, session pooler) |
-| Диалоги (FSM) | `bot/fsm_storage.DbStorage` (таблица `fsm_state`, запись вдогонку для SQLite) | `DbStorage` (на PostgreSQL — свой пул, §10.7): переживают перезапуск и деплой |
+| Диалоги (FSM) | `bot/fsm_storage.DbStorage` (таблица `fsm_state`; кэш в памяти, запись в базу — в фоне) | `DbStorage` (на PostgreSQL — свой пул, §10.7): кэш в памяти, запись в фоне через 0,5 с, перечитывание через 10 мин; переживают перезапуск и деплой |
 
 ### 10.2 Настройки (`bot/config.py`, готово)
 
@@ -959,15 +979,38 @@ def tick_schedule_summary(interval_sec: float | None = None) -> str   # расп
   PostgreSQL, если пароля в адресе нет или вместо него заглушка Supabase `[YOUR-PASSWORD]`
   (`is_password_placeholder`); спецсимволы экранировать не нужно; пароль, вписанный в адрес, важнее.
   Владелец вставляет строку «Session pooler» как есть, а пароль — отдельным полем Render (§10.9).
-* Пул на экземпляр: `pool_size=3, max_overflow=1` (`PG_POOL_SIZE`, `PG_MAX_OVERFLOW`), `pool_pre_ping=True`,
-  `pool_recycle=300` с; таймаут подключения 15 с. Плюс **отдельный пул хранилища диалогов** —
-  `make_storage_engine(url) -> AsyncEngine | None` (PostgreSQL — 1 соединение, `PG_STORAGE_POOL_SIZE`; SQLite —
-  `None`); `main.main` отдаёт его `DbStorage`. Причина: `DbStorage` на PostgreSQL пишет отдельной транзакцией,
-  пока сессия хендлера держит своё соединение, — из общего пула 5 одновременных апдейтов разных людей
-  ждали бы шестое соединение до `pool_timeout` (30 с). Итого ≤ 5 соединений на экземпляр, 10 при деплое
+* Пул на экземпляр: `pool_size=3, max_overflow=1` (`PG_POOL_SIZE`, `PG_MAX_OVERFLOW`), без `pool_pre_ping`,
+  `pool_recycle=1800` с (`PG_POOL_RECYCLE_SEC`), `pool_use_lifo=True`; таймаут подключения 15 с. Плюс
+  **отдельный пул хранилища диалогов** — `make_storage_engine(url) -> AsyncEngine | None` (PostgreSQL —
+  1 соединение, `PG_STORAGE_POOL_SIZE`; SQLite — `None`); `main.main` отдаёт его `DbStorage` и при запуске
+  открывает в нём соединение (`warm_up`). Причина: `DbStorage` читает диалог (первое обращение) и пишет
+  в фоне своим соединением, пока сессия хендлера держит своё, — из общего пула 5 одновременных апдейтов разных
+  людей ждали бы шестое соединение до `pool_timeout` (30 с). Итого ≤ 5 соединений на экземпляр, 10 при деплое
   (два экземпляра) — в пределах лимита бесплатного пулера Supabase. Порт 6543 / `?pgbouncer=true`
   (transaction pooler) — кэши подготовленных выражений выключаются; рекомендуемый режим всё равно
   session pooler (5432).
+* **Обмены с базой** (Render → Supabase в другом регионе: 130–190 мс на обмен, новое соединение 1–1,4 с;
+  в одном регионе — ~2 мс). Скорость ответа определяется числом обменов, поэтому:
+  * соединение проверяется перед выдачей из пула, только если простояло дольше `PG_PING_IDLE_SEC` (60 с), —
+    одним обменом (`SELECT 1` простым протоколом, таймаут 5 с; не ответило — соединение сразу обрывается
+    (`terminate`, без «вежливого» закрытия: при молча пропавшей связи asyncpg ждал бы ответа на отмену
+    минутами) и `DisconnectionError`, пул открывает новое). Стандартный `pool_pre_ping` стоил 3 обмена на
+    каждую выдачу;
+  * отложенный BEGIN (`_tune_postgres_engine`): соединение выдаётся в autocommit, чтения идут без транзакции,
+    BEGIN уходит перед первым выражением, которому транзакция нужна (DML, DDL, `text()`, FOR UPDATE/SHARE,
+    advisory-блокировки, nextval…). Сессия, которая только читала, — без BEGIN и COMMIT/ROLLBACK. Рассчитано на
+    READ COMMITTED (по умолчанию в PostgreSQL). На transaction pooler (6543 / `pgbouncer=true`) и StaticPool не
+    включается;
+  * `UserMiddleware` (`middlewares.load_user`) — одна сессия на апдейт, пользователь одним запросом;
+    соединение, оборвавшееся в пуле, — один повтор этого первого запроса на новом; `users.get_by_tg` берёт
+    уже загруженного пользователя из сессии;
+  * хранилище диалогов (`bot/fsm_storage.py`) — чтение из памяти, запись в базу в фоне одной транзакцией
+    (`INSERT … ON CONFLICT DO UPDATE` с версией `updated_at`, побеждает более новая); чтение ключа из базы
+    (часто первый запрос апдейта) при соединении, оборвавшемся в пуле, — один повтор на новом; перед ответом
+    «подождите» (ждём AI, результат отправляется, задача создаётся) хендлер сверяет флаг с базой
+    (`refresh_state`, 1 обмен только в этом случае) — при деплое его мог снять другой экземпляр;
+  * бюджеты обменов по сценариям — `tests/perf/test_roundtrip_budget.py` (`BUDGETS`): тест падает, если
+    изменение добавило апдейту обменов; модель обменов сверена с настоящим трафиком asyncpg (TCP-прокси).
 * `main.check_database(settings)` до подключения: заглушка `ВСТАВЬТЕ_СЮДА_…` (из `deploy/make_render_env.py`)
   в `DATABASE_URL`, пустой или неразборчивый адрес, не SQLite и не PostgreSQL → `ConfigError` с понятным
   текстом (значения в текст не попадают). `DATABASE_PASSWORD` проверяется, только если он нужен — в адресе

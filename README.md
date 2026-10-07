@@ -273,13 +273,16 @@ AI нужен для двух вещей: превратить слова рук
 | `TIMEZONE` | `Asia/Tashkent` | часовой пояс для сроков и напоминаний |
 | `AI_PROVIDER` | `auto` | `auto` — работать с AI (прежнее значение `gemini` работает так же); `none` — AI полностью выключен |
 | `AI_PROVIDERS` | `gemini,groq,cloudflare,mistral,openrouter` | порядок AI-провайдеров; провайдеры без ключа пропускаются. Например, `groq,gemini` — сначала Groq |
-| `GEMINI_MODELS` | `gemini-3.8-flash,gemini-3.7-flash,gemini-3.6-flash,gemini-3.5-flash,gemini-3.5-flash-lite,gemini-3.1-flash-lite,gemma-4-31b-it` | модели Gemini по порядку: закончился лимит у первой — берётся следующая |
+| `GEMINI_MODELS` | `gemini-3.8-flash,gemini-3.7-flash,gemini-3.6-flash,gemini-3.5-flash,gemini-3.5-flash-lite,gemini-3.1-flash-lite,gemma-4-31b-it` | какие модели Gemini спрашивать: закончился лимит у одной — берётся следующая. Для подсказки формулировки бот начинает с самых быстрых (3.5-flash-lite, 3.1-flash-lite…), для оценки — с 3.6-flash и 3.5-flash |
+| `GEMINI_FORMULATE_MODELS`, `GEMINI_EVALUATE_MODELS` | пусто | точный порядок моделей Gemini для подсказки формулировки и для оценки результата (если пусто — порядок выбирает бот, см. выше) |
 | `GROQ_MODELS` | `openai/gpt-oss-120b,qwen/qwen3.8-27b,openai/gpt-oss-20b` | модели Groq по порядку |
 | `CLOUDFLARE_MODELS` | `@cf/google/gemma-4-26b-a4b-it,@cf/mistralai/mistral-small-3.1-24b-instruct,@cf/openai/gpt-oss-120b` | модели Cloudflare по порядку |
 | `MISTRAL_MODELS` | `mistral-medium-latest,mistral-small-latest` | модели Mistral по порядку |
 | `OPENROUTER_MODELS` | `google/gemma-4-31b-it:free,nvidia/nemotron-3-super-120b-a12b:free,openrouter/free` | модели OpenRouter по порядку |
 | `AI_VISION_MODELS` | модели, которые видят фото (Qwen, Gemma, Mistral Small 3.1/Medium/Large, Llama 4 Scout) | каким моделям запасных провайдеров передавать фото; остальные получают только текст |
 | `AI_TIMEOUT_SEC` | `60` | сколько секунд ждать ответа одной модели; на весь перебор моделей и провайдеров — не больше удвоенного значения, потом расчёт по правилам |
+| `AI_FORMULATE_TIMEOUT_SEC`, `AI_FORMULATE_BUDGET_SEC` | `9`, `25` | подсказка формулировки: сколько ждать одну модель и всю подсказку (потом формулировка по правилам); `0` — без отдельного предела |
+| `AI_EVALUATE_TIMEOUT_SEC` | `30` | оценка результата без файлов: сколько ждать одну модель (с файлами — `AI_TIMEOUT_SEC` + 5 с); `0` — без отдельного предела |
 | `AI_READ_FILES` | `true` | передавать ли AI содержимое приложенных файлов (PDF, фото, Word, Excel, текст) |
 | `AI_MAX_FILE_MB` | `10` | файлы больше этого размера (МБ) AI не читает |
 | `MAX_SCORE` | `150` | максимальная оценка задачи, % |

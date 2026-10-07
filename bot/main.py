@@ -53,6 +53,7 @@ from bot.db.base import (
     make_sessionmaker,
     make_storage_engine,
     normalize_url,
+    warm_up,
 )
 from bot.handlers import (
     dashboard,
@@ -350,6 +351,13 @@ def _log_ai_chain(settings: Settings) -> None:
         return
     chain = " → ".join(f"{name} ({', '.join(settings.ai_models_for(name))})" for name in active)
     log.info("AI: %s → расчёт по правилам", chain)
+    if "gemini" in active:
+        # Формулировка и оценка спрашивают модели Gemini в своём порядке (быстрые — первыми для формулировки).
+        log.info(
+            "AI: порядок моделей Gemini — формулировка: %s; оценка: %s",
+            ", ".join(settings.ai_models_for("gemini", "formulate")),
+            ", ".join(settings.ai_models_for("gemini", "evaluate")),
+        )
     unused = [
         name for name in AI_PROVIDER_NAMES
         if name not in active and settings.ai_key_for(name) and name not in settings.ai_providers
@@ -620,6 +628,9 @@ async def main(settings: Settings | None = None) -> None:
     bot = Bot(settings.bot_token.strip(), default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     try:
         await _prepare_database(engine)
+        # Основной пул уже с соединением (init_db); пул хранилища диалогов — заранее, чтобы первый апдейт
+        # не ждал подключения к облачной базе (TCP + TLS + пароль — до 1,4 с).
+        await warm_up(storage_engine)
         sessionmaker = make_sessionmaker(engine)
         storage = default_storage(make_sessionmaker(storage_engine)) if storage_engine is not None else None
         dp = build_dispatcher(sessionmaker, storage)

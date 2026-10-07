@@ -15,7 +15,7 @@ from sqlalchemy import inspect as sa_inspect
 
 from bot.ai.base import TRIM_FACT, DataText
 from bot.ai.evidence import EvidenceItem, defuse_markers, evidence_to_parts
-from bot.ai.provider import AIUnavailable, ai_available, chain_budget_sec, generate_json
+from bot.ai.provider import AIUnavailable, ai_available, ai_purpose, chain_budget_sec, generate_json
 from bot.config import Settings, get_settings
 from bot.db.models import ReviewDecision, Submission, Task
 from bot.utils.dates import fmt_datetime, utcnow
@@ -38,7 +38,7 @@ def evaluation_budget_sec() -> float:
     По нему же задания по расписанию узнают оценку, прерванную остановкой бота
     (bot.scheduler.jobs.recover_stalled_evaluations).
     """
-    return chain_budget_sec(get_settings()) + 30
+    return chain_budget_sec(get_settings(), "evaluate") + 30
 
 
 @dataclass
@@ -100,13 +100,15 @@ async def evaluate_submission(
         return _rules_evaluation(task, submission)
     settings = get_settings()
     try:
-        data, model = await generate_json(
-            system=_system_prompt(settings),
-            parts=_build_parts(task, submission, evidence or []),
-            schema=_schema(settings),
-            max_output_tokens=_MAX_OUTPUT_TOKENS,
-            time_budget=time_budget,
-        )
+        # Назначение «evaluate»: сначала сильные модели (gemini-3.6-flash), попытка — до AI_EVALUATE_TIMEOUT_SEC.
+        with ai_purpose("evaluate"):
+            data, model = await generate_json(
+                system=_system_prompt(settings),
+                parts=_build_parts(task, submission, evidence or []),
+                schema=_schema(settings),
+                max_output_tokens=_MAX_OUTPUT_TOKENS,
+                time_budget=time_budget,
+            )
         score, rationale = _parse_answer(data, settings)
     except AIUnavailable as exc:
         logger.info("Оценка сдачи %s по правилам: %s", submission.id, exc)

@@ -29,9 +29,9 @@ DATABASE_URL вставляется в том виде, в каком его п�
 * берёт небольшой пул: ``pool_size=3, max_overflow=1`` — бесплатный пулер Supabase ограничивает
   число подключений, а при обновлении на Render ~1–2 минуты работают два экземпляра бота.
   Ещё одно соединение — отдельный пул хранилища диалогов (``make_storage_engine``): итого 5 на
-  экземпляр, 2 × 5 = 10 при обновлении; ``pool_pre_ping=True`` и ``pool_recycle=300`` — пулер
-  и сеть рвут простаивающие соединения, а бот на бесплатном Render засыпает: перед выдачей
-  соединение проверяется, а старше 5 минут — пересоздаётся;
+  экземпляр, 2 × 5 = 10 при обновлении;
+* бережёт обмены с базой (см. «Обмены с базой» ниже): проверяет соединение только после простоя,
+  пересоздаёт его раз в 30 минут, а не каждые 5, и не открывает транзакцию для одного чтения;
 * порт 6543 — transaction pooler Supabase (Supavisor / PgBouncer в режиме transaction):
   серверное соединение меняется после каждой транзакции, подготовленные выражения на нём
   не живут. Поэтому кэши выражений asyncpg и SQLAlchemy выключаются
@@ -42,6 +42,34 @@ DATABASE_URL вставляется в том виде, в каком его п�
 
 Явные ``**engine_kwargs`` у ``make_engine`` перекрывают значения по умолчанию (тесты так ставят
 ``poolclass=StaticPool``); ``connect_args`` объединяются.
+
+Обмены с базой (PostgreSQL). Бот на Render ходит в Supabase в другом регионе: один обмен (round
+trip) — 130–190 мс, новое соединение (TCP + TLS + SCRAM) — 1–1,4 с. Скорость ответа бота определяется
+числом обменов, поэтому движок PostgreSQL:
+
+* проверяет соединение перед выдачей из пула, только если оно простояло дольше
+  ``PG_PING_IDLE_SEC`` (60 с), — одним обменом (простой запрос ``SELECT 1`` с таймаутом
+  ``PG_PING_TIMEOUT_SEC``). Не ответило — соединение обрывается сразу (без «вежливого» закрытия: при
+  молча пропавшей связи оно ждало бы ответа минутами) и заменяется новым (``DisconnectionError``);
+  апдейт ошибки не видит — только ждёт таймаут проверки и новое соединение. Стандартный
+  ``pool_pre_ping`` проверял каждую выдачу тремя обменами (BEGIN; «;»; ROLLBACK), а выдач у одного
+  шага диалога — до десятка;
+* пересоздаёт соединения раз в ``PG_POOL_RECYCLE_SEC`` (30 мин), а не каждые 5 мин: у нового
+  соединения и пустой кэш подготовленных выражений (+1 обмен на каждый новый запрос);
+  ``pool_use_lifo`` — снова выдаётся последнее вернувшееся (уже проверенное, «тёплое») соединение;
+* откладывает BEGIN до первой записи (``_tune_postgres_engine``): соединение выдаётся в режиме autocommit,
+  и чтения идут без транзакции, а перед первым выражением, которому транзакция нужна (INSERT,
+  UPDATE, DELETE, SELECT … FOR UPDATE, текстовый SQL, DDL…), открывается обычная транзакция.
+  Сессия, которая только читала, обходится без BEGIN и COMMIT/ROLLBACK — минус 2 обмена; с записью
+  всё как раньше: BEGIN, запись, COMMIT. На уровне изоляции READ COMMITTED (по умолчанию в
+  PostgreSQL) каждое выражение и в транзакции видит свой свежий снимок данных, поэтому чтения до
+  первой записи видят то же, что видели бы в транзакции, а блокирующие чтения (FOR UPDATE/SHARE)
+  и функции с побочным эффектом (advisory-блокировки и т. п.) сами открывают транзакцию.
+  На transaction pooler (порт 6543) не включается: там вне транзакции подготовка и выполнение
+  выражения могут уйти на разные серверные соединения.
+
+SQLite: файл на том же компьютере, обмены бесплатные; sqlite3 и так не открывает транзакцию для
+SELECT. Там ничего из этого не нужно.
 
 ``init_db`` создаёт недостающие таблицы (существующие и данные не трогает). На PostgreSQL —
 под транзакционной advisory-блокировкой (два экземпляра бота, стартующие одновременно, не
@@ -55,18 +83,27 @@ from __future__ import annotations
 
 import ipaddress
 import logging
+import re
 import shlex
 import ssl
+import time
 import uuid
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
 from sqlalchemy import event, text
+from sqlalchemy import exc as sa_exc
 from sqlalchemy.engine import URL, make_url
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase
 from sqlalchemy.pool import QueuePool, StaticPool
+
+try:  # SQLAlchemy 2.1
+    from sqlalchemy.util.concurrency import await_, in_greenlet
+except ImportError:  # pragma: no cover - SQLAlchemy 2.0
+    from sqlalchemy.util import await_only as await_  # type: ignore[no-redef]
+    from sqlalchemy.util.concurrency import in_greenlet  # type: ignore[no-redef]
 
 __all__ = [
     "Base",
@@ -80,6 +117,7 @@ __all__ = [
     "make_storage_engine",
     "normalize_url",
     "postgres_connect_args",
+    "warm_up",
 ]
 
 log = logging.getLogger(__name__)
@@ -94,7 +132,10 @@ class Base(DeclarativeBase):
 PG_POOL_SIZE = 3
 PG_MAX_OVERFLOW = 1
 PG_STORAGE_POOL_SIZE = 1                # отдельный пул хранилища диалогов (make_storage_engine)
-PG_POOL_RECYCLE_SEC = 300
+PG_POOL_RECYCLE_SEC = 1800              # пересоздавать соединение раз в 30 мин (новое — 1–1,4 с до Supabase)
+PG_PING_IDLE_SEC = 60.0                 # проверять соединение перед выдачей, если оно простояло дольше
+PG_PING_TIMEOUT_SEC = 5.0               # проверка SELECT 1 не ответила за это время — соединение заменяется
+_PING_SQL = "SELECT 1"  # простой протокол, без подготовки выражения; пустой «;» asyncpg.execute не принимает
 PG_CONNECT_TIMEOUT_SEC = 15.0           # asyncpg по умолчанию ждёт 60 с — апдейт или задание столько не висят
 TRANSACTION_POOLER_PORT = 6543          # Supabase: transaction pooler (Supavisor)
 _INIT_LOCK_KEY = 0x6B70695F696E6974     # «kpi_init»: advisory-блокировка init_db
@@ -374,6 +415,123 @@ def _unique_statement_name() -> str:
     return f"__asyncpg_{uuid.uuid4().hex}__"
 
 
+def _is_transaction_pooler(url: URL, connect_args: dict[str, Any]) -> bool:
+    """Подключение через transaction pooler (порт 6543 Supabase, ``?pgbouncer=true``) или без кэша
+    выражений asyncpg: серверное соединение может смениться между транзакциями."""
+    if url.port == TRANSACTION_POOLER_PORT or connect_args.get("statement_cache_size") == 0:
+        return True
+    flag = url.query.get("pgbouncer")
+    return flag is not None and _query_value(flag).strip().lower() in _TRUE
+
+
+# --- PostgreSQL: меньше обменов с базой (см. «Обмены с базой» в описании модуля) --------------------
+
+_LAST_USED = "kpi_last_used"  # connection_record.info: когда соединение последний раз вернули в пул (monotonic)
+
+# Выражение, которому нужна транзакция, хотя это SELECT: блокировка строк или функция с побочным эффектом.
+_NEEDS_TRANSACTION_RE = re.compile(
+    r"\bFOR\s+(?:NO\s+KEY\s+UPDATE|UPDATE|KEY\s+SHARE|SHARE)\b"
+    r"|\b(?:pg_try_advisory|pg_advisory|nextval|setval|set_config|pg_notify|txid_current|pg_current_xact_id)\w*\s*\(",
+    re.IGNORECASE,
+)
+
+
+def _is_plain_read(statement: str, context: Any) -> bool:
+    """Обычное чтение, которому транзакция не нужна: собранный SQLAlchemy SELECT без FOR UPDATE/SHARE и
+    без функций с побочным эффектом. Всё остальное (DML, DDL, текстовый SQL, SAVEPOINT, CTE…) — нет."""
+    if getattr(context, "compiled", None) is None or context.is_text:
+        return False
+    if context.isinsert or context.isupdate or context.isdelete or context.isddl:
+        return False
+    if statement.lstrip()[:6].upper() != "SELECT":
+        return False
+    return _NEEDS_TRANSACTION_RE.search(statement) is None
+
+
+def _driver_connection_of(conn: Any) -> Any:
+    """DBAPI-адаптер asyncpg соединения SQLAlchemy (None — соединение закрыто или сброшено)."""
+    if conn.closed or conn.invalidated:
+        return None
+    return conn.connection.dbapi_connection
+
+
+def _ping(record: Any) -> None:
+    """Проверить простоявшее соединение одним обменом: простой запрос ``SELECT 1`` (asyncpg.execute без
+    параметров — простой протокол, без подготовки выражения; годится и для transaction pooler). Не ответило —
+    DisconnectionError: пул закроет его и выдаст новое. Пустой запрос «;» не годится: на нём asyncpg.execute
+    падает (у ответа нет статуса), и каждое простоявшее соединение заменялось бы новым (1–1,4 с).
+
+    Не ответившее соединение сначала обрывается (``terminate``), и только потом — DisconnectionError. Иначе
+    пул закрывал бы его «вежливо»: asyncpg перед закрытием ждёт ответа на отмену запроса, не ответившего по
+    таймауту, — без ограничения по времени и по тому же соединению. Если связь пропала молча (NAT или
+    балансировщик забыл соединение, сеть разорвана — без RST), ответа нет, и выдача соединения висела бы,
+    пока ОС не признает связь мёртвой (на Linux ~15 мин), держа апдейт, блокировку пользователя и место
+    в пуле. Оборванное сразу соединение пул закрывает мгновенно и открывает новое."""
+    if not in_greenlet():  # pragma: no cover - выдача соединения в async SQLAlchemy всегда в greenlet
+        return
+    try:
+        await_(record.driver_connection.execute(_PING_SQL, timeout=PG_PING_TIMEOUT_SEC))
+    except Exception as exc:  # noqa: BLE001 — любая ошибка: соединение использовать нельзя
+        log.info("Соединение с базой простояло и не отвечает (%s) — открываю новое", type(exc).__name__)
+        _abort_connection(record)
+        raise sa_exc.DisconnectionError(f"проверка соединения не прошла: {type(exc).__name__}") from exc
+
+
+def _abort_connection(record: Any) -> None:
+    """Оборвать соединение сразу, без обмена с сервером (asyncpg ``terminate``: закрыть сокет и отменить
+    ожидание ответа на отмену запроса). Не вышло (соединения уже нет) — неважно: его всё равно заменят."""
+    try:
+        driver_connection = record.driver_connection
+        if driver_connection is not None:
+            driver_connection.terminate()
+    except Exception:  # noqa: BLE001 — соединение и так выбрасывается
+        log.debug("Не удалось оборвать соединение с базой", exc_info=True)
+
+
+def _tune_postgres_engine(engine: AsyncEngine, *, deferred_begin: bool) -> None:
+    """Проверка соединения после простоя и отложенный BEGIN (см. «Обмены с базой» в описании модуля)."""
+    sync_engine = engine.sync_engine
+
+    def on_connect(dbapi_connection: Any, record: Any) -> None:
+        record.info[_LAST_USED] = time.monotonic()  # только что открыто — проверять не нужно
+        if deferred_begin:
+            dbapi_connection.autocommit = True
+
+    def on_checkout(dbapi_connection: Any, record: Any, _proxy: Any) -> None:
+        last_used = record.info.get(_LAST_USED)
+        if last_used is None or time.monotonic() - last_used > PG_PING_IDLE_SEC:
+            _ping(record)
+        if deferred_begin:
+            dbapi_connection.autocommit = True
+
+    def on_checkin(_dbapi_connection: Any, record: Any) -> None:
+        record.info[_LAST_USED] = time.monotonic()
+
+    event.listen(sync_engine, "connect", on_connect)
+    event.listen(sync_engine, "checkout", on_checkout)
+    event.listen(sync_engine, "checkin", on_checkin)
+    if not deferred_begin:
+        return
+
+    def begin_before_write(
+        conn: Any, _cursor: Any, statement: str, _parameters: Any, context: Any, _executemany: bool
+    ) -> None:
+        # Транзакции ещё нет (autocommit): выражению, которому она нужна, asyncpg сначала отправит BEGIN.
+        dbapi_connection = _driver_connection_of(conn)
+        if dbapi_connection is not None and dbapi_connection.autocommit and not _is_plain_read(statement, context):
+            dbapi_connection.autocommit = False
+
+    def defer_next_begin(conn: Any) -> None:
+        # COMMIT/ROLLBACK открытой транзакции asyncpg выполнит и так; следующая — снова с первой записи.
+        dbapi_connection = _driver_connection_of(conn)
+        if dbapi_connection is not None:
+            dbapi_connection.autocommit = True
+
+    event.listen(sync_engine, "before_cursor_execute", begin_before_write)
+    event.listen(sync_engine, "commit", defer_next_begin)
+    event.listen(sync_engine, "rollback", defer_next_begin)
+
+
 # --- Движок и сессии ------------------------------------------------------------------------------
 
 # Пулы без размера: pool_size / max_overflow / pool_timeout им передавать нельзя.
@@ -391,6 +549,7 @@ def make_engine(url: str | URL, *, password: str | None = None, **engine_kwargs:
     backend = parsed.get_backend_name()
 
     in_memory = False
+    source_url = parsed  # с параметрами: по ним видно transaction pooler
     if backend == "sqlite":
         database = parsed.database or ""
         in_memory = not database or ":memory:" in database or parsed.query.get("mode") == "memory"
@@ -402,11 +561,13 @@ def make_engine(url: str | URL, *, password: str | None = None, **engine_kwargs:
             Path(database).parent.mkdir(parents=True, exist_ok=True)
     elif backend == "postgresql":
         parsed, connect_args = postgres_connect_args(parsed)
+        # Без pool_pre_ping: он проверял каждую выдачу соединения тремя обменами с базой.
+        # Простоявшее соединение проверяет _tune_postgres_engine — одним обменом.
         kwargs.update(
-            pool_pre_ping=True,
             pool_size=PG_POOL_SIZE,
             max_overflow=PG_MAX_OVERFLOW,
             pool_recycle=PG_POOL_RECYCLE_SEC,
+            pool_use_lifo=True,
             connect_args=connect_args,
         )
 
@@ -419,11 +580,19 @@ def make_engine(url: str | URL, *, password: str | None = None, **engine_kwargs:
             merged["server_settings"] = {**base_settings, **extra_connect_args["server_settings"]}
         kwargs["connect_args"] = merged
     poolclass = kwargs.get("poolclass")
-    if poolclass is not None and not issubclass(poolclass, QueuePool):
-        for name in _SIZED_POOL_ARGS:
+    queue_pool = poolclass is None or issubclass(poolclass, QueuePool)
+    if not queue_pool:
+        for name in _SIZED_POOL_ARGS + ("pool_use_lifo",):
             kwargs.pop(name, None)
 
     engine = create_async_engine(parsed, **kwargs)
+
+    if backend == "postgresql":
+        # Отложенный BEGIN — только у своего пула соединений: на transaction pooler нельзя (см. описание
+        # модуля), а с одним общим соединением на все сессии (StaticPool в тестах) сессии и так делят
+        # одну транзакцию.
+        pooler = _is_transaction_pooler(source_url, kwargs.get("connect_args") or {})
+        _tune_postgres_engine(engine, deferred_begin=queue_pool and not pooler)
 
     if backend == "sqlite":
 
@@ -442,11 +611,12 @@ def make_engine(url: str | URL, *, password: str | None = None, **engine_kwargs:
 def make_storage_engine(url: str | URL, *, password: str | None = None, **engine_kwargs: Any) -> AsyncEngine | None:
     """Отдельный движок хранилища диалогов (``bot.fsm_storage.DbStorage``) для PostgreSQL; иначе None.
 
-    На PostgreSQL хранилище читает и пишет состояние диалога отдельной короткой транзакцией, пока
-    сессия хендлера (``DbSessionMiddleware``) держит своё соединение. Из общего пула пять апдейтов
-    разных людей заняли бы все соединения и ждали бы шестое для записи состояния — бот «вставал» бы
-    на ``pool_timeout`` (30 с). Свой пул из одного соединения (``PG_STORAGE_POOL_SIZE``) этого не
-    допускает: его операции занимают соединение на миллисекунды и сами ничего не ждут.
+    Хранилище держит диалоги в памяти и ходит в базу только при первом обращении к ключу (чтение) и
+    фоновой записью изменений (``bot.fsm_storage``), пока сессия хендлера (``DbSessionMiddleware``)
+    держит своё соединение. Из общего пула пять апдейтов разных людей заняли бы все соединения, и
+    чтение диалога ждало бы шестое — бот «вставал» бы на ``pool_timeout`` (30 с). Свой пул из одного
+    соединения (``PG_STORAGE_POOL_SIZE``) этого не допускает: его операции занимают соединение на
+    миллисекунды и сами ничего не ждут.
     SQLite (запись вдогонку, у базы в памяти — память) — None: хранилищу хватает основного движка.
     """
     if not is_postgres_url(url):
@@ -457,6 +627,20 @@ def make_storage_engine(url: str | URL, *, password: str | None = None, **engine
 
 def make_sessionmaker(engine: AsyncEngine) -> async_sessionmaker[AsyncSession]:
     return async_sessionmaker(engine, expire_on_commit=False)
+
+
+async def warm_up(*engines: AsyncEngine | None) -> None:
+    """Заранее открыть по соединению в пулах (при запуске бота), чтобы первый апдейт не ждал
+    подключения к облачной базе (TCP + TLS + пароль — 1–1,4 с). Ошибка — только в лог: подключение
+    повторится при первом обращении."""
+    for engine in engines:
+        if engine is None:
+            continue
+        try:
+            async with engine.connect():
+                pass
+        except Exception as exc:  # noqa: BLE001 — прогрев необязателен
+            log.warning("Не удалось заранее подключиться к базе: %s", type(exc).__name__)
 
 
 async def init_db(engine: AsyncEngine) -> None:

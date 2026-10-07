@@ -3,6 +3,12 @@
 Gemini — фейковый ``client.aio.models`` (bot.ai.gemini._client); OpenAI-совместимые провайдеры (Groq,
 Cloudflare, OpenRouter) — настоящий httpx-клиент с ``httpx.MockTransport`` вместо сети. Часы пауз
 (bot.ai.provider._now) подменены, чтобы проверять «через 10 минут модель снова спрашивается».
+
+Скорость: для подсказки формулировки сначала спрашивается самая быстрая модель (gemini-3.5-flash-lite), для оценки
+сдачи — gemini-3.6-flash; модель, ответившая 503 «high demand», несколько минут не спрашивается. Задержки моделей
+(замеры 07.10.2026) моделируются фейковыми часами — время ответа в тестах точное и не зависит от машины. Хендлеры
+(через настоящий Dispatcher и фейковый Telegram, tests/e2e/fakebot.py): «⏳ …» уходит до запроса к AI, пока
+AI думает — «печатает…».
 """
 
 from __future__ import annotations
@@ -21,14 +27,19 @@ import pytest
 from google.genai import errors as genai_errors
 from google.genai import types as genai_types
 
+from aiogram.enums import ChatAction
+from aiogram.methods import EditMessageText, SendChatAction, SendMessage
+
+from bot.ai import evaluate as evaluate_module
+from bot.ai import formulate as formulate_module
 from bot.ai import gemini as gemini_module
-from bot.ai import openai_compat, provider
+from bot.ai import openai_compat, progress, provider
 from bot.ai.base import TRIM_FACT, TRIM_FILES, DataText, Failure, ProviderError, classify_http, parse_retry_after
 from bot.ai.evaluate import _build_parts, evaluate_submission
 from bot.ai.evidence import EvidenceItem, evidence_to_parts
 from bot.ai.formulate import suggest_expected_result
 from bot.ai.provider import AIUnavailable, active_chain, ai_available, generate_json
-from bot.config import get_settings
+from bot.config import Settings, get_settings
 from bot.db.models import Submission, Task
 
 GEMINI_KEY = "gemini-secret-key-0001"
@@ -508,7 +519,7 @@ async def test_transient_errors_pause_briefly(chain_env, http, clock) -> None:
     http.on("openai/gpt-oss-120b", error(503, "overloaded"), chat(GOOD))
     with pytest.raises(AIUnavailable):
         await ask()
-    clock.advance(provider.SHORT_COOLDOWN_SEC + 1)
+    clock.advance(provider.OVERLOAD_COOLDOWN_SEC + 1)
     assert (await ask())[0] == GOOD
 
 
@@ -530,8 +541,8 @@ async def test_bad_answer_does_not_pause(chain_env, http, clock) -> None:
         (ProviderError(Failure.BILLING), provider.LONG_COOLDOWN_SEC),
         (ProviderError(Failure.AUTH), provider.LONG_COOLDOWN_SEC),
         (ProviderError(Failure.NOT_FOUND), provider.LONG_COOLDOWN_SEC),
-        (ProviderError(Failure.OVERLOADED), provider.SHORT_COOLDOWN_SEC),
-        (ProviderError(Failure.TIMEOUT), provider.SHORT_COOLDOWN_SEC),
+        (ProviderError(Failure.OVERLOADED), provider.OVERLOAD_COOLDOWN_SEC),
+        (ProviderError(Failure.TIMEOUT), provider.OVERLOAD_COOLDOWN_SEC),
         (ProviderError(Failure.NETWORK), 0),
         (ProviderError(Failure.BAD_ANSWER), 0),
         (ProviderError(Failure.BAD_REQUEST), 0),
@@ -573,7 +584,7 @@ async def test_chain_stops_when_time_budget_is_spent(chain_env, http, clock, mon
 
 
 async def test_timeout_of_a_shortened_attempt_does_not_pause_the_model(chain_env, clock, monkeypatch) -> None:
-    """gem-a «висела» полную попытку (AI_TIMEOUT_SEC + 5) — пауза 2 мин. gem-b досталось меньше (остаток
+    """gem-a «висела» полную попытку (AI_TIMEOUT_SEC + 5) — пауза 4 мин. gem-b досталось меньше (остаток
     времени перебора), и она не успела — это не повод ставить на паузу здоровую модель для всех."""
     chain_env(GROQ_API_KEY="")
 
@@ -700,10 +711,24 @@ def test_chain_budget_and_busy_flag_follow_timeout(set_env) -> None:
     from bot.ai.evaluate import evaluation_budget_sec
     from bot.handlers.task_create import _ai_busy_stale_sec
 
-    set_env(AI_TIMEOUT_SEC="30")
-    assert provider.chain_budget_sec() == 60
+    set_env(AI_TIMEOUT_SEC="30", AI_FORMULATE_TIMEOUT_SEC="9", AI_FORMULATE_BUDGET_SEC="25", AI_EVALUATE_TIMEOUT_SEC="30")
+    assert provider.chain_budget_sec() == provider.chain_budget_sec(purpose="evaluate") == 60
     assert evaluation_budget_sec() == 90
-    assert _ai_busy_stale_sec() > provider.chain_budget_sec() + 30
+    # Подсказка формулировки — свой короткий предел; флаг «AI думает» брошен не раньше, чем она обязана кончиться.
+    assert provider.chain_budget_sec(purpose="formulate") == 25
+    assert _ai_busy_stale_sec() > provider.chain_budget_sec(purpose="formulate") + provider.attempt_timeout_sec(
+        purpose="formulate"
+    )
+    # Попытка: AI_TIMEOUT_SEC + 5 с, для формулировки и оценки — не дольше своих пределов.
+    assert provider.attempt_timeout_sec() == 35
+    assert provider.attempt_timeout_sec(purpose="formulate") == 9
+    assert provider.attempt_timeout_sec(purpose="evaluate") == 30
+    # Оценка с PDF / фото — полное время попытки: чтение файлов моделью дольше.
+    assert provider.attempt_timeout_sec(purpose="evaluate", with_files=True) == 35
+    set_env(AI_TIMEOUT_SEC="10", AI_FORMULATE_BUDGET_SEC="0", AI_EVALUATE_TIMEOUT_SEC="0")
+    assert provider.attempt_timeout_sec(purpose="evaluate") == 15      # 0 — без своего предела
+    assert provider.attempt_timeout_sec(purpose="formulate") == 9
+    assert provider.chain_budget_sec(purpose="formulate") == 20        # 0 — общий предел 2 × AI_TIMEOUT_SEC
 
 
 # --- Файлы-подтверждения: изображения только моделям, которые их видят -----------------------------------
@@ -976,6 +1001,462 @@ def test_classify_http(status, message, kind, scope, daily) -> None:
 )
 def test_parse_retry_after(text, seconds) -> None:
     assert parse_retry_after(text) == seconds
+
+
+# --- Назначение запроса: порядок моделей, время попытки, паузы перегруженных моделей ------------------------
+
+DEFAULT_GEMINI_MODELS: list[str] = list(Settings.model_fields["gemini_models"].default)
+# Ответ, который подходит и подсказке формулировки, и оценке сдачи.
+COMBINED = json.dumps(
+    {
+        "expected_result": "Проверить 100 договоров и представить отчёт",
+        "plan_value": 100,
+        "plan_unit": "договоров",
+        "note": None,
+        "score": 110,
+        "rationale": "План 100, факт 110 — перевыполнение.",
+        "completeness": "exceeded",
+    },
+    ensure_ascii=False,
+)
+HIGH_DEMAND = api_error(
+    503, "This model is currently experiencing high demand. Spikes in demand are usually temporary.", "UNAVAILABLE"
+)
+# Сколько секунд модели Gemini отвечают (замеры 07.10.2026; 3.7-flash и gemma — оценка); gemini-3.8-flash
+# в тестах отвечает 503 «high demand» через 4 с.
+LATENCY = {
+    "gemini-3.8-flash": 4.0,
+    "gemini-3.7-flash": 2.5,
+    "gemini-3.6-flash": 1.8,
+    "gemini-3.5-flash": 6.0,
+    "gemini-3.5-flash-lite": 0.8,
+    "gemini-3.1-flash-lite": 1.0,
+    "gemma-4-31b-it": 3.0,
+}
+
+
+def _default(name: str) -> str:
+    return str(Settings.model_fields[name].default)
+
+
+@pytest.fixture
+def default_gemini(set_env) -> None:
+    """Только Gemini; модели и пределы времени — значения по умолчанию (а не из .env разработчика)."""
+    set_env(
+        AI_PROVIDER="auto",
+        AI_PROVIDERS="gemini",
+        GEMINI_API_KEY=GEMINI_KEY,
+        GROQ_API_KEY="",
+        GEMINI_MODELS=",".join(DEFAULT_GEMINI_MODELS),
+        GEMINI_FORMULATE_MODELS="",
+        GEMINI_EVALUATE_MODELS="",
+        AI_TIMEOUT_SEC=_default("ai_timeout_sec"),
+        AI_FORMULATE_TIMEOUT_SEC=_default("ai_formulate_timeout_sec"),
+        AI_FORMULATE_BUDGET_SEC=_default("ai_formulate_budget_sec"),
+        AI_EVALUATE_TIMEOUT_SEC=_default("ai_evaluate_timeout_sec"),
+    )
+
+
+class TimedGemini(FakeGemini):
+    """Фейковый Gemini, у которого каждая модель «думает» LATENCY[model] секунд по часам цепочки (clock)."""
+
+    def __init__(self, clock: Clock, script: dict[str, list[Any]]) -> None:
+        super().__init__(script)
+        self.clock = clock
+
+    async def generate_content(self, *, model: str, contents: list, config: Any) -> Any:
+        self.clock.advance(LATENCY[model])
+        return await super().generate_content(model=model, contents=contents, config=config)
+
+
+async def timed_ask(clock: Clock, purpose: provider.Purpose | None) -> tuple[str, float]:
+    """(модель, сколько секунд по часам цепочки занял ответ)."""
+    started = clock.now
+    _, model = await generate_json(system="s", parts=["p"], schema=SCHEMA, purpose=purpose)
+    return model, round(clock.now - started, 3)
+
+
+def test_purpose_model_order_by_default(default_gemini) -> None:
+    """Те же модели GEMINI_MODELS, но для формулировки — сначала быстрые flash-lite, для оценки — 3.6-flash."""
+    settings = get_settings()
+    formulate = settings.ai_models_for("gemini", "formulate")
+    evaluate = settings.ai_models_for("gemini", "evaluate")
+    assert settings.ai_models_for("gemini") == DEFAULT_GEMINI_MODELS  # без назначения — как в GEMINI_MODELS
+    assert formulate[:2] == ["gemini-3.5-flash-lite", "gemini-3.1-flash-lite"]
+    assert evaluate[:3] == ["gemini-3.6-flash", "gemini-3.5-flash", "gemini-3.8-flash"]
+    assert evaluate.index("gemini-3.5-flash-lite") > evaluate.index("gemini-3.8-flash")  # облегчённые — запасом
+    assert sorted(formulate) == sorted(evaluate) == sorted(DEFAULT_GEMINI_MODELS)
+    assert [chain.models for chain in active_chain(purpose="formulate")] == [formulate]
+    assert [chain.models for chain in active_chain(purpose="evaluate")] == [evaluate]
+
+
+def test_purpose_model_order_keeps_env_overrides(default_gemini, set_env) -> None:
+    """GEMINI_MODELS по-прежнему решает, КАКИЕ модели спрашивать (порядок — по назначению; незнакомые — в конце);
+    GEMINI_FORMULATE_MODELS / GEMINI_EVALUATE_MODELS задают порядок целиком. У остальных провайдеров порядок один."""
+    set_env(GEMINI_MODELS="gemini-3.8-flash, my-new-model, gemini-3.6-flash, gemini-3.5-flash-lite")
+    settings = get_settings()
+    assert settings.ai_models_for("gemini", "formulate") == [
+        "gemini-3.5-flash-lite", "gemini-3.6-flash", "gemini-3.8-flash", "my-new-model"
+    ]
+    assert settings.ai_models_for("gemini", "evaluate") == [
+        "gemini-3.6-flash", "gemini-3.8-flash", "gemini-3.5-flash-lite", "my-new-model"
+    ]
+    set_env(GEMINI_FORMULATE_MODELS="my-new-model, gemini-3.8-flash", GEMINI_EVALUATE_MODELS=" only-this ")
+    settings = get_settings()
+    assert settings.ai_models_for("gemini", "formulate") == ["my-new-model", "gemini-3.8-flash"]
+    assert settings.ai_models_for("gemini", "evaluate") == ["only-this"]
+    assert settings.ai_models_for("gemini") == [
+        "gemini-3.8-flash", "my-new-model", "gemini-3.6-flash", "gemini-3.5-flash-lite"
+    ]
+    set_env(GROQ_MODELS="b-model,a-model")
+    assert get_settings().ai_models_for("groq", "formulate") == ["b-model", "a-model"]
+
+
+async def test_formulate_asks_fastest_model_with_short_attempt_evaluate_the_strong_one(
+    default_gemini, monkeypatch
+) -> None:
+    """Подсказка формулировки: gemini-3.5-flash-lite, попытка 8–10 с; оценка сдачи: gemini-3.6-flash, попытка длиннее."""
+    seen: list[tuple[str, float]] = []
+
+    async def spy(self: Any, *, model: str, timeout: float, **_: Any) -> str:
+        seen.append((model, timeout))
+        return COMBINED
+
+    monkeypatch.setattr(gemini_module.GeminiProvider, "generate", spy)
+    monkeypatch.setattr(formulate_module, "_seen", type(formulate_module._seen)())
+    assert (await suggest_expected_result("Анализ", "посмотреть 100 договоров")).source == "ai"
+    task, sub = make_pair()
+    assert (await evaluate_submission(task, sub)).model == "gemini-3.6-flash"
+    pdf = EvidenceItem(name="акт.pdf", kind="pdf", data=PDF, mime_type="application/pdf")
+    assert (await evaluate_submission(task, sub, [pdf])).model == "gemini-3.6-flash"
+    settings = get_settings()
+    assert seen == [
+        ("gemini-3.5-flash-lite", settings.ai_formulate_timeout_sec),
+        ("gemini-3.6-flash", settings.ai_evaluate_timeout_sec),
+        ("gemini-3.6-flash", settings.ai_timeout_sec + 5),  # с PDF — полное время попытки
+    ]
+    assert 8 <= settings.ai_formulate_timeout_sec <= 10 < settings.ai_evaluate_timeout_sec
+    assert settings.ai_evaluate_timeout_sec < settings.ai_timeout_sec + 5
+
+
+async def test_measured_latency_fast_model_first_and_overloaded_model_skipped(default_gemini, clock, monkeypatch) -> None:
+    """Замер на фейковых задержках (LATENCY). Прежний общий порядок (3.8-flash первой) — 6,5 с на ответ: 4 с ждём
+    503 от 3.8-flash, потом 3.7-flash; следующие 4 минуты 3.8-flash не спрашивается — 2,5 с. Подсказка
+    формулировки отвечает за 0,8 с (3.5-flash-lite), оценка — за 1,8 с (3.6-flash)."""
+    script: dict[str, list[Any]] = {model: [json.dumps(GOOD)] for model in LATENCY}
+    script["gemini-3.8-flash"] = [HIGH_DEMAND]
+    gem = TimedGemini(clock, script)
+    monkeypatch.setattr(gemini_module, "_client", SimpleNamespace(aio=SimpleNamespace(models=gem)))
+
+    assert await timed_ask(clock, None) == ("gemini-3.7-flash", 6.5)
+    assert await timed_ask(clock, None) == ("gemini-3.7-flash", 2.5)          # 3.8-flash на паузе
+    assert await timed_ask(clock, "formulate") == ("gemini-3.5-flash-lite", 0.8)
+    assert await timed_ask(clock, "evaluate") == ("gemini-3.6-flash", 1.8)
+    assert gem.calls.count("gemini-3.8-flash") == 1
+    assert provider._cooldown_reason("gemini", "gemini-3.8-flash") == "сервис перегружен, ещё 4 мин"
+
+    clock.advance(provider.OVERLOAD_COOLDOWN_SEC - 30)
+    assert await timed_ask(clock, None) == ("gemini-3.7-flash", 2.5)          # пауза ещё идёт
+    clock.advance(30)
+    assert await timed_ask(clock, None) == ("gemini-3.7-flash", 6.5)          # пауза кончилась — спросили снова
+    assert gem.calls.count("gemini-3.8-flash") == 2
+    assert 3 * 60 <= provider.OVERLOAD_COOLDOWN_SEC <= 5 * 60
+
+
+async def test_evaluate_skips_overloaded_model_for_minutes(default_gemini, fake_gemini, clock) -> None:
+    """Оценка: 3.6-flash ответила 503 — оценку даёт 3.5-flash; следующие минуты 3.6-flash не спрашивается
+    (ожидание её отказа не повторяется на каждой сдаче), потом — снова первая."""
+    gem = fake_gemini({"gemini-3.6-flash": [HIGH_DEMAND, COMBINED], "gemini-3.5-flash": [COMBINED]})
+    task, sub = make_pair()
+    assert (await evaluate_submission(task, sub)).model == "gemini-3.5-flash"
+    clock.advance(3 * 60)
+    assert (await evaluate_submission(task, sub)).model == "gemini-3.5-flash"
+    assert gem.calls == ["gemini-3.6-flash", "gemini-3.5-flash", "gemini-3.5-flash"]
+    clock.advance(provider.OVERLOAD_COOLDOWN_SEC - 3 * 60 + 1)
+    assert (await evaluate_submission(task, sub)).model == "gemini-3.6-flash"
+
+
+async def test_timeout_pause_applies_only_to_attempts_not_longer(chain_env, fake_gemini, clock) -> None:
+    """gem-a не ответила за 9 с подсказки формулировки — для формулировок она на паузе, но оценке (30 с) её
+    спрашивают; не ответила за 30 с оценки — на паузе и для формулировок (там ждать ещё меньше)."""
+    chain_env(
+        GROQ_API_KEY="",
+        GEMINI_FORMULATE_MODELS="gem-a,gem-b",
+        GEMINI_EVALUATE_MODELS="gem-a,gem-b",
+        AI_FORMULATE_TIMEOUT_SEC="9",
+        AI_FORMULATE_BUDGET_SEC="25",
+        AI_EVALUATE_TIMEOUT_SEC="30",
+    )
+    gem = fake_gemini({
+        "gem-a": [asyncio.TimeoutError(), json.dumps(GOOD), asyncio.TimeoutError()],
+        "gem-b": [json.dumps(GOOD)],
+    })
+
+    async def ask_for(purpose: provider.Purpose) -> str:
+        return (await generate_json(system="s", parts=["p"], schema=SCHEMA, purpose=purpose))[1]
+
+    assert await ask_for("formulate") == "gem-b"   # gem-a: таймаут 9 с
+    assert await ask_for("formulate") == "gem-b"   # gem-a на паузе для формулировок
+    assert await ask_for("evaluate") == "gem-a"    # для оценки — спрашивается и отвечает
+    assert gem.calls == ["gem-a", "gem-b", "gem-b", "gem-a"]
+
+    clock.advance(provider.OVERLOAD_COOLDOWN_SEC + 1)
+    assert await ask_for("evaluate") == "gem-b"    # gem-a: таймаут 30 с
+    assert await ask_for("formulate") == "gem-b"   # и для формулировок на паузе
+    assert gem.calls[4:] == ["gem-a", "gem-b", "gem-b"]
+
+
+async def test_ai_purpose_context_applies_inside_block_only(default_gemini, monkeypatch) -> None:
+    """``with ai_purpose(...)`` задаёт назначение для generate_json (явный purpose= важнее) только внутри блока."""
+    seen: list[str] = []
+
+    async def spy(self: Any, *, model: str, **_: Any) -> str:
+        seen.append(model)
+        return json.dumps(GOOD)
+
+    monkeypatch.setattr(gemini_module.GeminiProvider, "generate", spy)
+    with provider.ai_purpose("formulate"):
+        await ask()
+        await generate_json(system="s", parts=["p"], schema=SCHEMA, purpose="evaluate")
+    await ask()
+    assert seen == ["gemini-3.5-flash-lite", "gemini-3.6-flash", DEFAULT_GEMINI_MODELS[0]]
+
+
+async def test_formulate_does_not_wait_for_busy_evaluations(chain_env, http) -> None:
+    """Места у провайдера заняты двумя долгими оценками — подсказка формулировки всё равно спрашивается сразу."""
+    chain_env(GEMINI_API_KEY="")
+    http.on("openai/gpt-oss-120b", chat(GOOD))
+    busy = provider._semaphore("groq", "evaluate")
+    for _ in range(provider._CONCURRENCY):
+        await busy.acquire()
+    try:
+        assert (await generate_json(system="s", parts=["p"], schema=SCHEMA, purpose="formulate"))[0] == GOOD
+        with pytest.raises(AIUnavailable, match="провайдер занят"):
+            await generate_json(
+                system="s", parts=["p"], schema=SCHEMA, purpose="evaluate", time_budget=provider._MIN_ATTEMPT_SEC + 0.3
+            )
+    finally:
+        for _ in range(provider._CONCURRENCY):
+            busy.release()
+
+
+async def test_successful_answer_is_logged_with_time(default_gemini, fake_gemini, clock, caplog) -> None:
+    caplog.set_level(logging.INFO, logger="bot.ai.provider")
+    fake_gemini({"gemini-3.5-flash-lite": [json.dumps(GOOD)]})
+    await generate_json(system="s", parts=["p"], schema=SCHEMA, purpose="formulate")
+    assert "AI gemini-3.5-flash-lite (formulate): ответ за 0,0 с" in caplog.text
+
+
+# --- «Печатает…», пока бот ждёт AI -------------------------------------------------------------------------
+
+
+class ActionBot:
+    """Вместо aiogram.Bot: запоминает send_chat_action; fail — Telegram отвечает ошибкой."""
+
+    def __init__(self, *, fail: bool = False) -> None:
+        self.actions: list[tuple[int, str]] = []
+        self.fail = fail
+
+    async def send_chat_action(self, *, chat_id: int, action: str, **_: Any) -> bool:
+        self.actions.append((chat_id, action))
+        if self.fail:
+            raise RuntimeError("Telegram недоступен")
+        return True
+
+
+async def test_typing_indicator_repeats_while_waiting_and_stops_after() -> None:
+    bot = ActionBot()
+    async with progress.typing(bot, 42, interval=0.02):  # type: ignore[arg-type]
+        await asyncio.sleep(0.15)
+    sent = len(bot.actions)
+    assert sent >= 2 and set(bot.actions) == {(42, ChatAction.TYPING)}
+    await asyncio.sleep(0.1)
+    assert len(bot.actions) == sent  # после блока — больше ни одного действия
+    assert progress.TYPING_INTERVAL_SEC < 5  # Telegram показывает «печатает…» около 5 с
+
+
+async def test_typing_indicator_never_breaks_the_work() -> None:
+    before = set(progress._tasks)
+    broken = ActionBot(fail=True)
+    async with progress.typing(broken, 42, interval=0.01):  # type: ignore[arg-type]
+        await asyncio.sleep(0.1)
+    assert len(broken.actions) == 1  # ошибка Telegram просто выключила индикатор
+    async with progress.typing(None, 42):
+        pass
+    bot = ActionBot()
+    with pytest.raises(ValueError):
+        async with progress.typing(bot, 7, interval=0.01):  # type: ignore[arg-type]
+            await asyncio.sleep(0)
+            raise ValueError("ошибка внутри блока проходит наружу")
+    await asyncio.sleep(0.05)
+    assert not progress._tasks - before  # задачи индикатора завершились и забыты
+
+
+# --- Хендлеры: «⏳ …» сразу, «печатает…», пока AI думает ------------------------------------------------------
+
+
+@pytest.fixture
+async def bot_app(set_env, engine, storage_engine):
+    """Бот целиком на фейковом Telegram (как фикстура ``app`` в tests/e2e/conftest.py)."""
+    from aiogram import Bot
+    from aiogram.client.default import DefaultBotProperties
+    from e2e.conftest import E2E_ENV, release_bot_routers
+    from e2e.fakebot import BotHarness, FakeSession
+
+    from bot.db.base import make_sessionmaker
+    from bot.main import build_dispatcher, default_storage
+
+    set_env(**E2E_ENV)
+    sessionmaker = make_sessionmaker(engine)
+    storage = default_storage(make_sessionmaker(storage_engine)) if storage_engine is not None else None
+    release_bot_routers()
+    bot = Bot("42:TEST", session=FakeSession(), default=DefaultBotProperties(parse_mode="HTML"))
+    harness = BotHarness(build_dispatcher(sessionmaker, storage), bot, sessionmaker)
+    try:
+        yield harness
+    finally:
+        await bot.session.close()
+        release_bot_routers()
+
+
+class SlowAI:
+    """generate_json, который «думает» thinking секунд и запоминает, какие запросы к Telegram ушли до него."""
+
+    def __init__(self, harness: Any, answer: dict[str, Any], thinking: float = 0.15) -> None:
+        self.harness = harness
+        self.answer = answer
+        self.thinking = thinking
+        self.calls_before: list[Any] = []
+
+    async def __call__(self, **_: Any) -> tuple[dict[str, Any], str]:
+        self.calls_before = [call.method for call in self.harness.api.calls]
+        await asyncio.sleep(self.thinking)
+        return dict(self.answer), "gemini-test"
+
+
+def enable_ai(monkeypatch, slow: SlowAI, *modules: Any) -> None:
+    """ai_available() -> True и generate_json -> slow в модулях, которые импортировали их по имени."""
+    for module in modules:
+        monkeypatch.setattr(module, "ai_available", lambda: True)
+        if hasattr(module, "generate_json"):
+            monkeypatch.setattr(module, "generate_json", slow)
+
+
+def wait_and_typing(methods: list[Any], wait_text: str) -> tuple[int, list[int]]:
+    """Индекс сообщения «⏳ …» и индексы «печатает…» среди запросов к Telegram."""
+    wait = next(
+        index for index, method in enumerate(methods)
+        if isinstance(method, SendMessage | EditMessageText) and wait_text in method.text
+    )
+    typing = [index for index, method in enumerate(methods) if isinstance(method, SendChatAction)]
+    assert all(methods[index].action == ChatAction.TYPING for index in typing)
+    return wait, typing
+
+
+def shown_before_ai(slow: SlowAI, started: int, wait_text: str) -> bool:
+    return any(
+        isinstance(method, SendMessage | EditMessageText) and wait_text in method.text
+        for method in slow.calls_before[started:]
+    )
+
+
+FORMULATED = {
+    "expected_result": "Проверить 100 договоров и представить отчёт",
+    "plan_value": 100,
+    "plan_unit": "договоров",
+    "note": None,
+}
+
+
+async def test_create_task_shows_wait_message_first_and_types_while_ai_thinks(bot_app, monkeypatch) -> None:
+    from bot.ui.texts import BTN_NEW_TASK
+
+    h = bot_app
+    await h.seed_user(1001, "Петрова Анна Сергеевна", role="manager")
+    await h.seed_user(2001, "Иванов Иван Иванович", position="Юрист")
+    await h.send_command(1001, "start")
+    await h.press_menu(1001, BTN_NEW_TASK)
+    await h.press_button(1001, "Иванов")
+    await h.send_text(1001, "Провести анализ договоров")
+
+    slow = SlowAI(h, FORMULATED)
+    enable_ai(monkeypatch, slow, formulate_module, provider)
+    started = len(h.api.calls)
+    log = list(await h.send_text(1001, "проверить 100 договоров и представить отчёт"))
+
+    wait, typing = wait_and_typing(log, "⏳ Формулирую измеримый результат")
+    assert wait == 0, "«⏳» — первое, что видит руководитель"
+    assert shown_before_ai(slow, started, "⏳ Формулирую измеримый результат")
+    assert typing and min(typing) > wait  # «печатает…» — после «⏳» (новое сообщение его сбросило бы)
+    assert "Проверить 100 договоров и представить отчёт" in (h.last_text(1001) or "")
+
+    log = list(await h.press_button(1001, "Другой вариант"))
+    wait, typing = wait_and_typing(log, "⏳ Формулирую другой вариант")
+    assert shown_before_ai(slow, len(h.api.calls) - len(log), "⏳ Формулирую другой вариант")
+    assert typing and min(typing) > wait
+
+
+async def test_propose_shows_wait_message_first_and_types_while_ai_thinks(bot_app, monkeypatch) -> None:
+    from bot.ui.texts import BTN_PROPOSE
+
+    h = bot_app
+    await h.seed_user(1001, "Петрова Анна Сергеевна", role="manager")
+    await h.seed_user(2001, "Иванов Иван Иванович", position="Юрист")
+    await h.send_command(2001, "start")
+    await h.press_menu(2001, BTN_PROPOSE)
+    await h.send_text(2001, "Анализ договоров поставщиков")
+
+    slow = SlowAI(h, FORMULATED)
+    enable_ai(monkeypatch, slow, formulate_module, provider)
+    started = len(h.api.calls)
+    log = list(await h.send_text(2001, "проверить 100 договоров"))
+
+    wait, typing = wait_and_typing(log, "⏳ Формулирую измеримый результат")
+    assert wait == 0
+    assert shown_before_ai(slow, started, "⏳ Формулирую измеримый результат")
+    assert typing and min(typing) > wait
+    assert "Проверить 100 договоров и представить отчёт" in (h.last_text(2001) or "")
+
+
+async def test_submit_types_from_the_tap_and_shows_wait_before_ai(bot_app, monkeypatch) -> None:
+    from datetime import timedelta
+
+    from bot.db.models import Priority, TaskSource, TaskStatus
+    from bot.handlers import task_submit
+    from bot.ui.texts import BTN_SUBMIT
+    from bot.utils.dates import utcnow
+
+    h = bot_app
+    mgr = await h.seed_user(1001, "Петрова Анна Сергеевна", role="manager")
+    emp = await h.seed_user(2001, "Иванов Иван Иванович", position="Юрист")
+    await h.send_command(1001, "start")
+    await h.send_command(2001, "start")
+    async with h.db() as session:
+        session.add(Task(
+            title="Анализ договоров", expected_result="Проверить 100 договоров и представить отчёт",
+            plan_value=100.0, plan_unit="договоров", deadline=utcnow() + timedelta(days=3), priority=Priority.MEDIUM,
+            weight=20, status=TaskStatus.ACTIVE, source=TaskSource.MANAGER, assignee_id=emp.id,
+            created_by_id=mgr.id, manager_id=mgr.id,
+        ))
+        await session.commit()
+    await h.press_menu(2001, BTN_SUBMIT)
+    await h.press_button(2001, "Анализ договоров")
+    await h.send_text(2001, "Проверено 110 договоров, в 12 выявлены нарушения")
+    await h.send_text(2001, "Подготовлены рекомендации по нарушениям")
+    if "Фактическое значение" in (h.last_text(2001) or ""):
+        await h.send_text(2001, "110")
+    await h.press_button(2001, "Без файлов")
+
+    slow = SlowAI(h, {"score": 110, "rationale": "План 100, факт 110.", "completeness": "exceeded"})
+    enable_ai(monkeypatch, slow, evaluate_module, provider, task_submit)
+    started = len(h.api.calls)
+    log = list(await h.press_button(2001, "Отправить"))
+
+    to_employee = [method for method in log if getattr(method, "chat_id", None) == 2001]
+    wait, typing = wait_and_typing(to_employee, "Анализирую результат")
+    assert typing and min(typing) < wait, "«печатает…» — сразу после нажатия, ещё до сохранения сдачи"
+    assert shown_before_ai(slow, started, "Анализирую результат"), "«⏳ Анализирую…» — до запроса к AI"
+    assert "Результат отправлен руководителю" in (h.last_text(2001) or "")
 
 
 # --- Журнал при запуске --------------------------------------------------------------------------------

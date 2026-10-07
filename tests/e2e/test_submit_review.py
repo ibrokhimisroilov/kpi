@@ -16,6 +16,9 @@ from datetime import timedelta
 from typing import Any
 
 import pytest
+from aiogram.exceptions import TelegramNetworkError
+from aiogram.methods import AnswerCallbackQuery
+from aiogram.types import CallbackQuery
 from openpyxl import Workbook
 from sqlalchemy import select
 
@@ -970,6 +973,30 @@ async def test_double_press_send_creates_one_submission(app: BotHarness) -> None
     assert MGR not in again.chats
     subs = await h.scalars(select(Submission).where(Submission.task_id == task_id))
     assert len(subs) == 1
+
+
+async def test_telegram_error_after_saving_does_not_leave_dialog_sending(
+    app: BotHarness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Сдача сохранена, а ответ на нажатие «📤 Отправить» не дошёл до Telegram (сеть, RetryAfter,
+    «query is too old»): диалог всё равно закончен. Состояние «отправляется» хранилище диалогов записало
+    бы в базу (переживает перезапуск), и кнопки старой сводки отвечали бы «⏳ Результат уже отправляется…»."""
+    h = app
+    mgr, emp = await _team(h)
+    task_id = await _task(h, mgr, emp)
+    real_answer = CallbackQuery.answer
+
+    def failing_answer(self: CallbackQuery, text: str | None = None, *args: Any, **kwargs: Any) -> Any:
+        if text == "📤 Отправлено":
+            raise TelegramNetworkError(method=AnswerCallbackQuery(callback_query_id=self.id), message="timeout")
+        return real_answer(self, text, *args, **kwargs)
+
+    monkeypatch.setattr(CallbackQuery, "answer", failing_answer)
+    with h.relaxed():
+        await _submit(h)
+    assert any(isinstance(exc, TelegramNetworkError) for exc in h.errors)
+    assert len(await h.scalars(select(Submission).where(Submission.task_id == task_id))) == 1
+    assert await h.get_state(EMP) is None
 
 
 

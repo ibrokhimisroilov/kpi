@@ -1,9 +1,15 @@
 """Жизненный цикл задачи: постановка, предложение сотрудника, правка, сдача результата, проверка.
 
 Схема статусов — SPEC.md, раздел 2. Каждая мутация пишет TaskEvent (add_event),
-делает flush, но не commit. Все связи моделей загружаются selectin; у объектов, созданных
-здесь, связи заполняются сразу при создании, поэтому task.assignee, task.manager,
-task.submissions, sub.task и sub.attachments доступны без дополнительных запросов.
+делает flush, но не commit. Все связи моделей загружаются сразу (люди — JOIN, списки сдач и
+файлов — selectin, см. bot.db.models); у объектов, созданных здесь, связи заполняются сразу при
+создании, поэтому task.assignee, task.manager, task.submissions, sub.task и sub.attachments
+доступны без дополнительных запросов.
+
+Обмены с базой. Бот в облаке ходит в базу в другом регионе: каждый запрос — 130–190 мс. Поэтому
+поля, которые меняет переход статуса, пишутся тем же условным UPDATE, что и сам переход
+(``_claim_status(values=...)``, с RETURNING), а не отдельным UPDATE при flush; объекты, уже
+загруженные в сессию, повторно не читаются.
 
 Гонки. Апдейты разных пользователей бот обрабатывает параллельно, каждый — в своей сессии БД,
 поэтому два руководителя могут одновременно решать по одной сдаче или одному предложению.
@@ -146,17 +152,30 @@ async def get_task(session: AsyncSession, task_id: int) -> Task | None:
 async def get_submission(session: AsyncSession, sub_id: int) -> Submission | None:
     """Сдача вместе с задачей; у sub.task гарантированно загружен список сдач.
 
-    Сдача могла попасть в сессию через task.submissions (selectin не грузит обратную связь
-    sub.task по циклу), а сама задача — уже уйти из памяти: тогда sub.task догружается явно,
-    без ленивой загрузки (в async она падает с MissingGreenlet).
+    Сдачи в сессии ещё нет — грузится её задача (``_task_of_submission``): задача с людьми, все её
+    сдачи с файлами — 3 запроса, и сдача приходит уже в списке task.submissions. Загрузка самой
+    сдачи (sub.task — JOIN) потребовала бы ещё и отдельной догрузки списка сдач задачи.
+
+    Сдача могла попасть в сессию через task.submissions, а сама задача — уже уйти из памяти:
+    тогда sub.task догружается явно, без ленивой загрузки (в async она падает с MissingGreenlet).
     """
     if not is_db_id(sub_id):
         return None
-    sub = await session.get(Submission, sub_id)
+    sub = _in_session(session, Submission, sub_id)
     if sub is None:
-        return None
+        task = await _task_of_submission(session, sub_id)
+        if task is None:
+            return None
+        # Обычно сдача уже пришла в task.submissions; нет — список сдач задачи в сессии устарел.
+        sub = _in_session(session, Submission, sub_id) or await session.get(Submission, sub_id)
+        if sub is None:
+            return None
     if "task" in inspect(sub).unloaded:
-        await session.refresh(sub, attribute_names=["task"])
+        task = _in_session(session, Task, sub.task_id)
+        if task is not None:
+            set_committed_value(sub, "task", task)  # задача уже в сессии — без запроса
+        else:
+            await session.refresh(sub, attribute_names=["task"])
     await _ensure_submissions_loaded(session, sub.task)
     return sub
 
@@ -267,13 +286,16 @@ async def approve_proposal(
     if task.deadline <= now:
         raise DomainError("Срок поручения уже прошёл — сначала измените срок")
 
-    if not await _claim_status(session, task, TaskStatus.PROPOSED, TaskStatus.ACTIVE):
+    approved = {
+        "weight": weight,
+        "priority": priority,
+        "manager_id": manager.id,
+        "approved_at": now,
+        "accepted_at": now,  # сотрудник внёс поручение сам — оно уже принято
+    }
+    if not await _claim_status(session, task, TaskStatus.PROPOSED, TaskStatus.ACTIVE, values=approved):
         raise DomainError(PROPOSAL_ALREADY_PROCESSED)
-    task.weight = weight
-    task.priority = priority
-    task.manager = manager
-    task.approved_at = now
-    task.accepted_at = now
+    set_committed_value(task, "manager", manager)
     await add_event(session, task, manager, EventType.APPROVED, weight=weight, priority=priority)
     return task
 
@@ -393,12 +415,19 @@ async def submit_result(
     items = [att for att in map(_attachment, attachments) if att is not None]
 
     # Руководитель мог отменить задачу, пока сотрудник заполнял ответы: сдача не должна её «оживить».
-    if not await _claim_status(session, task, task.status, TaskStatus.SUBMITTED):
+    # Поля сдачи у задачи пишет тот же UPDATE; срок мог измениться в другой сессии уже после чтения
+    # задачи — RETURNING возвращает актуальный, просрочку считаем по нему.
+    now = utcnow()
+    submitted = {
+        "submitted_at": now,
+        "ai_score": None,  # оценка прошлой попытки к новой сдаче не относится
+        "accepted_at": func.coalesce(Task.accepted_at, now),  # не принята явно — сдача и есть принятие
+    }
+    if not await _claim_status(
+        session, task, task.status, TaskStatus.SUBMITTED, values=submitted, returning=("deadline",)
+    ):
         _ensure_submittable(task)
         raise DomainError(_CHANGED_MEANWHILE)
-    # Срок мог измениться в другой сессии уже после чтения задачи: просрочку считаем по актуальному.
-    await session.refresh(task, attribute_names=["deadline"])
-    now = utcnow()
     sub = Submission(
         task=task,
         attempt=max((s.attempt for s in task.submissions), default=0) + 1,
@@ -413,10 +442,6 @@ async def submit_result(
         attachments=items,
     )
     session.add(sub)
-    task.submitted_at = now
-    task.ai_score = None  # оценка прошлой попытки к новой сдаче не относится
-    if task.accepted_at is None:
-        task.accepted_at = now
     await session.flush()
     await add_event(
         session,
@@ -477,8 +502,9 @@ async def review_confirm(session: AsyncSession, sub_id: int, manager: User) -> T
     if sub.ai_score is None:
         raise DomainError("Предварительной оценки нет — введите оценку вручную")
     score = sub.ai_score
-    await _claim_review(session, task, sub, TaskStatus.DONE)
-    _complete(task, sub, manager, score, ReviewDecision.APPROVED, comment=None)
+    now = utcnow()
+    await _claim_review(session, task, sub, TaskStatus.DONE, values={"final_score": score, "completed_at": now})
+    _complete(sub, manager, score, ReviewDecision.APPROVED, comment=None, now=now)
     await add_event(session, task, manager, EventType.SCORE_CONFIRMED, submission_id=sub.id, score=score)
     return task
 
@@ -493,8 +519,9 @@ async def review_set_score(
         raise DomainError(f"Оценка должна быть от 0 до {max_score} %")
     final = float(score)
     comment = _optional_text(comment)
-    await _claim_review(session, task, sub, TaskStatus.DONE)
-    _complete(task, sub, manager, final, ReviewDecision.CHANGED, comment=comment)
+    now = utcnow()
+    await _claim_review(session, task, sub, TaskStatus.DONE, values={"final_score": final, "completed_at": now})
+    _complete(sub, manager, final, ReviewDecision.CHANGED, comment=comment, now=now)
     await add_event(
         session,
         task,
@@ -520,15 +547,16 @@ async def review_rework(
     comment = _required_text(comment, "Что нужно доработать")
     deadline = _future_deadline(new_deadline) if new_deadline is not None else None
 
-    await _claim_review(session, task, sub, TaskStatus.REWORK)
+    old_deadline = task.deadline
+    changes: dict[str, Any] = {"rework_count": Task.rework_count + 1}
+    if deadline is not None and deadline != old_deadline:
+        changes["deadline"] = deadline
+    await _claim_review(session, task, sub, TaskStatus.REWORK, values=changes)
     sub.decision = ReviewDecision.REWORK
     sub.review_comment = comment
     sub.reviewer = manager
     sub.reviewed_at = utcnow()
-    task.rework_count += 1
-    old_deadline = task.deadline
-    if deadline is not None and deadline != old_deadline:
-        task.deadline = deadline
+    if "deadline" in changes:
         await _reset_reminders(session, task.id)
     await add_event(
         session,
@@ -646,10 +674,28 @@ async def _add_task(session: AsyncSession, **values: Any) -> Task:
     return task
 
 
+def _in_session[T](session: AsyncSession, cls: type[T], pk: int) -> T | None:
+    """Объект, уже загруженный в сессию (identity map), — без запроса к базе; иначе None
+    (в том числе для устаревшего или удалённого объекта: его, как и session.get, надо читать из базы)."""
+    obj = session.sync_session.identity_map.get(session.sync_session.identity_key(cls, pk))
+    if not isinstance(obj, cls):
+        return None
+    state = inspect(obj)
+    if state.expired or state.deleted or state.was_deleted:
+        return None
+    return obj
+
+
+async def _task_of_submission(session: AsyncSession, sub_id: int) -> Task | None:
+    """Задача сдачи sub_id со всеми связями (сдачи задачи — вместе с sub_id) или None."""
+    task_id = select(Submission.task_id).where(Submission.id == sub_id).scalar_subquery()
+    return (await session.scalars(select(Task).where(Task.id == task_id))).first()
+
+
 async def _ensure_submissions_loaded(session: AsyncSession, task: Task) -> None:
     """Догрузить task.submissions, если задача пришла через sub.task.
 
-    selectin не идёт по циклу Submission -> Task -> submissions, и без этого
+    Жадная загрузка не идёт по циклу Submission -> Task -> submissions, и без этого
     обращение к task.last_submission вызвало бы ленивую загрузку (MissingGreenlet).
     """
     if "submissions" in inspect(task).unloaded:
@@ -682,17 +728,20 @@ async def _reviewable(session: AsyncSession, sub_id: int, manager: User) -> tupl
     return task, sub
 
 
-async def _claim_review(session: AsyncSession, task: Task, sub: Submission, new: TaskStatus) -> None:
+async def _claim_review(
+    session: AsyncSession, task: Task, sub: Submission, new: TaskStatus, *, values: dict[str, Any] | None = None
+) -> None:
     """Атомарно занять решение по сдаче: задача ещё SUBMITTED, сдача — последняя и без решения.
 
     Условие проверяется одним UPDATE, поэтому из двух руководителей, нажавших кнопки
     одновременно, решение примет только первый; второй получит «Результат уже обработан».
+    ``values`` — поля задачи, которые решение меняет вместе со статусом (тем же UPDATE).
     """
     newer_exists = (
         select(Submission.id).where(Submission.task_id == task.id, Submission.id > sub.id).exists()
     )
     undecided = select(Submission.id).where(Submission.id == sub.id, Submission.decision.is_(None)).exists()
-    claimed = await _claim_status(session, task, TaskStatus.SUBMITTED, new, ~newer_exists, undecided)
+    claimed = await _claim_status(session, task, TaskStatus.SUBMITTED, new, ~newer_exists, undecided, values=values)
     if not claimed:
         raise DomainError(REVIEW_ALREADY_PROCESSED)
 
@@ -703,6 +752,8 @@ async def _claim_status(
     expected: TaskStatus,
     new: TaskStatus,
     *conditions: ColumnElement[bool],
+    values: dict[str, Any] | None = None,
+    returning: Sequence[str] = (),
 ) -> bool:
     """Атомарный переход статуса: ``UPDATE tasks SET status=new WHERE id=? AND status=expected [AND …]``.
 
@@ -710,20 +761,34 @@ async def _claim_status(
     в другой сессии (rowcount == 0): объект задачи перечитан из БД, чтобы вызывающий код
     объяснил отказ по актуальному статусу. В SQLite UPDATE берёт блокировку записи до commit,
     поэтому параллельная сессия дождётся коммита первой и увидит уже новый статус.
+
+    ``values`` — остальные поля задачи, которые меняет этот же переход (значения или SQL-выражения
+    вроде ``Task.rework_count + 1``): они пишутся тем же UPDATE, а не отдельным при flush. Каждый
+    обмен с облачной базой стоит 130–190 мс. ``returning`` — поля, которые нужно заодно перечитать
+    (свежий срок для сдачи результата). Записанные и перечитанные значения попадают в объект task
+    без пометки «изменено» (UPDATE … RETURNING; без RETURNING — отдельный SELECT).
     """
-    now = utcnow()
+    changes: dict[str, Any] = {"status": new, "updated_at": utcnow(), **(values or {})}
+    names = list(dict.fromkeys([*changes, *returning]))
     stmt = (
         update(Task)
         .where(Task.id == task.id, Task.status == expected, *conditions)
-        .values(status=new, updated_at=now)
+        .values(**changes)
         .execution_options(synchronize_session=False)
     )
-    result = await session.execute(stmt)
-    if result.rowcount != 1:
+    columns = [getattr(Task, name) for name in names]
+    if session.get_bind().dialect.update_returning:
+        row = (await session.execute(stmt.returning(*columns))).first()
+    else:  # СУБД без UPDATE … RETURNING
+        result = await session.execute(stmt)
+        row = None
+        if result.rowcount == 1:
+            row = (await session.execute(select(*columns).where(Task.id == task.id))).one()
+    if row is None:
         await _reload_task(session, task.id)
         return False
-    set_committed_value(task, "status", new)
-    set_committed_value(task, "updated_at", now)
+    for name, value in zip(names, row, strict=True):
+        set_committed_value(task, name, value)
     return True
 
 
@@ -746,23 +811,21 @@ def _ensure_submittable(task: Task) -> None:
 
 
 def _complete(
-    task: Task,
     sub: Submission,
     manager: User,
     score: float,
     decision: ReviewDecision,
     *,
     comment: str | None,
+    now: datetime,
 ) -> None:
-    """Зафиксировать окончательную оценку (статус DONE уже выставлен в _claim_review)."""
-    now = utcnow()
+    """Зафиксировать решение в сдаче (статус DONE, итоговую оценку и время у задачи уже записал
+    тот же UPDATE, что занял решение, — _claim_review)."""
     sub.final_score = score
     sub.decision = decision
     sub.review_comment = comment
     sub.reviewer = manager
     sub.reviewed_at = now
-    task.final_score = score
-    task.completed_at = now
 
 
 async def _reset_reminders(session: AsyncSession, task_id: int) -> None:

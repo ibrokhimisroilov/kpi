@@ -31,6 +31,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot import notify
+from bot.ai import progress
 from bot.ai.formulate import ResultSuggestion, rules_suggestion, suggest_expected_result
 from bot.ai.provider import ai_available
 from bot.db.models import Priority, Role, Task, TaskStatus, User, UserStatus
@@ -158,10 +159,10 @@ async def _show(
     return msg
 
 
-async def _replace(msg: Message, state: FSMContext, text: str, kb: InlineKeyboardMarkup | None) -> None:
-    """Заменить текст сообщения «⏳ …» (если нельзя — отправить новое) и запомнить id."""
+async def _replace(msg: Message, text: str, kb: InlineKeyboardMarkup | None) -> Message:
+    """Заменить текст сообщения «⏳ …» (если нельзя — отправить новое). -> показанное сообщение."""
     text = truncate(text)
-    target: Message | None = msg
+    target: Message = msg
     try:
         edited = await msg.edit_text(text, reply_markup=kb)
         if isinstance(edited, Message):
@@ -170,13 +171,19 @@ async def _replace(msg: Message, state: FSMContext, text: str, kb: InlineKeyboar
         if "message is not modified" not in str(exc).lower():
             log.debug("edit_text failed, sending new message: %s", exc)
             target = await msg.answer(text, reply_markup=kb)
-    if target is not None:
-        await state.update_data(msg_id=target.message_id)
+    return target
 
 
-async def _stale(callback: CallbackQuery, state: FSMContext) -> bool:
-    """Кнопка нажата не в последнем сообщении диалога -> alert и True."""
-    data = await state.get_data()
+def _chat_id(event: Message | CallbackQuery) -> int | None:
+    if isinstance(event, Message):
+        return event.chat.id
+    return event.message.chat.id if event.message is not None else None
+
+
+async def _stale(callback: CallbackQuery, state: FSMContext, data: dict[str, Any] | None = None) -> bool:
+    """Кнопка нажата не в последнем сообщении диалога -> alert и True. data — уже прочитанные данные диалога."""
+    if data is None:
+        data = await state.get_data()
     msg_id = data.get("msg_id")
     if msg_id is not None and callback.message is not None and callback.message.message_id != msg_id:
         await callback.answer(STALE_BUTTON, show_alert=True)
@@ -382,15 +389,14 @@ async def _ask_result(event: Message | CallbackQuery, state: FSMContext) -> None
 @router.message(ProposeTaskSG.result, TextInput())
 async def propose_result(message: Message, state: FSMContext, session: AsyncSession) -> None:
     raw = (message.text or "").strip()
-    kb = _draft_kb(await state.get_data(), keyboards.cancel_kb())
-    if len(raw) < 3:
-        await _show(message, state, "Опишите результат чуть подробнее: что должно быть сделано или получено?", kb)
+    if len(raw) < 3 or len(raw) > RESULT_MAX:
+        kb = _draft_kb(await state.get_data(), keyboards.cancel_kb())
+        if len(raw) < 3:
+            await _show(message, state, "Опишите результат чуть подробнее: что должно быть сделано или получено?", kb)
+        else:
+            await _show(message, state, f"Слишком длинно ({len(raw)} символов). Уложитесь в {RESULT_MAX}.", kb)
         return
-    if len(raw) > RESULT_MAX:
-        await _show(message, state, f"Слишком длинно ({len(raw)} символов). Уложитесь в {RESULT_MAX}.", kb)
-        return
-    await state.update_data(raw_result=raw, ai_retries=0)
-    await _run_suggestion(message, state, session, retry=False)
+    await _run_suggestion(message, state, session, retry=False, saved={"raw_result": raw, "ai_retries": 0})
 
 
 async def _suggest(title: str, raw: str, deadline_text: str | None) -> ResultSuggestion:
@@ -402,29 +408,38 @@ async def _suggest(title: str, raw: str, deadline_text: str | None) -> ResultSug
 
 
 async def _run_suggestion(
-    event: Message | CallbackQuery, state: FSMContext, session: AsyncSession, *, retry: bool
+    event: Message | CallbackQuery,
+    state: FSMContext,
+    session: AsyncSession,
+    *,
+    retry: bool,
+    saved: dict[str, Any] | None = None,
 ) -> None:
-    """Показать «⏳», запросить формулировку у AI (или правил) и показать варианты."""
-    data = await state.get_data()
-    # Уникальный токен запроса (а не счётчик: state.clear() сбросил бы счётчик в новом диалоге).
-    req = secrets.token_hex(4)
-    await state.update_data(ai_req=req, sug=None)
-    await state.set_state(ProposeTaskSG.ai)
+    """Сразу показать «⏳», запросить формулировку у AI (или правил), пока в чате «печатает…», и показать варианты.
 
+    ``saved`` — значения диалога, которые записываются вместе с токеном запроса (одной операцией с хранилищем).
+    """
     wait_text = "⏳ Формулирую другой вариант…" if retry else "⏳ Формулирую измеримый результат…"
+    # «⏳» — до обращений к базе и к AI: сотрудник сразу видит, что бот работает.
     if isinstance(event, CallbackQuery):
         wait = await common.edit_or_answer(event, wait_text)
     else:
         wait = await event.answer(wait_text)
 
-    # AI может отвечать долго — не держим транзакцию SQLite открытой.
+    # Уникальный токен запроса (а не счётчик: state.clear() сбросил бы счётчик в новом диалоге).
+    req = secrets.token_hex(4)
+    data = await state.update_data(**(saved or {}), ai_req=req, sug=None)
+    await state.set_state(ProposeTaskSG.ai)
+
+    # AI может отвечать долго — не держим транзакцию открытой.
     await session.commit()
     deadline = common.dt_from_state(data.get("deadline"))
-    sug = await _suggest(
-        data.get("title") or "",
-        data.get("raw_result") or "",
-        fmt_deadline(deadline) if deadline else None,
-    )
+    async with progress.typing(event.bot, _chat_id(event)):
+        sug = await _suggest(
+            data.get("title") or "",
+            data.get("raw_result") or "",
+            fmt_deadline(deadline) if deadline else None,
+        )
 
     # Пока AI думал, пользователь мог отменить диалог или написать свой вариант.
     current = await state.get_state()
@@ -437,8 +452,8 @@ async def _run_suggestion(
                 pass
         return
 
-    fresh = await state.update_data(sug=asdict(sug))
-    text = _suggestion_text(fresh)
+    sug_data = asdict(sug)
+    text = _suggestion_text({**fresh, "sug": sug_data})
     if retry and sug.source != "ai":
         # AI снова не ответил (лимит, сеть) — ничего «не предлагал», показаны правила.
         text += (
@@ -447,11 +462,18 @@ async def _run_suggestion(
         )
     elif retry and fresh.get("prev_sug_text") == sug.expected_result:
         text += "\n\n<i>AI предложил тот же вариант — можно принять его или написать свой.</i>"
-    await state.update_data(prev_sug_text=sug.expected_result)
-    if wait is not None:
-        await _replace(wait, state, text, keyboards.ai_suggestion_kb())
-    else:
-        await _show(event, state, text, keyboards.ai_suggestion_kb())
+    # Сначала показать вариант, потом одной записью сохранить его и id сообщения (и при сбое показа).
+    shown: Message | None = None
+    try:
+        if wait is not None:
+            shown = await _replace(wait, text, keyboards.ai_suggestion_kb())
+        else:
+            shown = await common.edit_or_answer(event, truncate(text), keyboards.ai_suggestion_kb())
+    finally:
+        values: dict[str, Any] = {"sug": sug_data, "prev_sug_text": sug.expected_result}
+        if shown is not None:
+            values["msg_id"] = shown.message_id
+        await state.update_data(**values)
 
 
 def _suggestion_text(data: dict[str, Any]) -> str:
@@ -485,9 +507,9 @@ async def propose_ai_choice(
     if user is None:
         await common.deny(callback)
         return
-    if await _stale(callback, state):
-        return
     data = await state.get_data()
+    if await _stale(callback, state, data):
+        return
     sug = data.get("sug")
     choice = callback_data.value
 
@@ -521,8 +543,7 @@ async def propose_ai_choice(
             )
             return
         await callback.answer()
-        await state.update_data(ai_retries=retries + 1)
-        await _run_suggestion(callback, state, session, retry=True)
+        await _run_suggestion(callback, state, session, retry=True, saved={"ai_retries": retries + 1})
         return
 
     if choice == "accept":
