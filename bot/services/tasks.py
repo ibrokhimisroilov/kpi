@@ -360,14 +360,25 @@ async def update_task(
 
 
 async def accept_task(session: AsyncSession, task_id: int, employee: User) -> Task:
-    """Исполнитель подтверждает получение задачи. Повторный вызов ничего не меняет."""
+    """Исполнитель подтверждает получение задачи. Повторный вызов ничего не меняет.
+
+    Принять можно и из чата, и из приложения — одновременно: отметка пишется условным UPDATE
+    (``accepted_at IS NULL`` и статус тот же), поэтому событие ACCEPTED пишет только первый.
+    """
     task = await _task_or_error(session, task_id)
     _ensure_assignee(task, employee, "Принять задачу может только её исполнитель")
     if task.accepted_at is not None:
         return task
     if not task.is_open:
         raise DomainError("Принять можно только задачу в работе")
-    task.accepted_at = utcnow()
+    accepted = {"accepted_at": utcnow()}
+    if not await _claim_status(session, task, task.status, task.status, Task.accepted_at.is_(None), values=accepted):
+        # Уже приняли (параллельный запрос) или статус сменился — задача перечитана из базы.
+        if task.accepted_at is not None:
+            return task
+        if not task.is_open:
+            raise DomainError("Принять можно только задачу в работе")
+        raise DomainError(_CHANGED_MEANWHILE)
     await add_event(session, task, employee, EventType.ACCEPTED)
     return task
 
@@ -512,12 +523,16 @@ async def review_confirm(session: AsyncSession, sub_id: int, manager: User) -> T
 async def review_set_score(
     session: AsyncSession, sub_id: int, manager: User, score: float, comment: str | None = None
 ) -> Task:
-    """Руководитель ставит свою оценку (0..max_score): задача -> DONE, решение CHANGED."""
+    """Руководитель ставит свою оценку (0..max_score): задача -> DONE, решение CHANGED.
+
+    Оценка округляется до целого (половина — вверх), как предварительная: везде показываются целые
+    проценты, и KPI должен сходиться с тем, что видно (одно правило для чата и приложения).
+    """
     task, sub = await _reviewable(session, sub_id, manager)
     max_score = get_settings().max_score
     if isinstance(score, bool) or not isinstance(score, (int, float)) or not 0 <= score <= max_score:
         raise DomainError(f"Оценка должна быть от 0 до {max_score} %")
-    final = float(score)
+    final = _round_half_up(float(score))
     comment = _optional_text(comment)
     now = utcnow()
     await _claim_review(session, task, sub, TaskStatus.DONE, values={"final_score": final, "completed_at": now})

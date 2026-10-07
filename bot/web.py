@@ -22,12 +22,19 @@ Telegram сам присылает сообщения на адрес бота. 
   новый не начинается. Неверный ключ — 403.
 * ``GET|HEAD /health`` — «ok» без обращения к БД (проверка хостинга).
 * ``GET|HEAD /`` — «KPI bot is running».
+* Приложение в Telegram (Mini App, docs/MINIAPP_SPEC.md) — если WEBAPP_ENABLED (по умолчанию да) и
+  пакет ``bot.webapp`` есть; монтируется после маршрутов выше (mount_webapp), выключено — 404:
+
+  * ``GET|HEAD /app``, ``/app/`` — страница приложения (без БД);
+  * ``GET|HEAD /app/static/<файл>`` — app.js, app.css (белый список);
+  * ``/api/*`` — API приложения: вход по подписанному Telegram initData (заголовок
+    ``X-Telegram-Init-Data``), а не по секрету webhook; ответы — JSON.
 
 Секреты (путь webhook, ключ /tick) в лог не пишутся; журнал HTTP-запросов aiohttp выключен (main.py).
 Остановка (SIGTERM): фоновый цикл останавливается (новые задания не начинаются), сервер перестаёт
-принимать запросы, апдейты и задания в работе получают до SHUTDOWN_GRACE_SEC секунд, затем
-закрывается FSM-хранилище (dp.emit_shutdown). Webhook у Telegram при остановке НЕ удаляется:
-при обновлении на хостинге новый экземпляр уже принимает апдейты.
+принимать запросы, апдейты, задания и фоновые задачи приложения в работе получают до
+SHUTDOWN_GRACE_SEC секунд, затем закрывается FSM-хранилище (dp.emit_shutdown). Webhook у Telegram при
+остановке НЕ удаляется: при обновлении на хостинге новый экземпляр уже принимает апдейты.
 """
 
 from __future__ import annotations
@@ -35,6 +42,8 @@ from __future__ import annotations
 import asyncio
 import functools
 import hmac
+import importlib
+import importlib.util
 import logging
 import math
 import time
@@ -63,8 +72,10 @@ __all__ = [
     "build_web_app",
     "ensure_webhook",
     "keepalive_url",
+    "mount_webapp",
     "reclaim_webhook",
     "secrets_equal",
+    "webapp_pending",
     "webhook_path",
     "webhook_url",
 ]
@@ -453,8 +464,9 @@ async def _stop_background(app: web.Application) -> None:
 
 
 async def _drain(app: web.Application) -> None:
-    """Остановка: дать апдейтам и заданиям в работе закончиться (не дольше SHUTDOWN_GRACE_SEC)."""
-    pending = app[RECEIVER].pending() | app[TICKER].pending()
+    """Остановка: дать апдейтам, заданиям и фоновым задачам Mini App (оценка сдачи, Excel, пересылка
+    файлов) закончиться — не дольше SHUTDOWN_GRACE_SEC."""
+    pending = app[RECEIVER].pending() | app[TICKER].pending() | webapp_pending(app)
     if not pending:
         return
     log.info("Остановка: жду завершения %s задач (до %s с)…", len(pending), int(SHUTDOWN_GRACE_SEC))
@@ -471,12 +483,78 @@ async def _on_shutdown(app: web.Application) -> None:
     await app[_DISPATCHER].emit_shutdown(**_workflow_data(app))
 
 
+PendingTasks = Callable[[web.Application], set[asyncio.Task[Any]]]
+WEBAPP_MOUNTED: web.AppKey[bool] = web.AppKey("kpi_webapp_mounted", bool)
+_WEBAPP_PENDING: web.AppKey[PendingTasks] = web.AppKey("kpi_webapp_pending")
+_WEBAPP_PACKAGE = "bot.webapp"
+
+
+def _webapp_entry() -> tuple[Callable[..., object], PendingTasks | None] | None:
+    """Вход пакета Mini App: (setup_webapp, pending_tasks) из ``bot.webapp`` (docs/MINIAPP_SPEC.md §4.1),
+    запасной вариант — ``bot.webapp.api.register_webapp``. None — пакета нет (как main.default_storage:
+    бот без него работает только чатом)."""
+    if importlib.util.find_spec(_WEBAPP_PACKAGE) is None:
+        return None
+    package = importlib.import_module(_WEBAPP_PACKAGE)
+    setup = getattr(package, "setup_webapp", None)
+    pending = getattr(package, "pending_tasks", None)
+    if setup is None and importlib.util.find_spec(f"{_WEBAPP_PACKAGE}.api") is not None:
+        api = importlib.import_module(f"{_WEBAPP_PACKAGE}.api")
+        setup = getattr(api, "register_webapp", None)
+        pending = pending or getattr(api, "pending_tasks", None)
+    if not callable(setup):
+        return None
+    return setup, pending if callable(pending) else None
+
+
+def mount_webapp(app: web.Application, bot: Bot, sessionmaker: Sessionmaker, settings: Settings) -> bool:
+    """Смонтировать Mini App (/app, /app/static/*, /api/*). True — приложение подключено.
+
+    Выключено (WEBAPP_ENABLED=0) или пакета bot.webapp нет — маршрутов нет (404). Ошибка внутри
+    пакета не останавливает бота: чат работает как раньше, в лог — трейсбек, приложения нет.
+    Сеть и БД при сборке не нужны. Маршрутов webhook, /tick, /health и / приложение не касается:
+    у основного приложения нет middleware, API живёт в отдельном sub-app /api.
+    """
+    app[WEBAPP_MOUNTED] = False
+    if not settings.webapp_enabled:
+        log.debug("Mini App выключен (WEBAPP_ENABLED=0): /app и /api не подключены")
+        return False
+    try:
+        entry = _webapp_entry()
+        if entry is None:
+            log.warning("Mini App: пакета bot.webapp нет — работает только чат")
+            return False
+        setup, pending = entry
+        setup(app, bot=bot, sessionmaker=sessionmaker, settings=settings)
+    except Exception:
+        log.exception("Mini App не подключён из-за ошибки — чат работает как обычно")
+        return False
+    if pending is not None:
+        app[_WEBAPP_PENDING] = pending
+    app[WEBAPP_MOUNTED] = True
+    log.debug("Mini App подключён: /app, /api")
+    return True
+
+
+def webapp_pending(app: web.Application) -> set[asyncio.Task[Any]]:
+    """Незавершённые фоновые задачи Mini App (для _drain); пусто, если приложение не смонтировано."""
+    pending = app.get(_WEBAPP_PENDING)
+    if pending is None:
+        return set()
+    try:
+        return {task for task in pending(app) if not task.done()}
+    except Exception:  # остановка не должна сорваться из-за приложения
+        log.exception("Mini App: не удалось получить список фоновых задач")
+        return set()
+
+
 def build_web_app(bot: Bot, dp: Dispatcher, sessionmaker: Sessionmaker, settings: Settings) -> web.Application:
     """Приложение aiohttp режима webhook (маршруты — в описании модуля). Сеть и БД при сборке не нужны.
 
     app[BACKGROUND] — фоновый цикл (самопробуждение по keepalive_url(settings) и задания по времени);
     он НЕ запускается сам: main.py вызывает start() после старта веб-сервера. Останавливается при
     остановке приложения (первым делом, до ожидания апдейтов и заданий в работе).
+    app[WEBAPP_MOUNTED] — подключён ли Mini App (mount_webapp).
     """
     app = web.Application()
     app[_BOT] = bot
@@ -492,6 +570,8 @@ def build_web_app(bot: Bot, dp: Dispatcher, sessionmaker: Sessionmaker, settings
     app.router.add_get("/tick", _tick)
     app.router.add_get("/health", _health)
     app.router.add_get("/", _index)
+    # После маршрутов бота: /app и /api не пересекаются с /tg/<секрет>, /tick, /health и /.
+    mount_webapp(app, bot, sessionmaker, settings)
 
     app.on_startup.append(_on_startup)
     app.on_shutdown.append(_stop_background)

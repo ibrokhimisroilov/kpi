@@ -8,7 +8,9 @@
   ``<PUBLIC_URL>/tg/<секрет>``. Внешние «будильники» не нужны: фоновый цикл бота (bot.web.BackgroundLoop)
   каждые 5 мин запускает задания по времени (run_due_jobs, повторы отсекает БД) и каждые 10 мин
   открывает свой публичный адрес /health — бесплатный Render не усыпляет сервис. ``/tick`` остаётся
-  необязательным резервом. APScheduler здесь не используется.
+  необязательным резервом. APScheduler здесь не используется. Здесь же работает приложение в Telegram
+  (Mini App, ``<PUBLIC_URL>/app``): при каждом запуске бот ставит кнопку меню чата «Открыть»
+  (setChatMenuButton) — настраивать что-либо у @BotFather не нужно.
 """
 
 from __future__ import annotations
@@ -35,7 +37,7 @@ from aiogram.exceptions import (
 )
 from aiogram.fsm.storage.base import BaseStorage
 from aiogram.fsm.storage.memory import MemoryStorage, SimpleEventIsolation
-from aiogram.types import BotCommand, ErrorEvent, Update
+from aiogram.types import BotCommand, ErrorEvent, MenuButtonDefault, MenuButtonWebApp, Update, WebAppInfo
 from aiogram.types import User as TgUser
 from aiogram.utils.token import TokenValidationError, validate_token
 from aiohttp import web
@@ -182,6 +184,9 @@ _WEBHOOK_ACTIVE = (
 )
 _HTTP_SHUTDOWN_SEC = 5.0    # с, дождаться ответа на HTTP-запросы в работе (сами ответы мгновенные)
 
+# Кнопка меню чата (слева от поля ввода) в режиме webhook — открывает Mini App.
+MENU_BUTTON_TEXT = "Открыть"
+
 _COMMANDS = [
     BotCommand(command="start", description="Начать работу / главное меню"),
     BotCommand(command="menu", description="Показать меню"),
@@ -326,6 +331,18 @@ def _log_startup_hints(settings: Settings) -> None:
                 "каждом перезапуске — задачи и оценки пропадут. Укажите в DATABASE_URL базу PostgreSQL "
                 "(например, бесплатный Supabase)."
             )
+        _log_webapp(settings)
+
+
+def _log_webapp(settings: Settings) -> None:
+    """Режим webhook: где открывается Mini App (или что он выключен). Секретов в адресе нет."""
+    url = settings.webapp_url
+    if url:
+        log.info("Mini App: %s (кнопка «Открыть» в чате)", url)
+    else:
+        log.info("Mini App выключен (WEBAPP_ENABLED=0)")
+    if settings.webapp_debug:
+        log.warning("WEBAPP_DEBUG игнорируется в режиме webhook")
 
 
 def _log_ai_chain(settings: Settings) -> None:
@@ -475,6 +492,30 @@ async def _set_commands(bot: Bot) -> None:
         log.warning("Не удалось обновить список команд бота: %s", type(exc).__name__)
 
 
+async def _setup_menu_button(bot: Bot, settings: Settings) -> None:
+    """Кнопка меню чата: «Открыть» → Mini App (webhook и webapp_url); иначе — стандартная кнопка.
+
+    Без chat_id — кнопка по умолчанию для всех личных чатов с ботом (1 запрос при каждом запуске:
+    сменился адрес или приложение выключили — кнопка сразу верная). Ошибка Telegram — только
+    предупреждение в лог (тип ошибки), запуск продолжается: чат работает и без кнопки.
+    """
+    url = settings.webapp_url
+    button = MenuButtonWebApp(text=MENU_BUTTON_TEXT, web_app=WebAppInfo(url=url)) if url else MenuButtonDefault()
+    try:
+        await bot.set_chat_menu_button(menu_button=button)
+    except TelegramAPIError as exc:
+        log.warning("Не удалось настроить кнопку меню чата: %s", type(exc).__name__)
+
+
+async def _reset_menu_button(bot: Bot) -> None:
+    """Стандартная кнопка меню чата (polling после TAKEOVER_WEBHOOK=1: облачная копия выведена из работы,
+    её адрес Mini App больше не откроется). Ошибка — только в лог."""
+    try:
+        await bot.set_chat_menu_button(menu_button=MenuButtonDefault())
+    except TelegramAPIError as exc:
+        log.warning("Не удалось вернуть стандартную кнопку меню чата: %s", type(exc).__name__)
+
+
 def _webhook_host(url: str) -> str:
     """Только имя сервера из адреса webhook: в пути — секрет, его не показываем."""
     try:
@@ -484,21 +525,23 @@ def _webhook_host(url: str) -> str:
     return host or "другой адрес"
 
 
-async def _drop_webhook(bot: Bot, *, takeover: bool = False) -> None:
+async def _drop_webhook(bot: Bot, *, takeover: bool = False) -> bool:
     """Polling: проверить, не работает ли бот уже в режиме webhook (Render и т. п.).
 
     Webhook включён — значит, сообщения бота получает облачная копия. Молча снять его нельзя:
     случайный запуск run.bat на компьютере увёл бы бота из облака на старую локальную базу.
     Поэтому — ConfigError с объяснением. Снять webhook и перейти на polling можно только явно:
     TAKEOVER_WEBHOOK=1 (takeover=True). Накопившиеся сообщения при этом не теряются.
+    True — webhook снят (облачная копия выведена из работы: _run_polling возвращает стандартную
+    кнопку меню чата вместо «Открыть» с её адресом).
     """
     try:
         info = await bot.get_webhook_info()
     except TelegramAPIError as exc:
         log.warning("Не удалось проверить webhook: %s", type(exc).__name__)
-        return
+        return False
     if not info.url:
-        return
+        return False
     host = _webhook_host(info.url)
     if not takeover:
         raise ConfigError(_WEBHOOK_ACTIVE.format(host=host))
@@ -511,6 +554,8 @@ async def _drop_webhook(bot: Bot, *, takeover: bool = False) -> None:
         await bot.delete_webhook(drop_pending_updates=False)
     except TelegramAPIError as exc:
         log.warning("Не удалось отключить webhook: %s", type(exc).__name__)
+        return False
+    return True
 
 
 async def _setup_webhook(bot: Bot, dp: Dispatcher, settings: Settings) -> None:
@@ -563,8 +608,12 @@ async def _run_polling(
     log.info("Режим работы: polling — бот сам забирает сообщения у Telegram, задания по времени — внутри бота")
     me = await _connect(bot)
     log.info("Бот @%s подключён к Telegram", me.username)
-    await _drop_webhook(bot, takeover=takeover_webhook)
+    dropped = await _drop_webhook(bot, takeover=takeover_webhook)
     await _set_commands(bot)
+    # Кнопку меню чата polling не трогает (публичного https-адреса для Mini App нет), кроме перехода
+    # с облачной копии: её кнопка «Открыть» вела бы на выведенный из работы адрес.
+    if dropped:
+        await _reset_menu_button(bot)
     scheduler = setup_scheduler(bot, sessionmaker)
     scheduler.start()
     try:
@@ -601,6 +650,7 @@ async def _run_webhook(
         log.info("Бот @%s подключён к Telegram", me.username)
         await _setup_webhook(bot, dp, settings)
         await _set_commands(bot)
+        await _setup_menu_button(bot, settings)
         # Цикл — когда бот уже на связи с Telegram: задания сразу могут отправлять сообщения.
         background.start()
         log.info("%s", background.describe())

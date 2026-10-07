@@ -5,9 +5,10 @@
 «Фактическое значение?» (только если у задачи есть план-число) -> «Какие документы или материалы
 подтверждают выполнение?» (файлы, фото, видео) -> сводка -> «📤 Отправить».
 
-После отправки: submit_result -> commit -> предварительная оценка (AI или правила) -> commit ->
-уведомление руководителю. Оценку AI сотруднику не показываем — решение принимает руководитель.
-Если AI упал или думает слишком долго, оценка считается по правилам, а сдача всё равно уходит руководителю.
+После отправки: submit_result -> commit -> общий конвейер ``bot.services.submission_flow`` (тот же, что
+у приложения в Telegram): предварительная оценка (AI или правила) -> commit -> уведомление руководителю.
+Оценку AI сотруднику не показываем — решение принимает руководитель. Если AI упал или думает слишком
+долго, оценка считается по правилам, а сдача всё равно уходит руководителю.
 """
 
 from __future__ import annotations
@@ -26,16 +27,13 @@ from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from bot import notify
 from bot.ai import evaluate as ai_evaluate
-from bot.ai import evidence as ai_evidence
 from bot.ai import progress
 from bot.ai.provider import ai_available
 from bot.db.models import (
     OPEN_STATUSES,
     AttachmentKind,
     ReviewDecision,
-    Submission,
     Task,
     TaskStatus,
     User,
@@ -43,6 +41,7 @@ from bot.db.models import (
 from bot.filters import IsEmployee, TextInput
 from bot.fsm_storage import refresh_state
 from bot.handlers import common
+from bot.services import submission_flow
 from bot.services import tasks as tasks_svc
 from bot.services.errors import DomainError
 from bot.ui import keyboards, render
@@ -60,14 +59,14 @@ MIN_FACT = 3               # совсем пустые ответы («да», �
 MAX_FILES = 20             # файлов в одной сдаче
 MAX_NOTES = 1500           # текстовое описание материалов (ссылки, «отправил по почте») на шаге файлов
 LIST_LIMIT = 50            # задач в списке «Сдать результат»
-_AI_BUDGET_MARGIN_SEC = 5  # запас до общего срока оценки: AI заканчивает раньше, чем его прервут
 ALBUM_DELAY_SEC = 1.0      # альбом приходит пачкой сообщений — отвечаем один раз, после последнего
 MSG_LIMIT = 4000           # запас до лимита Telegram 4096
 
 SKIP_RESULT = "skip_res"   # отдельные поля «Пропустить», чтобы старая кнопка не пропустила другой шаг
 SKIP_VALUE = "skip_val"
 LIST_TITLE = BTN_SUBMIT    # заголовок списка задач: по нему узнаём, что выбор сделан из списка
-RULES_PREFIX = "Расчёт по правилам (AI недоступен): "
+RULES_PREFIX = submission_flow.RULES_PREFIX
+_result_with_notes = submission_flow.result_with_notes
 STALE_BUTTON = "Эта кнопка уже неактуальна — ответьте на последний вопрос."
 NO_TASKS_TEXT = "Нет задач для сдачи.\nЗдесь появятся задачи в работе и на доработке."
 
@@ -826,29 +825,12 @@ async def _send_result(
         "Обычно это несколько секунд — сообщение обновится само.",
     )
 
-    current: tuple[Task, Submission] | None = (task, sub)
-    try:
-        current = await _evaluate(bot, session, task, sub)
-    except Exception:  # noqa: BLE001 - сдача уже сохранена, руководитель должен её получить
-        log.exception("Не удалось сохранить предварительную оценку сдачи #%s", sub_id)
-        try:
-            current = await _reload(session, int(task_id), sub_id)
-        except Exception:  # noqa: BLE001
-            log.exception("Не удалось перечитать сдачу #%s", sub_id)
-            current = None
-    if current is not None:
-        # Пока AI думал (до пары минут), руководитель мог уже решить по сдаче из «📝 На проверке»
-        # или отменить задачу — сессия этого не видит, поэтому перечитываем свежее состояние.
-        current = await _fresh(session, int(task_id), sub_id, current)
-    if current is not None and _awaits_review(*current):
-        try:
-            await notify.notify_submission(bot, session, *current)
-        except Exception:  # noqa: BLE001
-            log.exception("Не удалось уведомить руководителя о сдаче #%s", sub_id)
-    elif current is not None:
-        log.info("Сдача #%s уже не ждёт проверки (%s) — уведомление руководителю не нужно", sub_id, current[0].status)
+    # Оценка (AI или правила) и уведомление руководителю — общий конвейер чата и приложения.
+    result = await submission_flow.run_after_submit(
+        bot, session, task, sub, budget_sec=_ai_budget_sec(), use_ai=ai_available()
+    )
 
-    status = current[0].status if current is not None else TaskStatus.SUBMITTED
+    status = result.status if result.status is not None else TaskStatus.SUBMITTED
     files_line = f"\n📎 Файлов: {len(files)}" if files else ""
     if status == TaskStatus.CANCELLED:
         head = "⚠️ <b>Результат сохранён, но руководитель тем временем отменил задачу</b> — проверять его не будут."
@@ -857,14 +839,6 @@ async def _send_result(
     else:
         head = "✅ <b>Результат отправлен руководителю на проверку.</b> Решение придёт сюда."
     await common.edit_or_answer(callback, f"{head}\n\n{task_line}{files_line}")
-
-
-def _result_with_notes(result: str | None, notes: list[str]) -> str | None:
-    """«Какой результат» + текстовое описание подтверждающих материалов (если было)."""
-    parts = [result] if result else []
-    if notes:
-        parts.append("Подтверждающие материалы: " + "; ".join(notes))
-    return "\n\n".join(parts) or None
 
 
 def _attachment_in(item: dict[str, Any]) -> tasks_svc.AttachmentIn:
@@ -897,6 +871,7 @@ async def _clear_if(state: FSMContext, expected: State) -> None:
 
 
 # --- Предварительная оценка -----------------------------------------------------------------------
+# Сама оценка и уведомление руководителю — bot.services.submission_flow (общий конвейер с приложением).
 
 
 def _ai_budget_sec() -> float:
@@ -907,88 +882,6 @@ def _ai_budget_sec() -> float:
     передадут руководителю.
     """
     return ai_evaluate.evaluation_budget_sec()
-
-
-async def _ai_evaluation(bot: Bot, task: Task, sub: Submission) -> ai_evaluate.Evaluation | None:
-    """Оценка AI (или правил — решает evaluate_submission). None — упало или не уложилось во время."""
-
-    loop = asyncio.get_running_loop()
-    budget = _ai_budget_sec()
-    ends_at = loop.time() + budget
-
-    async def run() -> ai_evaluate.Evaluation:
-        # Без AI файлы скачивать незачем: evaluate_submission всё равно посчитает по правилам.
-        evidence = await ai_evidence.collect_evidence(bot, list(sub.attachments)) if ai_available() else []
-        # Перебор моделей — только в оставшееся после скачивания файлов время (с запасом), чтобы AI успел
-        # ответить или отказаться сам, а не был прерван по общему сроку ниже.
-        left = ends_at - loop.time() - _AI_BUDGET_MARGIN_SEC
-        return await ai_evaluate.evaluate_submission(task, sub, evidence, time_budget=left)
-
-    try:
-        return await asyncio.wait_for(run(), timeout=budget)
-    except TimeoutError:
-        log.warning("Оценка сдачи #%s не уложилась в %.0f с — считаю по правилам", sub.id, budget)
-    except Exception:  # noqa: BLE001 - оценка должна быть всегда
-        log.exception("Ошибка оценки сдачи #%s — считаю по правилам", sub.id)
-    return None
-
-
-async def _evaluate(bot: Bot, session: AsyncSession, task: Task, sub: Submission) -> tuple[Task, Submission]:
-    """Оценить сдачу и сохранить оценку (с commit). При любой проблеме с AI — rules_score."""
-    task_id, sub_id = task.id, sub.id
-    plan_value, fact_value, late_days = task.plan_value, sub.fact_value, float(sub.late_days or 0.0)
-
-    evaluation = await _ai_evaluation(bot, task, sub)
-    if evaluation is not None:
-        try:
-            await tasks_svc.record_evaluation(
-                session,
-                sub_id,
-                score=evaluation.score,
-                rationale=evaluation.rationale,
-                source=evaluation.source,
-                model=evaluation.model,
-            )
-            await session.commit()
-            return task, sub
-        except Exception:  # noqa: BLE001 - например, некорректный ответ модели; пробуем правила
-            log.exception("Не удалось сохранить оценку AI для сдачи #%s — считаю по правилам", sub_id)
-            task, sub = await _reload(session, task_id, sub_id)
-
-    score, explanation = ai_evaluate.rules_score(plan_value, fact_value, late_days)
-    await tasks_svc.record_evaluation(
-        session, sub_id, score=score, rationale=RULES_PREFIX + explanation, source="rules", model=None
-    )
-    await session.commit()
-    return task, sub
-
-
-async def _fresh(
-    session: AsyncSession, task_id: int, sub_id: int, fallback: tuple[Task, Submission]
-) -> tuple[Task, Submission]:
-    """Свежие задача и сдача из БД (изменения других пользователей видны); при сбое — fallback."""
-    try:
-        return await _reload(session, task_id, sub_id)
-    except Exception:  # noqa: BLE001 - уведомить руководителя важнее, чем идеально свежие данные
-        log.exception("Не удалось перечитать сдачу #%s перед уведомлением", sub_id)
-        return fallback
-
-
-def _awaits_review(task: Task, sub: Submission) -> bool:
-    """Сдача ещё ждёт решения: задача на проверке, сдача последняя и без решения."""
-    last = task.last_submission
-    return task.status == TaskStatus.SUBMITTED and sub.decision is None and last is not None and last.id == sub.id
-
-
-async def _reload(session: AsyncSession, task_id: int, sub_id: int) -> tuple[Task, Submission]:
-    """Откатить неудачную транзакцию и заново загрузить задачу и сдачу (старые объекты протухли)."""
-    await session.rollback()
-    session.expunge_all()
-    task = await tasks_svc.get_task(session, task_id)
-    sub = next((s for s in task.submissions if s.id == sub_id), None) if task is not None else None
-    if task is None or sub is None:
-        raise RuntimeError(f"Сдача #{sub_id} задачи #{task_id} не найдена после отката")
-    return task, sub
 
 
 # --- Устаревшие кнопки внутри диалога (регистрируются последними) ---------------------------------

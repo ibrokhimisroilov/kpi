@@ -193,6 +193,13 @@ class Settings(BaseSettings):
     # перед этим нужно остановить, иначе она вернёт webhook себе).
     takeover_webhook: bool = False
 
+    # --- Приложение в Telegram (Mini App, docs/MINIAPP_SPEC.md) ---
+    # Раздавать Mini App (/app, /api) и ставить кнопку «Открыть» — только в режиме webhook (нужен https).
+    webapp_enabled: bool = True
+    # Локальная проверка: страница берёт подписанный initData из ?tg_debug_init= (dev-сервер). В режиме
+    # webhook игнорируется всегда (webapp_debug_active) — на Render отладку включить нельзя.
+    webapp_debug: bool = False
+
     log_level: str = "INFO"
 
     @field_validator(
@@ -291,6 +298,20 @@ class Settings(BaseSettings):
     def base_url(self) -> str:
         """Публичный адрес бота без «/» в конце (для webhook)."""
         return (self.public_url or self.render_external_url).rstrip("/")
+
+    @property
+    def webapp_url(self) -> str:
+        """Адрес Mini App: «<base_url>/app», если WEBAPP_ENABLED, режим webhook и адрес https://
+        (Telegram открывает Mini App только по https); иначе "" — кнопок и приложения нет."""
+        base = self.base_url
+        if not self.webapp_enabled or self.run_mode != "webhook" or not base.lower().startswith("https://"):
+            return ""
+        return f"{base}/app"
+
+    @property
+    def webapp_debug_active(self) -> bool:
+        """Режим отладки Mini App действует только вне webhook: на Render его не включить даже WEBAPP_DEBUG=1."""
+        return self.webapp_debug and self.run_mode != "webhook"
 
     def _derived_secret(self, purpose: str) -> str:
         digest = hashlib.sha256(f"{purpose}:{self.bot_token}".encode()).hexdigest()

@@ -13,6 +13,7 @@ from aiogram.types import (
     KeyboardButton,
     ReplyKeyboardMarkup,
     ReplyKeyboardRemove,
+    WebAppInfo,
 )
 
 from bot.config import get_settings
@@ -28,7 +29,9 @@ if TYPE_CHECKING:
     from bot.services.kpi import KpiResult
 
 __all__ = [
+    "BTN_OPEN_APP",
     "main_menu",
+    "open_app_kb",
     "cancel_kb",
     "skip_cancel_kb",
     "choose_user_kb",
@@ -58,6 +61,8 @@ __all__ = [
 _Row = list[InlineKeyboardButton]
 
 _CANCEL_TEXT = "✖️ Отмена"
+# Inline-кнопка приложения в Telegram (Mini App) — после приветствия /start (только режим webhook).
+BTN_OPEN_APP = "📱 Открыть приложение"
 _WEIGHT_OPTIONS = (5, 10, 15, 20, 25, 30, 40, 50)
 _SCORE_OPTIONS = (50, 70, 80, 90, 100, 110, 120)
 _PERIOD_KINDS = (("week", "Неделя"), ("month", "Месяц"), ("quarter", "Квартал"), ("year", "Год"))
@@ -129,6 +134,11 @@ def main_menu(user: User | None) -> ReplyKeyboardMarkup | ReplyKeyboardRemove:
         is_persistent=True,
         input_field_placeholder="Выберите действие в меню",
     )
+
+
+def open_app_kb(url: str) -> InlineKeyboardMarkup:
+    """[📱 Открыть приложение] — открывает Mini App по адресу url (Settings.webapp_url, только https)."""
+    return _markup([[InlineKeyboardButton(text=BTN_OPEN_APP, web_app=WebAppInfo(url=url))]])
 
 
 def cancel_kb() -> InlineKeyboardMarkup:

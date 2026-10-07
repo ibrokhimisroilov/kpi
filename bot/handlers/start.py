@@ -20,6 +20,7 @@ from aiogram.types import CallbackQuery, Message, TelegramObject
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot import notify
+from bot.config import get_settings
 from bot.db.models import Role, User, UserStatus
 from bot.filters import TextInput
 from bot.handlers import common
@@ -85,6 +86,9 @@ TXT_CANCELLED = "Действие отменено."
 TXT_NOT_UNDERSTOOD = "Не понял. Воспользуйтесь меню 👇"
 TXT_ANSWER_ABOVE = "Пожалуйста, ответьте на вопрос выше или нажмите /cancel."
 TXT_STALE_BUTTON = "Кнопка устарела или недоступна."
+# Сообщение с кнопкой «📱 Открыть приложение» после приветствия (Mini App, только режим webhook).
+TXT_APP_MANAGER = "📱 Команда, задачи, проверка результатов и KPI — в приложении."
+TXT_APP_EMPLOYEE = "📱 Ваши задачи, сдача результата и KPI — в приложении."
 
 TXT_ASK_NAME = (
     "👋 Добро пожаловать! Это бот для постановки задач и оценки эффективности.\n\n"
@@ -174,11 +178,17 @@ async def _manager_extras(session: AsyncSession, bot: Bot) -> str:
 
 
 async def _send_welcome(event: Message | CallbackQuery, session: AsyncSession, bot: Bot, user: User) -> None:
-    """Приветствие активного пользователя + главное меню."""
+    """Приветствие активного пользователя + главное меню; в режиме webhook — ещё сообщение с кнопкой
+    приложения (Mini App). У сообщения одна клавиатура: меню — reply, кнопка приложения — inline,
+    поэтому сообщений два. В polling (webapp_url пуст) — как раньше, одно сообщение."""
     text = _greeting(user)
     if user.role == Role.MANAGER:
         text += await _manager_extras(session, bot)
     await common.send_new(event, text, keyboards.main_menu(user))
+    url = get_settings().webapp_url
+    if url:
+        hint = TXT_APP_MANAGER if user.role == Role.MANAGER else TXT_APP_EMPLOYEE
+        await common.send_new(event, hint, keyboards.open_app_kb(url))
 
 
 async def _send_status(event: Message | CallbackQuery, session: AsyncSession, bot: Bot, user: User | None) -> None:

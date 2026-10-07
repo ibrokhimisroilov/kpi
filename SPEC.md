@@ -38,6 +38,7 @@ bot/
   services/kpi.py              # расчёт коэффициента эффективности                      [A2]
   services/reminders.py        # какие напоминания пора отправить                      [A2]
   services/export.py           # выгрузка в Excel                                      [A2]
+  services/submission_flow.py  # общий конвейер после сдачи (оценка, уведомление) — чат и Mini App (§11)
   ai/provider.py               # цепочка бесплатных AI-провайдеров, паузы, проверка JSON [A3]
   ai/base.py                   # классы сбоев AI (Failure, ProviderError, classify_http) [A3]
   ai/gemini.py                 # провайдер Google Gemini (google-genai)                  [A3]
@@ -62,7 +63,8 @@ bot/
   handlers/dashboard.py        # команда, карточка сотрудника, моя эффективность, экспорт [B8]
   scheduler/jobs.py            # напоминания, просрочки, еженедельная сводка             [A5]
   scheduler/backup.py          # ежедневная резервная копия базы руководителям в Telegram [A5]
-  web.py                       # режим webhook: веб-сервер, фоновый цикл (§10.4, §10.6)
+  web.py                       # режим webhook: веб-сервер, фоновый цикл, монтирование Mini App (§10.4, §10.6, §11)
+  webapp/                      # приложение в Telegram (Mini App): API /api, страница /app, SPA (§11, docs/MINIAPP_SPEC.md)
   fsm_storage.py               # DbStorage — диалоги (FSM) в таблице fsm_state (§10.1)
   tools/restore.py             # перенос/восстановление базы из копии SQLite (§10.7)
 deploy/make_render_env.py      # deploy/render.env для Render из .env (§10.9)
@@ -185,6 +187,7 @@ async def update_task(session, task_id: int, actor: User, **fields) -> tuple[Tas
     # Пустые changes -> событие не пишется. Смена deadline сбрасывает ReminderLog задачи. Событие EDITED.
 async def accept_task(session, task_id: int, employee: User) -> Task
     # исполнитель подтверждает получение (accepted_at); повторно — без ошибки. Событие ACCEPTED.
+    # Отметка — условным UPDATE (accepted_at IS NULL): при одновременном принятии (чат + приложение) событие одно.
 async def cancel_task(session, task_id: int, manager: User, reason: str | None = None) -> Task
     # PROPOSED/ACTIVE/REWORK/SUBMITTED -> CANCELLED. Событие CANCELLED.
 # Смена статуса (approve/reject_proposal, cancel_task, submit_result, review_*) — атомарный условный
@@ -206,7 +209,8 @@ async def review_confirm(session, sub_id: int, manager: User) -> Task
     # task -> DONE, completed_at; sub.decision=APPROVED, reviewer, reviewed_at, final_score. Событие SCORE_CONFIRMED.
 async def review_set_score(session, sub_id: int, manager: User, score: float,
                            comment: str | None = None) -> Task
-    # 0 <= score <= settings.max_score, иначе DomainError. decision=CHANGED. Событие SCORE_CHANGED(ai_score, score, comment).
+    # 0 <= score <= settings.max_score, иначе DomainError; хранится округлённой до целого (половина — вверх).
+    # decision=CHANGED. Событие SCORE_CHANGED(ai_score, score, comment).
 async def review_rework(session, sub_id: int, manager: User, comment: str,
                         new_deadline: datetime | None = None) -> Task
     # task SUBMITTED -> REWORK, rework_count+1, при new_deadline — меняет срок и сбрасывает ReminderLog.
@@ -683,6 +687,12 @@ async def notify_user_decision(bot, user: User, approved: bool) -> bool    # п�
   ФИО («Иванов Иван Иванович», 2–200 симв., минимум 2 слова) → должность (или «⏭ Пропустить») →
   `complete_registration` → commit → `notify_registration` → «Заявка отправлена руководителю». PENDING с ФИО →
   «Заявка на рассмотрении». BLOCKED → «Доступ закрыт».
+* Приветствие активного (`_send_welcome`, и после `/start`, и при смене статуса во время анкеты): если
+  `settings.webapp_url` не пуст (webhook + https + `WEBAPP_ENABLED`, §11) — **вторым** сообщением
+  «📱 Команда, задачи, проверка результатов и KPI — в приложении.» (руководителю) / «📱 Ваши задачи, сдача
+  результата и KPI — в приложении.» (сотруднику) с inline-кнопкой `keyboards.open_app_kb(url)`
+  («📱 Открыть приложение», `web_app=WebAppInfo(url)`). Отдельное сообщение — потому что у приветствия
+  reply-клавиатура главного меню. Неактивным и в `polling` — не отправляется; обращений к БД не добавляет.
 * Пользователь вне системы / неактивный пишет что угодно → подсказка «нажмите /start» (последний хендлер — в dashboard? нет:
   в start.py отдельный роутер-«ловушка» `fallback_router`, который main.py подключает **последним**).
   Для активного пользователя неизвестный текст вне FSM → «Не понял. Воспользуйтесь меню 👇» + main_menu.
@@ -863,10 +873,15 @@ async def send_backup(bot, sessionmaker, now: datetime | None = None) -> int
 | `tick_secret` / `TICK_SECRET` | `""` | пусто → `sha256("tick:" + bot_token)[:32]`; нужен только внешнему резервному будильнику |
 | `database_password` / `DATABASE_PASSWORD` | `""` | пароль PostgreSQL отдельно от `DATABASE_URL` (§10.7); `repr=False`, в лог не пишется |
 | `takeover_webhook` / `TAKEOVER_WEBHOOK` | `false` | `polling`: снять включённый webhook и работать здесь (§10.5); без него запуск при включённом webhook останавливается |
+| `webapp_enabled` / `WEBAPP_ENABLED` | `true` | раздавать Mini App (`/app`, `/api`) и ставить кнопки «Открыть» (только `webhook`, §11) |
+| `webapp_debug` / `WEBAPP_DEBUG` | `false` | локальная проверка Mini App в браузере (dev-сервер, `?tg_debug_init=`); в `webhook` игнорируется |
 
 Свойства: `base_url` = (`public_url` или `render_external_url`) без `/` в конце; `webhook_secret_value`,
 `tick_secret_value` — заданное значение или выведенное из токена (только `[0-9a-f]`, годится и для
 `secret_token` Telegram, и для URL; стабильно, пока не сменён `BOT_TOKEN`). Секреты и токен **не пишутся в лог**.
+`webapp_url` = `f"{base_url}/app"`, если `webapp_enabled`, `run_mode == "webhook"` и `base_url` начинается с
+`https://` (без учёта регистра), иначе `""` — кнопок и приложения нет; `webapp_debug_active` = `webapp_debug`
+и не `webhook`.
 
 ### 10.3 Платформа: на что рассчитан код
 
@@ -907,18 +922,27 @@ async def send_backup(bot, sessionmaker, now: datetime | None = None) -> int
   годится для любых бесплатных планировщиков).
 * `GET|HEAD /health` → `200` `ok` без обращения к БД и Telegram (health check Render и самопробуждение).
 * `GET|HEAD /` → `KPI bot is running`.
+* Mini App (§11) — `mount_webapp(app, bot, sessionmaker, settings)` **после** маршрутов выше, если
+  `settings.webapp_enabled` и пакет `bot.webapp` есть (`importlib.util.find_spec`, как `main.default_storage`):
+  `bot.webapp.setup_webapp(app, bot=…, sessionmaker=…, settings=…)` добавляет `GET|HEAD /app`, `/app/`,
+  `/app/static/{name}` (без БД) и sub-app `/api/*` (свои middleware: вход по подписанному Telegram `initData` —
+  заголовок `X-Telegram-Init-Data`, **не** по секрету webhook; ошибки — JSON). У основного приложения middleware
+  нет, поэтому `/tg/…`, `/tick`, `/health`, `/` работают как раньше и без БД. Выключено или пакета нет — маршрутов
+  нет (404). Исключение внутри пакета — `log.exception`, приложение не подключено, чат работает.
+  `app[WEBAPP_MOUNTED]` — подключено ли.
 * Секретный путь и ключ `/tick` в лог не пишутся; журнал HTTP-запросов aiohttp выключен (в нём была бы
   строка запроса с `?key=`).
 * `app[BACKGROUND]` — `BackgroundLoop` (§10.6), `app[TICKER]` — общий `TickRunner`, `app[RECEIVER]` — приём апдейтов.
 * Остановка (SIGTERM; Render ждёт ~30 с): `on_shutdown` по порядку — `_stop_background` (фоновый цикл: новые
-  задания и запросы к себе не начинаются), `_drain` (апдейты и задания в работе получают до 20 с,
-  `SHUTDOWN_GRACE_SEC`), `_on_shutdown` → `dp.emit_shutdown` (FSM-хранилище дописывает состояния).
+  задания и запросы к себе не начинаются), `_drain` (апдейты, задания и фоновые задачи Mini App —
+  `webapp_pending(app)` = `bot.webapp.pending_tasks(app)`: оценка сдачи, Excel, пересылка файлов — получают
+  до 20 с, `SHUTDOWN_GRACE_SEC`), `_on_shutdown` → `dp.emit_shutdown` (FSM-хранилище дописывает состояния).
 
 ### 10.5 Запуск и остановка в режиме webhook
 
 * `check_run_mode` → `check_database` (§10.7) → `init_db` → веб-сервер на `0.0.0.0:port` (`AppRunner(access_log=None)`; сначала порт —
   Render ждёт открытого порта) → `get_me` → `ensure_webhook(bot, dp, settings)` → `set_my_commands` →
-  `BackgroundLoop.start()` (в лог — расписание самопробуждения и заданий) → работа до SIGTERM.
+  `_setup_menu_button` (§11) → `BackgroundLoop.start()` (в лог — расписание самопробуждения и заданий) → работа до SIGTERM.
   При остановке цикл останавливается первым (новые задания не начинаются), затем сервер (§10.4).
   `ensure_webhook` вызывает `setWebhook(url, secret_token=webhook_secret_value, allowed_updates=…,
   drop_pending_updates=False)` только если у Telegram другой адрес или другой список типов апдейтов
@@ -929,7 +953,9 @@ async def send_backup(bot, sessionmaker, now: datetime | None = None) -> int
   и запуск останавливается `ConfigError` (в тексте — только имя сервера, без секретного пути): случайный
   `run.bat` на ПК не уводит бота из облака на старую локальную базу. Снять webhook и работать в `polling`
   можно только явно — `TAKEOVER_WEBHOOK=1` (`deleteWebhook(drop_pending_updates=False)`); облачную копию перед
-  этим нужно остановить.
+  этим нужно остановить. `_drop_webhook` возвращает `True`, если webhook снят, — тогда после `set_my_commands`
+  ставится стандартная кнопка меню чата (`MenuButtonDefault`, §11): «Открыть» облачной копии вела бы на
+  выведенный из работы адрес. Иначе `polling` кнопку меню не трогает.
 * Вторая защита — в самом облачном боте: `BackgroundLoop` вместе с заданиями (каждые 5 мин) вызывает
   `web.reclaim_webhook` — webhook снят или указывает на другой адрес (копия в `polling` старой версии, другой
   хостинг) → `setWebhook` обратно и предупреждение в лог. Отличие только в `allowed_updates` не исправляется
@@ -1062,3 +1088,43 @@ def tick_schedule_summary(interval_sec: float | None = None) -> str   # расп
   значения из `deploy/render.env`) → статус **Live** → `/start`. Перенос данных (`bot.tools.restore`),
   создание закрытого хранилища, `git push` и проверка адреса сервиса (поле `url` из `getWebhookInfo`, `/health`) —
   разработчик.
+
+## 11. Приложение в Telegram (Mini App)
+
+Полный контракт (API, схемы JSON, вход, SPA, тест-план, бюджеты обменов с базой) — **[docs/MINIAPP_SPEC.md](docs/MINIAPP_SPEC.md)**.
+Здесь — как приложение встроено в бота.
+
+* **Что это.** Одностраничное приложение внутри Telegram: руководителю — дашборд команды с графиками, задачи с
+  фильтрами и поиском, карточки, очередь проверки (оценка AI → подтвердить / изменить / вернуть), поручения
+  сотрудников, форма «Новая задача» с AI «Сделать измеримым», Excel в чат; сотруднику — «Мои задачи» (принять),
+  «Сдать» с загрузкой файлов, «Мой KPI» с историей, «Поручение». Регистрация и «👥 Сотрудники» — только в чате.
+* **Одни сервисы и уведомления.** Каждое действие вызывает ту же функцию `bot/services/*`, что и чат (те же
+  проверки, `DomainError` → HTTP 400 с тем же текстом), затем commit и те же `bot.notify.*`. Сдача — общий конвейер
+  `services/submission_flow.py` (оценка AI/правила + уведомление руководителю) для чата и приложения. Новых
+  таблиц и миграций нет.
+* **Где работает.** Только `RUN_MODE=webhook` (нужен публичный https): страницу и API раздаёт тот же веб-сервер
+  (`bot/web.py`, §10.4) — бесплатно, без CDN и сторонних библиотек (единственный внешний скрипт —
+  `https://telegram.org/js/telegram-web-app.js`). В `polling` приложения и кнопок нет — чат как раньше.
+* **Маршруты.** `GET|HEAD /app`, `/app/` — страница (без БД); `GET|HEAD /app/static/{app.js|app.css}` — белый
+  список, кэш по версии; `/api/*` — JSON, вход по подписанному Telegram `initData` (HMAC токена бота, не старше
+  24 ч) при каждом запросе, права — по записи `User` в базе; одна сессия БД на запрос.
+* **Настройки** (§10.2): `WEBAPP_ENABLED` (по умолчанию да), `WEBAPP_DEBUG` (только локально);
+  `settings.webapp_url` — адрес для кнопок или `""`.
+* **Кнопки** (BotFather настраивать не нужно):
+  * кнопка меню чата — `main._setup_menu_button(bot, settings)` при каждом запуске webhook после
+    `set_my_commands`: `setChatMenuButton` без `chat_id` (по умолчанию для всех личных чатов) —
+    `MenuButtonWebApp(text="Открыть", web_app=WebAppInfo(url=webapp_url))`, при пустом `webapp_url` —
+    `MenuButtonDefault()`; ошибка Telegram — предупреждение в лог (тип ошибки), запуск продолжается;
+  * «📱 Открыть приложение» — вторым сообщением после приветствия активного пользователя (§7.1);
+  * `polling` кнопку не трогает, кроме `TAKEOVER_WEBHOOK=1` (стандартная кнопка, §10.5).
+* **Журнал при запуске** (webhook): `Mini App: <webapp_url> (кнопка «Открыть» в чате)` или
+  `Mini App выключен (WEBAPP_ENABLED=0)`; `WEBAPP_DEBUG` в webhook — предупреждение «игнорируется».
+* **Остановка.** Фоновые задачи приложения (оценка сдачи, Excel, пересылка файлов) ждёт `_drain` (§10.4);
+  оценку, прерванную остановкой, доводит `jobs.recover_stalled_evaluations` (§8), как в чате.
+* **Локальная проверка** — `python -m bot.webapp.dev [--seed-demo]`: временная SQLite, фейковый Telegram,
+  `WEBAPP_DEBUG=1`, вход «как …» на `http://127.0.0.1:8081/dev/` (docs/MINIAPP_SPEC.md §4.6).
+* **Тесты:** `tests/webapp/*` (API, страница, статика `test_static_contract.py`, dev-сервер
+  `test_dev_server.py`, сквозной сценарий приложение ↔ чат `test_api_e2e.py`, обмены с базой на запрос
+  `test_api_budget.py`), `tests/e2e/test_submission_flow.py` (общий конвейер сдачи),
+  `tests/test_webapp_integration.py` (настройки, монтирование, кнопки). Скриншоты экранов —
+  `docs/miniapp_screens/`.
