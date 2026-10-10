@@ -25,6 +25,7 @@ ROLES: dict[tuple[str, str], str] = {
     ("POST", "/api/tasks/{task_id}/approve"): "M",
     ("POST", "/api/tasks/{task_id}/reject"): "M",
     ("POST", "/api/ai/formulate"): "ME",
+    ("POST", "/api/voice"): "ME",
     ("GET", "/api/review"): "M",
     ("POST", "/api/submissions/{sub_id}/confirm"): "M",
     ("POST", "/api/submissions/{sub_id}/score"): "M",

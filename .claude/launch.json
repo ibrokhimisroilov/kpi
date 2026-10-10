@@ -4,7 +4,7 @@
     {
       "name": "miniapp-dev",
       "runtimeExecutable": ".venv/Scripts/python.exe",
-      "runtimeArgs": ["-m", "bot.webapp.dev", "--port", "8081", "--seed-demo"],
+      "runtimeArgs": ["-m", "bot.webapp.dev", "--port", "8081", "--seed-demo", "--fake-voice"],
       "port": 8081
     }
   ]

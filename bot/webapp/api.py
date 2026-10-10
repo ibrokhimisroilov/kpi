@@ -50,7 +50,7 @@ from sqlalchemy import ColumnElement, case, false, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot import notify
-from bot.ai import formulate
+from bot.ai import dictate, formulate
 from bot.ai import provider as ai_provider
 from bot.config import get_settings
 from bot.db.models import (
@@ -139,6 +139,12 @@ FORMULATE_LIMITS_EMPLOYEE = ((6, 60.0), (20, DAY_SEC))
 # Подсказки AI всей команды за сутки: дальше — правила, чтобы квоты бесплатных моделей оставались оценке сдач.
 FORMULATE_TEAM_PER_DAY = 200
 PROPOSAL_LIMITS = ((5, 10 * 60.0), (20, DAY_SEC))
+# Голосовой ввод (§8.10): запись уходит телом запроса. Размер — с запасом на 2 минуты AAC с iPhone.
+VOICE_MAX_BYTES = 6 * 1024 * 1024
+VOICE_READ_TIMEOUT_SEC = 60.0  # запись целиком (с медленного мобильного интернета) — не дольше
+VOICE_LIMITS = ((12, 60.0), (200, DAY_SEC))  # на человека
+VOICE_TEAM_PER_DAY = 800  # всей команды за сутки: дальше — «напишите текстом» (квоты AI нужны оценке сдач)
+VOICE_EXTRA_SEC = 10  # запас сверх времени, за которое AI обязан распознать запись
 
 # Лимиты текстов (§6.1) — как в чате.
 TITLE_MAX = 255  # tasks._MAX_TITLE_LEN
@@ -211,6 +217,9 @@ AI_TEAM_LIMIT_NOTICE = (
 )
 FORMULATE_TOO_OFTEN = "⏳ Слишком много запросов к AI подряд — повторите через {wait} или сформулируйте результат сами."
 PROPOSE_TOO_OFTEN = "⏳ Слишком много поручений подряд — следующее можно внести через {wait}."
+VOICE_TOO_OFTEN = "🎤 Слишком много записей подряд — повторите через {wait} или введите текст с клавиатуры."
+VOICE_TOO_BIG = "🎤 Запись слишком длинная — скажите короче или введите текст с клавиатуры."
+VOICE_NO_AUDIO = "🎤 Запись не дошла до сервера. Проверьте интернет и повторите."
 REQUEST_TIMEOUT = "Запрос не дошёл до сервера целиком. Проверьте интернет и повторите."
 UPLOAD_TIMEOUT = "Файлы не дошли до сервера: связь прервалась. Проверьте интернет и отправьте ещё раз."
 TOO_MANY_PARTS = "Слишком много полей в форме сдачи."
@@ -223,6 +232,7 @@ BUSY: dict[str, str] = {
     "submit": "⏳ Результат уже отправляется…",
     "export": "⏳ Отчёт уже готовится — он придёт в чат с ботом.",
     "files": "⏳ Файлы уже отправляются в чат.",
+    "voice": "⏳ Подождите, распознаю предыдущую запись…",
 }
 
 _LIST_SCOPES = ("my", "all", "emp")
@@ -1031,6 +1041,9 @@ async def get_me(request: web.Request) -> web.Response:
                 "score_options": list(SCORE_OPTIONS),
                 "history_page_size": HISTORY_PAGE_SIZE,
                 "trend_weeks": TREND_WEEKS,
+                # Голосовой ввод в формах: включён и есть чем распознавать; самая длинная запись, секунд.
+                "voice_enabled": dictate.voice_hint_enabled(),
+                "voice_max_sec": settings.voice_max_sec,
             },
             "deadline_options": [
                 {"label": label, "date": day} for label, day in dateparse.quick_deadline_options()
@@ -1270,6 +1283,90 @@ async def _ai_suggestion(title: str, raw: str, previous: str | None) -> formulat
     except Exception:  # noqa: BLE001 - подсказка не должна ломать форму
         log.exception("Подсказка формулировки упала — правила")
     return formulate.rules_suggestion(title, raw)
+
+
+# --- Голосовой ввод (§8.10) --------------------------------------------------------------------------------
+
+
+async def _read_audio(request: web.Request) -> tuple[bytes, str]:
+    """Тело запроса — запись целиком: (байты, Content-Type). Больше VOICE_MAX_BYTES — 413, не пришла — 400/408."""
+    declared = request.content_length
+    if declared is not None and declared > VOICE_MAX_BYTES:
+        raise ApiError(413, "too_large", VOICE_TOO_BIG)
+
+    async def read() -> bytes:
+        chunks: list[bytes] = []
+        size = 0
+        async for chunk in request.content.iter_chunked(64 * 1024):
+            size += len(chunk)
+            if size > VOICE_MAX_BYTES:
+                raise ApiError(413, "too_large", VOICE_TOO_BIG)
+            chunks.append(chunk)
+        return b"".join(chunks)
+
+    try:
+        data = await asyncio.wait_for(read(), VOICE_READ_TIMEOUT_SEC)
+    except TimeoutError:
+        raise ApiError(408, "request_timeout", REQUEST_TIMEOUT) from None
+    if not data:
+        raise _bad(VOICE_NO_AUDIO)
+    return data, request.headers.get("Content-Type", "")
+
+
+async def voice_input(request: web.Request) -> web.Response:
+    """Диктовка в форме приложения: тело — запись (WebM/Opus, MP4/AAC, OGG), ответ — распознанный текст.
+
+    ``?mode=task`` — запись описывает задачу целиком: в ответе ещё и поля формы (начальнику — исполнитель из
+    активных сотрудников). Речь не распознана — 422 ``voice_failed`` с текстом для пользователя.
+    """
+    ctx = _ctx(request)
+    viewer = active_viewer(request)
+    session = _session(request)
+    mode = request.query.get("mode", "text")
+    if mode not in ("text", "task"):
+        raise _bad("mode: ожидается text или task")
+    employees: list[tuple[int, str]] = []
+    if mode == "task" and viewer.is_manager:
+        employees = [(user.id, user.full_name) for user in await users_svc.list_employees(session)]
+    await session.commit()  # соединение свободно на время чтения записи и ответа AI
+    async with ctx.gate.hold("voice", viewer.tg_id, BUSY["voice"]):
+        _rate_limit(ctx, "voice", viewer.tg_id, VOICE_LIMITS, VOICE_TOO_OFTEN)
+        audio, mime_type = await _read_audio(request)
+        if ctx.limits.hit("voice_team", 0, ((VOICE_TEAM_PER_DAY, DAY_SEC),)) is not None:
+            log.info("Голосовой ввод команды за сутки исчерпан")
+            raise ApiError(422, "voice_failed", dictate.VoiceError("off").message)
+        timeout = ai_provider.chain_budget_sec(get_settings(), "transcribe") + VOICE_EXTRA_SEC
+        try:
+            if mode == "text":
+                text = await asyncio.wait_for(dictate.transcribe(audio, mime_type), timeout=timeout)
+                return _ok({"text": text})
+            author = "manager" if viewer.is_manager else "employee"
+            result = await asyncio.wait_for(
+                dictate.dictate_task(audio=audio, mime_type=mime_type, employees=employees, author=author, now=utcnow()),
+                timeout=timeout,
+            )
+        except dictate.VoiceError as exc:
+            raise ApiError(422, "voice_failed", exc.message) from exc
+        except TimeoutError:
+            log.warning("Распознавание записи не уложилось в %.0f с", timeout)
+            raise ApiError(422, "voice_failed", dictate.VoiceError("unavailable").message) from None
+    local = to_local(result.deadline) if result.deadline is not None else None
+    return _ok(
+        {
+            "text": result.transcript,
+            "task": {
+                "assignee_id": result.assignee_id,
+                "title": result.title,
+                "expected_result": result.expected_result,
+                "plan_value": result.plan_value,
+                "plan_unit": result.plan_unit,
+                # Срок — местные дата и время, как их вводит форма (§11.8).
+                "deadline_date": local.strftime("%Y-%m-%d") if local is not None else None,
+                "deadline_time": local.strftime("%H:%M") if local is not None else None,
+                "source": result.source,
+            },
+        }
+    )
 
 
 # --- Поручения сотрудников (§8.5) -------------------------------------------------------------------------
@@ -2052,6 +2149,7 @@ _TABLE: list[tuple[str, str, Handler]] = [
     ("POST", "/tasks/{task_id}/approve", approve_proposal),
     ("POST", "/tasks/{task_id}/reject", reject_proposal),
     ("POST", "/ai/formulate", ai_formulate),
+    ("POST", "/voice", voice_input),
     ("GET", "/review", list_review),
     ("POST", "/submissions/{sub_id}/confirm", review_confirm),
     ("POST", "/submissions/{sub_id}/score", review_score),
@@ -2070,7 +2168,7 @@ _TABLE: list[tuple[str, str, Handler]] = [
 # Все маршруты API: (метод, шаблон полного пути). Тест SPA сверяет с ними пути в app.js.
 ROUTES: list[tuple[str, str]] = [(method, "/api" + path) for method, path, _ in _TABLE]
 # Обработчики, которые читают тело сами, потоком и после commit (сдача с файлами): middleware его не читает.
-_STREAMING_HANDLERS: frozenset[Handler] = frozenset({submit_result})
+_STREAMING_HANDLERS: frozenset[Handler] = frozenset({submit_result, voice_input})
 
 
 def build_api_app(ctx: WebappContext) -> web.Application:

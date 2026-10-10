@@ -737,6 +737,7 @@ HistoryItem = { task_id: int, title: str, weight: int, completed_at: ISO|null, c
 | `GET /api/tasks` | M (my/all/emp), E (my) | `queries.list_task_rows` / `search_task_rows` / `tab_counts` | — | 3 (+1 counts) |
 | `GET /api/tasks/{id}` | M; E — только свои | `tasks.get_task`, `tasks.task_events` | — | 5 |
 | `POST /api/ai/formulate` | M, E | `formulate.suggest_expected_result` | — | 1 |
+| `POST /api/voice` | M, E | `dictate.transcribe` / `dictate.dictate_task` (§8.10) | — | 2 |
 | `POST /api/tasks` | M | `tasks.create_task` | `notify_new_task` | 6 |
 | `PATCH /api/tasks/{id}` | M | `tasks.update_task` | `notify_task_changed` (если есть изменения) | — |
 | `POST /api/tasks/{id}/accept` | A | `tasks.accept_task` | — (как в чате) | — |
@@ -1038,6 +1039,27 @@ caption=f"📊 Отчёт: {esc(period.label)}")` (как `dashboard.export_repo
 Сотрудника нет → 404. `exclude_task_id` — при подтверждении поручения (как в чате).
 
 ---
+
+### 8.10 Голосовой ввод: `POST /api/voice`
+
+Диктовка в формах (SPEC.md §13). Тело запроса — сама запись (не JSON и не форма), `Content-Type` — тип
+записи от `MediaRecorder`: `audio/webm;codecs=opus` (Android, компьютер), `audio/mp4` (iPhone),
+`audio/ogg`. Размер — до `VOICE_MAX_BYTES` (6 МБ), чтение — не дольше `VOICE_READ_TIMEOUT_SEC` (60 с);
+обработчик читает тело сам (`_STREAMING_HANDLERS`), соединение с базой на это время и на ответ AI отпущено.
+
+* без параметров — `{"text": "распознанный текст"}` (поле формы);
+* `?mode=task` — задача целиком: `{"text": …, "task": {assignee_id, title, expected_result, plan_value,
+  plan_unit, deadline_date, deadline_time, source}}`; начальнику исполнитель подбирается из активных
+  сотрудников, у сотрудника `assignee_id` всегда `null`; чего в записи не было — `null`. Срок — местные
+  дата `YYYY-MM-DD` и время `HH:MM`, как их вводит форма (§11.8).
+
+Ошибки: `400` — пустое тело или неизвестный `mode`; `413 too_large` — запись больше лимита; `422
+voice_failed` — речь не распознана (текст — `dictate.VoiceError.message`: «не удалось разобрать речь»,
+«сейчас не получилось…», «голос сейчас не распознаётся…»); `429 rate_limited` — чаще `VOICE_LIMITS`
+(12 в минуту, 200 в сутки на человека). После `VOICE_TEAM_PER_DAY` (800) записей команды за сутки —
+`422` «напишите текстом»: квоты бесплатного AI остаются оценке сдач. Одновременно у человека распознаётся
+одна запись (`BUSY["voice"]`). `GET /api/me`: `config.voice_enabled` (голос включён и AI доступен) и
+`config.voice_max_sec`.
 
 ## 9. Общий конвейер сдачи (`bot/services/submission_flow.py`, CORE)
 
@@ -1477,6 +1499,25 @@ MainButton «📤 Отправить начальнику» → `POST /api/propo
 «по правилам, без AI», `notice` — предупреждением. Кнопки: «✅ Принять» (подставить в «Ожидаемый
 результат», план и единицу; исходные слова уходят в `description`, если отличаются), «🔁 Другой
 вариант» (тот же запрос с `previous` = текущая формулировка), «📝 Оставить как написал» (закрыть).
+
+### 11.11 Голосовой ввод (микрофон)
+
+Показывается, только если `cfg().voice_enabled` и в окне есть `navigator.mediaDevices.getUserMedia` и
+`MediaRecorder` (`voiceSupported()`); иначе кнопок нет и формы работают как раньше.
+
+* **Кнопка «🎤» у текстового поля** (`field()`: однострочные и многострочные поля; не числа, не даты, не
+  поиск; `mic: false` — без кнопки): нажал — идёт запись (кнопка красная, «⏹ 0:07»), нажал ещё раз —
+  «⏳», запись уходит на `POST /api/voice`, распознанный текст дописывается в конец поля (`appendDictated`,
+  событие `input` — счётчик и черновик обновляются как при вводе с клавиатуры).
+* **«🎤 Надиктовать задачу целиком»** — вверху «Новой задачи» и «Поручения» (`dictateBar`): `?mode=task` →
+  `applyDictation` кладёт поля в черновик, форма перерисовывается; тост «Готово — проверьте поля». Вес и
+  приоритет начальник выбирает сам.
+* Запись: `MediaRecorder` с первым поддерживаемым типом из `VOICE_TYPES`, 32 кбит/с; не дольше
+  `voice_max_sec` (потом останавливается сама); короче 0,6 с — «Запись слишком короткая». Одна запись за раз.
+* Микрофон остаётся открытым `VOICE_IDLE_MS` (60 с) после записи — Telegram на Android спрашивает
+  разрешение при каждом `getUserMedia`; приложение свернули — запись останавливается, микрофон отпускается.
+* Ошибки — тостом: нет доступа («Разрешите микрофон для Telegram в настройках телефона…»), микрофон не
+  найден, текст ошибки сервера (422/429/413).
 
 ### 11.10 Доступность
 

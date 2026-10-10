@@ -49,6 +49,7 @@
     approveTask: ['POST', '/api/tasks/{task_id}/approve'],
     rejectTask: ['POST', '/api/tasks/{task_id}/reject'],
     formulate: ['POST', '/api/ai/formulate'],
+    voice: ['POST', '/api/voice'],
     review: ['GET', '/api/review'],
     confirm: ['POST', '/api/submissions/{sub_id}/confirm'],
     setScore: ['POST', '/api/submissions/{sub_id}/score'],
@@ -657,7 +658,11 @@
     const headers = { 'X-Telegram-Init-Data': auth.initData, Accept: 'application/json' };
     const init = { method, headers, credentials: 'same-origin', cache: 'no-store' };
     if (ctrl) init.signal = ctrl.signal;
-    if (body !== undefined) {
+    if (typeof Blob === 'function' && body instanceof Blob) {
+      // Запись с микрофона уходит как есть: тип — тот, что дал MediaRecorder (audio/webm, audio/mp4…).
+      headers['Content-Type'] = body.type || 'application/octet-stream';
+      init.body = body;
+    } else if (body !== undefined) {
       headers['Content-Type'] = 'application/json';
       init.body = JSON.stringify(body);
     }
@@ -1430,6 +1435,197 @@
   // --- Поля формы -------------------------------------------------------------------------------
 
   /** Текстовое поле с подписью, счётчиком, подсказкой и ошибкой (aria-invalid/aria-describedby). */
+  // ---- Голосовой ввод (§11.11): нажал — говоришь — нажал ещё раз; текст распознаёт сервер ----
+
+  const VOICE_TYPES = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4', 'audio/ogg;codecs=opus'];
+  const VOICE_IDLE_MS = 60 * 1000; // микрофон остаётся открытым между записями: Telegram не спрашивает разрешение каждый раз
+  const VOICE_TIMEOUT_MS = 75 * 1000;
+  const VOICE_MIN_MS = 600;
+  const voice = { stream: null, idleTimer: 0, active: null };
+
+  function voiceSupported() {
+    return Boolean(cfg() && cfg().voice_enabled && navigator.mediaDevices && navigator.mediaDevices.getUserMedia
+      && typeof MediaRecorder === 'function');
+  }
+
+  function voiceMime() {
+    if (typeof MediaRecorder.isTypeSupported !== 'function') return '';
+    for (let i = 0; i < VOICE_TYPES.length; i += 1) {
+      if (MediaRecorder.isTypeSupported(VOICE_TYPES[i])) return VOICE_TYPES[i];
+    }
+    return '';
+  }
+
+  async function voiceStream() {
+    clearTimeout(voice.idleTimer);
+    if (voice.stream && voice.stream.getAudioTracks().some((t) => t.readyState === 'live')) return voice.stream;
+    voice.stream = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: true, noiseSuppression: true, channelCount: 1 },
+    });
+    return voice.stream;
+  }
+
+  function voiceRelease(now) {
+    clearTimeout(voice.idleTimer);
+    const stop = () => {
+      if (!voice.stream) return;
+      voice.stream.getTracks().forEach((t) => t.stop());
+      voice.stream = null;
+    };
+    if (now) stop();
+    else voice.idleTimer = setTimeout(stop, VOICE_IDLE_MS);
+  }
+
+  function voiceErrorText(err) {
+    const name = err && err.name;
+    if (name === 'NotAllowedError' || name === 'SecurityError') {
+      return '🎤 Нет доступа к микрофону. Разрешите микрофон для Telegram в настройках телефона и попробуйте ещё раз.';
+    }
+    if (name === 'NotFoundError' || name === 'OverconstrainedError') return '🎤 Микрофон не найден.';
+    return '🎤 Не удалось включить микрофон. Попробуйте ещё раз или введите текст с клавиатуры.';
+  }
+
+  function fmtClock(ms) {
+    const s = Math.floor(ms / 1000);
+    return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0');
+  }
+
+  /**
+   * Кнопка-микрофон. o.mode: 'text' (по умолчанию) — распознать речь; 'task' — разобрать задачу целиком.
+   * o.onResult(data) — ответ POST /api/voice. o.text — подпись большой кнопки (иначе только значок).
+   */
+  function micButton(o) {
+    const idle = o.text || '🎤';
+    const label = o.label || 'Надиктовать голосом';
+    const btn = h('button', { type: 'button', class: 'mic-btn' + (o.text ? ' mic-big' : ''), 'aria-label': label, title: label }, idle);
+    let recorder = null;
+    let chunks = [];
+    let startedAt = 0;
+    let tick = 0;
+    let stage = 'idle'; // idle | starting | rec | sending
+
+    function paint() {
+      btn.classList.toggle('rec', stage === 'rec');
+      btn.classList.toggle('busy', stage === 'starting' || stage === 'sending');
+      btn.disabled = stage === 'starting' || stage === 'sending';
+      if (stage === 'rec') {
+        btn.textContent = '⏹ ' + fmtClock(Date.now() - startedAt);
+        btn.setAttribute('aria-label', 'Остановить запись');
+      } else {
+        btn.textContent = stage === 'sending' ? (o.text ? '⏳ Распознаю…' : '⏳') : idle;
+        btn.setAttribute('aria-label', stage === 'sending' ? 'Распознаю речь' : label);
+      }
+    }
+
+    function reset() {
+      clearInterval(tick);
+      tick = 0;
+      recorder = null;
+      chunks = [];
+      stage = 'idle';
+      if (voice.active === api_) voice.active = null;
+      paint();
+    }
+
+    async function start() {
+      if (voice.active && voice.active !== api_) voice.active.stop(); // одна запись за раз
+      voice.active = api_;
+      stage = 'starting';
+      paint();
+      let stream;
+      try {
+        stream = await voiceStream();
+      } catch (err) {
+        reset();
+        haptic.err();
+        toast(voiceErrorText(err));
+        return;
+      }
+      if (stage !== 'starting') return;
+      const mime = voiceMime();
+      try {
+        recorder = new MediaRecorder(stream, mime ? { mimeType: mime, audioBitsPerSecond: 32000 } : { audioBitsPerSecond: 32000 });
+      } catch (_) {
+        try {
+          recorder = new MediaRecorder(stream);
+        } catch (err) {
+          reset();
+          voiceRelease(true);
+          toast(voiceErrorText(err));
+          return;
+        }
+      }
+      chunks = [];
+      recorder.addEventListener('dataavailable', (e) => {
+        if (e.data && e.data.size) chunks.push(e.data);
+      });
+      recorder.addEventListener('stop', finish);
+      recorder.addEventListener('error', () => {
+        reset();
+        voiceRelease(true);
+        toast(voiceErrorText(null));
+      });
+      startedAt = Date.now();
+      recorder.start();
+      stage = 'rec';
+      haptic.sel();
+      paint();
+      const maxMs = ((cfg() && cfg().voice_max_sec) || 120) * 1000;
+      tick = setInterval(() => {
+        if (Date.now() - startedAt >= maxMs) stop();
+        else paint();
+      }, 500);
+    }
+
+    function stop() {
+      if (stage !== 'rec' || !recorder) return;
+      clearInterval(tick);
+      tick = 0;
+      stage = 'sending';
+      paint();
+      safely(() => recorder.stop());
+    }
+
+    async function finish() {
+      const took = Date.now() - startedAt;
+      const type = (recorder && recorder.mimeType) || (chunks[0] && chunks[0].type) || 'audio/webm';
+      const blob = new Blob(chunks, { type });
+      voiceRelease(false);
+      if (took < VOICE_MIN_MS || !blob.size) {
+        reset();
+        toast('🎤 Запись слишком короткая. Нажмите, скажите фразу и нажмите ещё раз.');
+        return;
+      }
+      stage = 'sending';
+      paint();
+      try {
+        const data = await api(EP.voice, { query: o.mode === 'task' ? { mode: 'task' } : null, body: blob, timeout: VOICE_TIMEOUT_MS });
+        reset();
+        haptic.ok();
+        if (btn.isConnected) o.onResult(data);
+      } catch (err) {
+        reset();
+        reportError(err);
+      }
+    }
+
+    const api_ = { stop };
+    btn.addEventListener('click', () => {
+      if (stage === 'idle') start();
+      else if (stage === 'rec') stop();
+    });
+    return btn;
+  }
+
+  /** Вставить распознанный текст в поле: в конец, через пробел; дальше — как обычный ввод с клавиатуры. */
+  function appendDictated(input, text) {
+    const add = String(text || '').trim();
+    if (!add) return;
+    const cur = input.value;
+    input.value = cur && !/\s$/.test(cur) ? cur + ' ' + add : cur + add;
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  }
+
   function field(o) {
     const id = uid('f');
     const errId = id + '-err';
@@ -1444,8 +1640,12 @@
     const counter = o.max ? h('span', { class: 'counter', 'aria-hidden': 'true' }) : null;
     const err = h('p', { class: 'field-error', id: errId, 'aria-live': 'polite' });
     const hint = hintId ? h('p', { class: 'field-hint', id: hintId }, o.hint) : null;
+    const labelEl = h('label', { for: id }, h('span', null, o.label, o.required ? h('span', { class: 'req', 'aria-hidden': 'true' }, '*') : null), counter);
+    // Текстовые поля можно надиктовать (числа, даты и поиск — с клавиатуры).
+    const dictable = o.mic !== false && !o.inputmode && (o.multiline || !o.type || o.type === 'text') && voiceSupported();
+    const mic = dictable ? micButton({ label: 'Надиктовать: ' + o.label, onResult: (data) => appendDictated(input, data.text) }) : null;
     const el = h('div', { class: 'field' },
-      h('label', { for: id }, h('span', null, o.label, o.required ? h('span', { class: 'req', 'aria-hidden': 'true' }, '*') : null), counter),
+      mic ? h('div', { class: 'field-head' }, labelEl, mic) : labelEl,
       input, hint, err);
 
     function updateCounter() {
@@ -3313,11 +3513,38 @@
     const box = h('div');
     scr.el.append(head.el, box);
     scr.dirty = () => draftDirty(d);
-    loadInto(scr, box, {
+    const load = loadInto(scr, box, {
       request: () => ({ ep: EP.employees }),
       skeleton: skelForm,
-      render: (data) => newTaskForm(scr, d, data.items || []),
-    })();
+      render: (data) => newTaskForm(scr, d, data.items || [], () => load()),
+    });
+    load();
+  }
+
+  /** Поля задачи из голосового сообщения (ответ POST /api/voice?mode=task) -> в черновик формы. */
+  function applyDictation(d, data) {
+    const t = (data && data.task) || {};
+    if (t.assignee_id) d.assignee_id = String(t.assignee_id);
+    if (t.title) d.title = t.title;
+    if (t.expected_result) {
+      d.expected_result = t.expected_result;
+      d.description = data.text && data.text.trim() !== t.expected_result.trim() ? data.text.trim() : null;
+      d.plan_value = isNum(t.plan_value) ? fmtNum(t.plan_value) : '';
+      d.plan_unit = isNum(t.plan_value) && t.plan_unit ? t.plan_unit : '';
+    } else if (!t.title && data && data.text) {
+      d.expected_result = data.text; // поля не разобраны — хотя бы сам текст не пропадёт
+    }
+    if (t.deadline_date) {
+      const defTime = cfg().default_deadline_time || '18:00';
+      d.deadline = { date: t.deadline_date, time: t.deadline_time || defTime, touched: Boolean(t.deadline_time && t.deadline_time !== defTime) };
+    }
+  }
+
+  function dictateBar(text, onResult) {
+    if (!voiceSupported()) return null;
+    return h('div', { class: 'dictate-bar' },
+      micButton({ mode: 'task', text, label: text, onResult }),
+      h('p', { class: 'field-hint center' }, 'Нажмите, скажите задачу по-русски или по-узбекски и нажмите ещё раз — поля заполнятся сами.'));
   }
 
   function applySuggestion(d, sg, raw, resultField, plan) {
@@ -3327,7 +3554,7 @@
     d.description = raw && raw.trim() !== String(sg.expected_result).trim() ? raw.trim() : null;
   }
 
-  function newTaskForm(scr, d, employees) {
+  function newTaskForm(scr, d, employees, rerender) {
     if (!employees.length) {
       primary.hide();
       return emptyState(T.noEmployees, '👥');
@@ -3448,7 +3675,13 @@
 
     primary.set({ text: 'Поставить задачу', enabled: filled(), onClick: submit });
     refreshLoad();
+    const dictate = dictateBar('🎤 Надиктовать задачу целиком', (data) => {
+      applyDictation(d, data);
+      toast('🎤 Готово — проверьте поля. Вес и приоритет выберите сами.');
+      if (rerender) rerender();
+    });
     return h('form', { class: 'form', novalidate: true, onsubmit: (e) => e.preventDefault() },
+      dictate,
       formErr,
       who.el, title.el, result.el, plan.el, deadline.el,
       h('div', { class: 'field' }, h('div', { class: 'label' }, 'Приоритет'), priority.el),
@@ -3459,8 +3692,14 @@
     if (!drafts.propose) drafts.propose = newDraft();
     const d = drafts.propose;
     const head = screenHead('Поручение', 'Внесите поручение, полученное устно: начальник подтвердит его.');
-    scr.el.append(head.el);
+    const holder = h('div');
+    scr.el.append(head.el, holder);
     scr.dirty = () => draftDirty(d);
+    const build = () => holder.replaceChildren(proposeForm(scr, d, build));
+    build();
+  }
+
+  function proposeForm(scr, d, rerender) {
     const formErr = h('div', { class: 'form-error', role: 'alert' });
     const title = field({
       label: 'Задача', required: true, max: 255, value: d.title, requiredText: 'Напишите, что нужно сделать',
@@ -3532,8 +3771,13 @@
     }
 
     primary.set({ text: '📤 Отправить начальнику', enabled: filled(), onClick: submit });
-    scr.el.append(h('form', { class: 'form', novalidate: true, onsubmit: (e) => e.preventDefault() },
-      formErr, title.el, result.el, plan.el, deadline.el));
+    const dictate = dictateBar('🎤 Надиктовать поручение целиком', (data) => {
+      applyDictation(d, data);
+      toast('🎤 Готово — проверьте поля перед отправкой.');
+      rerender();
+    });
+    return h('form', { class: 'form', novalidate: true, onsubmit: (e) => e.preventDefault() },
+      dictate, formErr, title.el, result.el, plan.el, deadline.el);
   }
 
   function EditTaskView(scr, args) {
@@ -4118,6 +4362,11 @@
     }
     document.addEventListener('visibilitychange', () => {
       if (document.visibilityState === 'visible') onResume();
+      else {
+        // Приложение свернули: запись останавливаем, микрофон отпускаем.
+        if (voice.active) voice.active.stop();
+        voiceRelease(true);
+      }
     });
     watchKeyboard();
 

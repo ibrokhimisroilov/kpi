@@ -1,6 +1,6 @@
 """Dev-сервер приложения в Telegram для проверки в обычном браузере (docs/MINIAPP_SPEC.md §4.6).
 
-    python -m bot.webapp.dev [--port 8081] [--db ПУТЬ] [--seed-demo] [--real-telegram]
+    python -m bot.webapp.dev [--port 8081] [--db ПУТЬ] [--seed-demo] [--fake-voice] [--real-telegram]
 
 * Только для разработки: слушает 127.0.0.1; база — отдельный файл SQLite во временной папке (не
   ``data/bot.db`` и не PostgreSQL); Telegram — фейковый (``tests/e2e/fakebot.py``: каждый «запрос к
@@ -12,6 +12,8 @@
   (§5.4). Сервер проверяет подпись как обычно: исключений для отладки нет.
 * ``--seed-demo`` — демо-команда (только в пустой базе): начальник, сотрудники, заявка на доступ,
   задачи всех статусов, сдачи с оценками и файлами, история оценок за несколько недель (для графика).
+* ``--fake-voice`` — «включить» голосовой ввод без AI: любая запись «распознаётся» в заранее заданный текст
+  (и поля задачи для «надиктовать целиком») — чтобы проверить кнопки микрофона в браузере.
 * Никаких webhook, polling, фоновых заданий и кнопки меню: только ``/app``, ``/api`` и ``/dev``.
 * ``--real-telegram`` — настоящий Bot с токеном из ``.env`` (только по явному флагу; уведомления уйдут
   настоящим людям). Подпись initData с этим токеном принимает и рабочий бот, поэтому вход закрыт
@@ -901,9 +903,40 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--db", default=None, help=f"файл SQLite (по умолчанию <temp>/{DB_FILE_NAME})")
     parser.add_argument("--seed-demo", action="store_true", help="заполнить пустую базу демо-командой")
     parser.add_argument(
+        "--fake-voice", action="store_true", help="голосовой ввод без AI: запись «распознаётся» в заданный текст"
+    )
+    parser.add_argument(
         "--real-telegram", action="store_true", help="настоящий Telegram с токеном из .env (уведомления уйдут людям!)"
     )
     return parser.parse_args(argv)
+
+
+FAKE_VOICE_TEXT = "Проверить 100 договоров поставщиков и подготовить отчёт о нарушениях"
+
+
+def enable_fake_voice() -> None:
+    """Подставной распознаватель речи для проверки интерфейса: AI не нужен, ответ всегда один и тот же."""
+    from datetime import timedelta
+
+    from bot.ai import dictate
+    from bot.utils.dates import to_local, utcnow
+
+    async def fake_generate_json(**kwargs: Any) -> tuple[dict[str, Any], str]:
+        if "transcript" not in kwargs["schema"]["properties"]:
+            return {"text": FAKE_VOICE_TEXT, "language": "ru"}, "fake-voice"
+        deadline = to_local(utcnow() + timedelta(days=3)).strftime("%Y-%m-%dT18:00")
+        return {
+            "transcript": FAKE_VOICE_TEXT,
+            "assignee_id": None,
+            "title": "Проверка договоров поставщиков",
+            "expected_result": "Проверить 100 договоров поставщиков и представить отчёт о нарушениях",
+            "plan_value": 100,
+            "plan_unit": "договоров",
+            "deadline": deadline,
+        }, "fake-voice"
+
+    dictate.ai_available = lambda: True  # type: ignore[assignment]
+    dictate.generate_json = fake_generate_json  # type: ignore[assignment]
 
 
 async def serve(args: argparse.Namespace, db_path: Path) -> None:
@@ -924,6 +957,9 @@ async def serve(args: argparse.Namespace, db_path: Path) -> None:
         if args.seed_demo:
             seeded = await seed_demo(sessionmaker)
             print("Демо-данные созданы." if seeded else "В базе уже есть пользователи — демо-данные не добавлены.", flush=True)
+        if getattr(args, "fake_voice", False):
+            enable_fake_voice()
+            print("Голосовой ввод: подставной распознаватель (--fake-voice).", flush=True)
         session = None if args.real_telegram else make_fake_session()
         bot = Bot(settings.bot_token, session=session, default=DefaultBotProperties(parse_mode="HTML"))
         app = build_dev_app(bot=bot, sessionmaker=sessionmaker, settings=settings)

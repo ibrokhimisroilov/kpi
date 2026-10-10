@@ -1257,5 +1257,12 @@ def voice_hint_enabled() -> bool             # VOICE_ENABLED и AI включё�
 * Подсказки: первый шаг «Поставить задачу» и «Добавить поручение», `/help` — только если голос включён и AI
   доступен (`voice_hint_enabled`).
 
+### 13.3 Приложение в Telegram
+
+Микрофон прямо в формах — переходить в чат не нужно: кнопка «🎤» у текстовых полей и «🎤 Надиктовать
+задачу целиком» в «Новой задаче» и «Поручении». Запись идёт в окне приложения (`MediaRecorder`), на сервер
+уходит телом `POST /api/voice`, распознаёт её тот же `bot.ai.dictate`. Контракт — docs/MINIAPP_SPEC.md
+§8.10 (API) и §11.11 (экран).
+
 **Настройки:** `VOICE_ENABLED` (true), `VOICE_MAX_SEC` (120), `AI_TRANSCRIBE_TIMEOUT_SEC`, `AI_TRANSCRIBE_BUDGET_SEC`,
 `GEMINI_TRANSCRIBE_MODELS`. **Тесты:** `tests/test_dictate.py`, `tests/e2e/test_voice.py` (`BotHarness.send_voice`).
