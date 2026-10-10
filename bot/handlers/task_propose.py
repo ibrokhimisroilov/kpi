@@ -32,6 +32,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot import notify
 from bot.ai import progress
+from bot.ai.dictate import voice_hint_enabled
 from bot.ai.formulate import ResultSuggestion, rules_suggestion, suggest_expected_result
 from bot.ai.provider import ai_available
 from bot.db.models import Priority, Role, Task, TaskStatus, User, UserStatus
@@ -287,12 +288,50 @@ STEP_TITLE = (
 )
 
 
+async def start_dictated(event: Message | CallbackQuery, state: FSMContext, dictation: Any) -> None:
+    """Черновик поручения из одного голосового сообщения (bot.handlers.voice; dictation —
+    bot.ai.dictate.Dictation): названное сотрудником уже заполнено, остального диалог спросит, затем сводка.
+    Пометка ``dictated`` — после недостающего шага вернуться к сводке, а не переспрашивать известный срок."""
+    await state.clear()
+    transcript = (dictation.transcript or "").strip()
+    draft: dict[str, Any] = {"dictated": True, "raw_result": transcript[:RESULT_MAX], "ai_retries": 0}
+    title = " ".join((dictation.title or "").split())[:TITLE_MAX]
+    if len(title) >= 2:
+        draft["title"] = title
+    expected = (dictation.expected_result or "").strip()[:RESULT_MAX]
+    if len(expected) >= 3:
+        value, unit = dictation.plan_value, dictation.plan_unit
+        valid = value is not None and math.isfinite(value) and value > 0
+        draft.update(
+            expected_result=expected,
+            plan_value=float(value) if valid else None,
+            plan_unit=unit[:UNIT_MAX] if valid and unit else None,
+        )
+    deadline = dictation.deadline
+    if deadline is not None and deadline > utcnow():
+        draft["deadline"] = common.dt_to_state(deadline)
+    await state.update_data(**draft)
+    if "title" not in draft:
+        await state.set_state(ProposeTaskSG.title)
+        await _show(event, state, STEP_TITLE, keyboards.cancel_kb())
+    elif "expected_result" not in draft:
+        await _ask_result(event, state)
+    elif "deadline" not in draft:
+        await _ask_deadline(event, state)
+    else:
+        await _show_summary(event, state)
+
+
+VOICE_HINT = "\n\n🎤 Можно надиктовать поручение целиком голосовым сообщением."
+
+
 @router.message(F.text == BTN_PROPOSE, IsEmployee())
 @router.message(Command("propose"), IsEmployee())
 async def propose_start(message: Message, state: FSMContext) -> None:
     await state.clear()
     await state.set_state(ProposeTaskSG.title)
-    await _show(message, state, STEP_TITLE, keyboards.cancel_kb())
+    text = STEP_TITLE + (VOICE_HINT if voice_hint_enabled() else "")
+    await _show(message, state, text, keyboards.cancel_kb())
 
 
 # Роль сменили посреди черновика (повысили до начальника) или черновик остался от прошлой роли:
@@ -596,7 +635,7 @@ async def _after_result(
     )
     if plan_value is None:
         await _ask_plan(event, state)
-    elif data.get("editing") and data.get("deadline"):
+    elif (data.get("editing") or data.get("dictated")) and data.get("deadline"):
         await _show_summary(event, state)
     else:
         await _ask_deadline(event, state)
@@ -648,7 +687,7 @@ async def propose_plan_skip(callback: CallbackQuery, state: FSMContext) -> None:
 
 async def _after_plan(event: Message | CallbackQuery, state: FSMContext) -> None:
     data = await state.get_data()
-    if data.get("editing") and data.get("deadline"):
+    if (data.get("editing") or data.get("dictated")) and data.get("deadline"):
         await _show_summary(event, state)
     else:
         await _ask_deadline(event, state)

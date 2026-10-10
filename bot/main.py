@@ -66,11 +66,13 @@ from bot.handlers import (
     task_submit,
     task_view,
     users_admin,
+    voice,
 )
 from bot.middlewares import DbSessionMiddleware, UserMiddleware
 from bot.scheduler.jobs import setup_scheduler, tick_schedule_summary
 from bot.services.errors import DomainError
 from bot.utils.text import esc
+from bot.voice import VoiceMiddleware
 from bot.web import BACKGROUND, build_web_app, ensure_webhook
 
 log = logging.getLogger(__name__)
@@ -419,9 +421,12 @@ def build_dispatcher(
     )
     dp.update.outer_middleware(DbSessionMiddleware(sessionmaker))
     dp.update.outer_middleware(UserMiddleware())
+    # Голосовой ответ на вопрос диалога превращается в текст до хендлеров (bot.voice).
+    dp.message.outer_middleware(VoiceMiddleware())
     dp.include_routers(
         start.router,
         users_admin.router,
+        voice.router,  # задача одним голосовым — раньше диалогов, у которых свои «ловушки» нетекстового ввода
         task_create.router,
         task_propose.router,
         task_submit.router,

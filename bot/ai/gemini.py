@@ -59,6 +59,10 @@ class GeminiProvider:
     def supports_images(self, model: str) -> bool:
         return True
 
+    def supports_audio(self, model: str) -> bool:
+        """Звук (распознавание речи) принимают модели Gemini; Gemma — нет."""
+        return not _is_gemma(model)
+
     def label(self, model: str) -> str:
         """Имя модели для журнала и БД (без префикса — как в прежних версиях бота)."""
         return model

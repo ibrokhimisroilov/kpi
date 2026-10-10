@@ -9,7 +9,9 @@ FSM-данные (только JSON-совместимые значения):
     assignee_id: int, assignee_name: str, title: str, description: str | None (исходные слова),
     expected_result: str, plan_value: float | None, plan_unit: str | None,
     deadline: str (ISO naive UTC, common.dt_to_state), priority: str (Priority.value), weight: int.
-    Служебные: raw_result, suggestion (dict ResultSuggestion), ai_busy + ai_busy_since (ISO naive UTC),
+    Служебные: dictated (задача продиктована одним голосовым сообщением — start_dictated: мастер
+    спрашивает только то, чего в сообщении не было), raw_result, suggestion (dict ResultSuggestion),
+    ai_busy + ai_busy_since (ISO naive UTC),
     ai_lost (запрос к AI прервала остановка бота), editing, creating,
     prompt_id — id последнего сообщения-вопроса диалога: срабатывают только его кнопки, а кнопки
     старых сообщений (в том числе из брошенных диалогов) отвечают «кнопка уже неактуальна».
@@ -40,6 +42,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot import notify
 from bot.ai import formulate, progress
+from bot.ai.dictate import voice_hint_enabled
 from bot.ai.provider import attempt_timeout_sec, chain_budget_sec
 from bot.config import get_settings
 from bot.db.models import Priority, Role, User
@@ -150,6 +153,84 @@ async def start_create(message: Message, state: FSMContext, session: AsyncSessio
         await _strip_prompt(message, state)  # начали заново — кнопки брошенного черновика убираем
     await state.clear()
     await _show_step(message, state, session, "assignee")
+
+
+async def start_dictated(
+    message: Message, state: FSMContext, session: AsyncSession, dictation: Any, assignee: User | None
+) -> None:
+    """Черновик задачи из одного голосового сообщения (bot.handlers.voice): поля, которые назвал начальник,
+    уже заполнены (dictation — bot.ai.dictate.Dictation, assignee — распознанный сотрудник), остальное мастер
+    спросит по порядку; вес и приоритет — всегда кнопками, затем сводка."""
+    current = await state.get_state()
+    if current is not None and current in CreateTaskSG:
+        await _strip_prompt(message, state)  # голосовое на первом шаге — кнопки выбора сотрудника убираем
+    await state.clear()
+    transcript = (dictation.transcript or "").strip()
+    draft: dict[str, Any] = {"dictated": True, "raw_result": transcript[:RESULT_MAX]}
+    if assignee is not None:
+        draft.update(assignee_id=assignee.id, assignee_name=assignee.full_name)
+    title = " ".join((dictation.title or "").split())[:TITLE_MAX]
+    if title:
+        draft["title"] = title
+    expected = (dictation.expected_result or "").strip()[:RESULT_MAX]
+    if expected:
+        value, unit = _clean_plan(dictation.plan_value, dictation.plan_unit)
+        same = " ".join(transcript.split()).casefold() == " ".join(expected.split()).casefold()
+        draft.update(
+            expected_result=expected,
+            description=None if same or not transcript else transcript,  # исходные слова начальника
+            plan_value=value,
+            plan_unit=unit,
+        )
+    deadline = dictation.deadline
+    if deadline is not None and deadline > utcnow() and not _too_far(deadline):
+        draft["deadline"] = common.dt_to_state(deadline)
+    await state.update_data(**draft)
+    await _continue_dictated(message, state, session, _dictated_notice(draft))
+
+
+def _missing_step(data: dict[str, Any]) -> str | None:
+    """Первый по порядку мастера шаг, значения которого в черновике ещё нет; None — всё заполнено."""
+    checks = (
+        ("assignee", "assignee_id"),
+        ("title", "title"),
+        ("result", "expected_result"),
+        ("deadline", "deadline"),
+        ("priority", "priority"),
+        ("weight", "weight"),
+    )
+    return next((step for step, key in checks if not data.get(key)), None)
+
+
+async def _continue_dictated(
+    event: Message | CallbackQuery, state: FSMContext, session: AsyncSession, notice: str | None = None
+) -> None:
+    """Продиктованный черновик: спросить следующее, чего не хватает, или показать сводку."""
+    step = _missing_step(await state.get_data())
+    if step is None:
+        await _show_summary(event, state, notice=notice)
+    else:
+        await _show_step(event, state, session, step, notice=notice)
+
+
+def _dictated_notice(draft: dict[str, Any]) -> str:
+    """Что бот понял из голосового сообщения (остальное спросит)."""
+    lines = ["🎤 <b>Понял так:</b>"]
+    if draft.get("assignee_name"):
+        lines.append(f"👤 Сотрудник: <b>{esc(draft['assignee_name'])}</b>")
+    if draft.get("title"):
+        lines.append(f"📝 Задача: <b>{esc(draft['title'])}</b>")
+    if draft.get("expected_result"):
+        lines.append(f"🎯 Ожидаемый результат: {esc(draft['expected_result'])}")
+    if draft.get("plan_value") is not None:
+        lines.append(f"📊 План: <b>{_plan_str(draft['plan_value'], draft.get('plan_unit'))}</b>")
+    deadline = common.dt_from_state(draft.get("deadline"))
+    if deadline is not None:
+        lines.append(f"📅 Срок: <b>{esc(fmt_deadline(deadline))}</b>")
+    if len(lines) == 1:
+        return "🎤 Не удалось понять задачу из сообщения — заполним по шагам."
+    lines.append("Остальное уточню. Исправить можно в сводке: «✏️ Изменить».")
+    return "\n".join(lines)
 
 
 # --- 1. Сотрудник ----------------------------------------------------------------------------
@@ -613,6 +694,11 @@ async def _show_step(
                 await common.edit_or_answer(event, NO_EMPLOYEES_TEXT)
             return
         body = "👤 Выберите <b>сотрудника</b>, которому ставите задачу:"
+        if not editing and not data.get("dictated") and voice_hint_enabled():
+            body += (
+                "\n\n🎤 Или надиктуйте задачу целиком голосовым сообщением, например: "
+                "<i>«Алиеву до пятницы проверить 100 договоров и сдать отчёт»</i>."
+            )
         kb = keyboards.choose_user_kb(employees, "assignee")
     elif step == "title":
         body = (
@@ -728,10 +814,13 @@ async def _after_value(
     next_step: str,
     notice: str | None = None,
 ) -> None:
-    """Значение сохранено: в режиме правки — назад к сводке, иначе — следующий шаг мастера."""
+    """Значение сохранено: в режиме правки — назад к сводке, иначе — следующий шаг мастера
+    (у продиктованного черновика — следующий шаг, значения которого ещё нет)."""
     data = await state.get_data()
     if data.get("editing"):
         await _show_summary(event, state, notice="✔️ Черновик обновлён.")
+    elif data.get("dictated"):
+        await _continue_dictated(event, state, session, notice)
     elif next_step == "summary":
         await _show_summary(event, state)
     else:

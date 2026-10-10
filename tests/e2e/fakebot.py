@@ -379,6 +379,7 @@ class FileInfo:
     content: bytes
     file_name: str | None = None
     mime_type: str | None = None
+    duration: int = 3  # длительность голосового сообщения, секунд
 
     @property
     def file_path(self) -> str:
@@ -522,7 +523,7 @@ def media_payload(info: FileInfo) -> dict[str, Any]:
     if info.kind == "audio":
         return {"audio": Audio(duration=3, file_name=info.file_name, mime_type=info.mime_type, **common)}
     if info.kind == "voice":
-        return {"voice": Voice(duration=3, mime_type=info.mime_type, **common)}
+        return {"voice": Voice(duration=info.duration, mime_type=info.mime_type, **common)}
     if info.kind == "animation":
         return {
             "animation": Animation(
@@ -1394,6 +1395,14 @@ class Harness:
     ) -> RequestLog:
         info = self.api.register_file("video", content, file_name=file_name, mime_type="video/mp4")
         return await self._send_file(user_id, chat_id, info, caption, media_group_id)
+
+    async def send_voice(
+        self, user_id: int, content: bytes = b"OggS voice", *, duration: int = 3, chat_id: int | None = None
+    ) -> RequestLog:
+        """Пользователь присылает голосовое сообщение (OGG/Opus). Его можно скачать ``bot.download(file_id)``."""
+        info = self.api.register_file("voice", content, mime_type="audio/ogg")
+        info.duration = duration
+        return await self._send_file(user_id, chat_id, info, None, None)
 
     async def send_sticker(self, user_id: int, *, chat_id: int | None = None) -> RequestLog:
         """Нетекстовый ввод — проверить, что в текстовом шаге диалога бот подсказывает."""

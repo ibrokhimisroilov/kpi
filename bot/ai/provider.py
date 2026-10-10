@@ -72,7 +72,7 @@ __all__ = [
 
 logger = logging.getLogger(__name__)
 
-Purpose = Literal["formulate", "evaluate"]
+Purpose = Literal["formulate", "evaluate", "transcribe"]
 
 # Не больше двух одновременных запросов к одному провайдеру на каждое назначение — чтобы не упираться
 # в бесплатные лимиты, но и чтобы быстрая подсказка формулировки не ждала, пока закончатся чужие оценки.
@@ -156,6 +156,8 @@ def chain_budget_sec(settings: Settings | None = None, purpose: Purpose | None =
     budget = float(max(settings.ai_timeout_sec, 1) * 2)
     if purpose == "formulate" and settings.ai_formulate_budget_sec > 0:
         budget = min(budget, float(settings.ai_formulate_budget_sec))
+    if purpose == "transcribe" and settings.ai_transcribe_budget_sec > 0:
+        budget = min(budget, float(settings.ai_transcribe_budget_sec))
     return budget
 
 
@@ -170,9 +172,11 @@ def attempt_timeout_sec(
     """
     settings = settings or get_settings()
     limit = float(settings.ai_timeout_sec + 5)
-    own = {"formulate": settings.ai_formulate_timeout_sec, "evaluate": settings.ai_evaluate_timeout_sec}.get(
-        purpose or ""
-    )
+    own = {
+        "formulate": settings.ai_formulate_timeout_sec,
+        "evaluate": settings.ai_evaluate_timeout_sec,
+        "transcribe": settings.ai_transcribe_timeout_sec,
+    }.get(purpose or "")
     if own is not None and own > 0 and not (with_files and purpose == "evaluate"):
         limit = min(limit, float(own))
     return limit
@@ -227,9 +231,16 @@ async def generate_json(
         raise AIUnavailable("Не задан список моделей AI")
 
     has_images = _has_images(parts)
+    has_audio = _has_audio(parts)
     queue: deque[tuple[Provider, str]] = deque(
-        (provider, model) for provider in chain for model in _ordered_models(provider, has_images)
+        (provider, model)
+        for provider in chain
+        for model in _ordered_models(provider, has_images)
+        # Звук понимают не все: остальные модели и провайдеров для такого запроса не спрашиваем.
+        if not has_audio or _supports_audio(provider, model)
     )
+    if not queue:
+        raise AIUnavailable("Нет модели AI, которая принимает звук")
     budget = chain_budget_sec(settings, purpose)
     if time_budget is not None:
         budget = min(budget, time_budget)
@@ -424,6 +435,21 @@ def _ordered_models(provider: Provider, has_images: bool) -> list[str]:
 def _has_files(parts: list) -> bool:
     """В запросе есть файлы байтами (PDF, изображения), а не только текст."""
     return any(getattr(part, "inline_data", None) is not None for part in parts)
+
+
+def _has_audio(parts: list) -> bool:
+    """В запросе есть звук (голосовое сообщение, запись из приложения)."""
+    for part in parts:
+        blob = getattr(part, "inline_data", None)
+        if blob is not None and str(getattr(blob, "mime_type", "") or "").lower().startswith("audio/"):
+            return True
+    return False
+
+
+def _supports_audio(provider: Provider, model: str) -> bool:
+    """Модель провайдера принимает звук (у провайдера без метода supports_audio — нет)."""
+    check = getattr(provider, "supports_audio", None)
+    return bool(check(model)) if callable(check) else False
 
 
 def _has_images(parts: list) -> bool:

@@ -199,6 +199,31 @@ async def start_submit(
         await state.update_data(prompt_id=sent.message_id)
 
 
+async def start_with_fact(event: Message | CallbackQuery, state: FSMContext, bot: Bot, task: Task, fact: str) -> None:
+    """Начать сдачу результата с готовым ответом на «Что фактически сделано?» (сотрудник надиктовал его
+    голосовым сообщением вне диалога — bot.handlers.voice): диалог продолжается со второго вопроса."""
+    if isinstance(event, CallbackQuery):
+        chat_id = event.message.chat.id if event.message is not None else event.from_user.id
+    else:
+        chat_id = event.chat.id
+    await _reset(state, bot, chat_id)
+    data: dict[str, Any] = {
+        "task_id": task.id,
+        "plan_value": task.plan_value,
+        "plan_unit": task.plan_unit,
+        "files": [],
+        "notes": [],
+        "seq": 0,
+        "fact": fact.strip()[:MAX_TEXT],
+    }
+    await state.set_state(SubmitSG.result)
+    await state.set_data(data)
+    question, kb = _step_prompt(SubmitSG.result.state, data)
+    sent = await common.send_new(event, _fit(_intro_text(task), question), kb)
+    if sent is not None:
+        await state.update_data(prompt_id=sent.message_id)
+
+
 async def _abandoned_note(state: FSMContext, task_id: int) -> str | None:
     """Начатая сдача (ответы или файлы уже есть) сейчас сбросится новой — предупредить об этом."""
     current = await state.get_state()

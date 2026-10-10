@@ -959,6 +959,24 @@ def _kpi_help() -> list[str]:
     return lines
 
 
+def _voice_help(*, manager: bool) -> list[str]:
+    """Голосовой ввод (bot.voice, bot.handlers.voice) — для справки; без AI голос не распознаётся."""
+    settings = get_settings()
+    if not settings.voice_enabled or not settings.ai_enabled:
+        return []
+    lines = ["🎤 На вопросы бота можно отвечать голосовым сообщением — по-русски или по-узбекски."]
+    if manager:
+        lines.append(
+            "Задачу можно надиктовать целиком, например: <i>«Алиеву до пятницы проверить 100 договоров и сдать "
+            "отчёт»</i> — бот заполнит черновик и спросит только то, чего не хватает."
+        )
+    else:
+        lines.append(
+            "Голосовое вне диалога — это новое поручение или результат по задаче: бот спросит и продолжит сам."
+        )
+    return lines
+
+
 def _auto_help_manager() -> list[str]:
     """Как работает автоподтверждение (bot.services.auto) — для справки начальника."""
     settings = get_settings()
@@ -1002,6 +1020,7 @@ def _manager_help() -> list[str]:
         f"{texts.BTN_STAFF} — заявки на доступ, роли, блокировка.",
         f"{texts.BTN_EXPORT} — отчёт в Excel за неделю, месяц, квартал или год.",
         "",
+        *_voice_help(manager=True),
         *_auto_help_manager(),
     ]
 
@@ -1017,6 +1036,7 @@ def _employee_help() -> list[str]:
         "⏰ Бот напомнит о приближении срока, а после срока попросит сдать результат.",
         "Оценку ставит начальник; AI лишь помогает сравнить план и факт.",
         *_auto_help_employee(),
+        *_voice_help(manager=False),
     ]
 
 

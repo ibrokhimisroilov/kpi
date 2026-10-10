@@ -32,8 +32,9 @@ AI_KEY_ENV = {
 }
 
 # Для чего запрос к AI (bot.ai.provider.ai_purpose): «formulate» — подсказка измеримой формулировки
-# (короткий ответ, важна скорость), «evaluate» — предварительная оценка сдачи (важно качество суждения).
-AI_PURPOSES = ("formulate", "evaluate")
+# (короткий ответ, важна скорость), «evaluate» — предварительная оценка сдачи (важно качество суждения),
+# «transcribe» — распознавание речи из голосового сообщения (узбекский и русский; важна точность слов).
+AI_PURPOSES = ("formulate", "evaluate", "transcribe")
 # В каком порядке спрашивать модели Gemini для каждой задачи, если GEMINI_FORMULATE_MODELS /
 # GEMINI_EVALUATE_MODELS не заданы: модели из GEMINI_MODELS переставляются в этом порядке (моделей, которых
 # здесь нет, — после, в порядке GEMINI_MODELS; моделей не из GEMINI_MODELS бот не спрашивает).
@@ -59,6 +60,16 @@ GEMINI_PURPOSE_ORDER: dict[str, tuple[str, ...]] = {
         "gemini-3.5-flash-lite",
         "gemini-3.1-flash-lite",
         "gemma-4-31b-it",
+    ),
+    # Распознавание речи — сначала модели посильнее (точнее слышат узбекскую речь), облегчённые — запасом.
+    # Gemma звук не принимает: её провайдер для аудио не спрашивает (GeminiProvider.supports_audio).
+    "transcribe": (
+        "gemini-3.6-flash",
+        "gemini-3.5-flash",
+        "gemini-3.8-flash",
+        "gemini-3.7-flash",
+        "gemini-3.5-flash-lite",
+        "gemini-3.1-flash-lite",
     ),
 }
 
@@ -108,6 +119,7 @@ class Settings(BaseSettings):
     # GEMINI_MODELS в порядке GEMINI_PURPOSE_ORDER (для формулировки — сначала быстрые flash-lite).
     gemini_formulate_models: Annotated[list[str], NoDecode] = []
     gemini_evaluate_models: Annotated[list[str], NoDecode] = []
+    gemini_transcribe_models: Annotated[list[str], NoDecode] = []
     # Groq (console.groq.com): бесплатно, без карты; данные не используются для обучения.
     groq_api_key: str = Field(default="", repr=False)
     groq_models: Annotated[list[str], NoDecode] = ["openai/gpt-oss-120b", "qwen/qwen3.8-27b", "openai/gpt-oss-20b"]
@@ -150,6 +162,13 @@ class Settings(BaseSettings):
     # Оценка сдачи: одна модель — не дольше AI_EVALUATE_TIMEOUT_SEC (если приложены PDF или фото — до
     # AI_TIMEOUT_SEC + 5 с: чтение файлов дольше), весь перебор — 2 × AI_TIMEOUT_SEC.
     ai_evaluate_timeout_sec: int = 30
+    # Распознавание речи (голосовые сообщения, диктовка в приложении): одна модель — не дольше
+    # AI_TRANSCRIBE_TIMEOUT_SEC, весь перебор — AI_TRANSCRIBE_BUDGET_SEC; потом — «напишите текстом».
+    ai_transcribe_timeout_sec: int = 25
+    ai_transcribe_budget_sec: int = 45
+    # Голосовой ввод: принимать ли голосовые сообщения и диктовку; самая длинная запись, секунд.
+    voice_enabled: bool = True
+    voice_max_sec: int = 120
     # Передавать ли AI содержимое приложенных файлов (PDF, фото, Word, Excel, текст).
     ai_read_files: bool = True
     ai_max_file_mb: int = 10
@@ -217,6 +236,7 @@ class Settings(BaseSettings):
         "gemini_models",
         "gemini_formulate_models",
         "gemini_evaluate_models",
+        "gemini_transcribe_models",
         "groq_models",
         "cloudflare_models",
         "mistral_models",
@@ -260,9 +280,9 @@ class Settings(BaseSettings):
         return keys.get(name, "").strip()
 
     def ai_models_for(self, name: str, purpose: str | None = None) -> list[str]:
-        """Модели провайдера по порядку. purpose («formulate» / «evaluate», AI_PURPOSES) меняет порядок
-        моделей Gemini: GEMINI_FORMULATE_MODELS / GEMINI_EVALUATE_MODELS, если заданы, иначе GEMINI_MODELS
-        в порядке GEMINI_PURPOSE_ORDER. У остальных провайдеров порядок один для всех задач."""
+        """Модели провайдера по порядку. purpose (AI_PURPOSES) меняет порядок моделей Gemini:
+        GEMINI_FORMULATE_MODELS / GEMINI_EVALUATE_MODELS / GEMINI_TRANSCRIBE_MODELS, если заданы, иначе
+        GEMINI_MODELS в порядке GEMINI_PURPOSE_ORDER. У остальных провайдеров порядок один для всех задач."""
         models = {
             "gemini": self.gemini_models,
             "groq": self.groq_models,
@@ -273,7 +293,11 @@ class Settings(BaseSettings):
         result = [model.strip() for model in models if model.strip()]
         if name != "gemini" or purpose not in AI_PURPOSES:
             return result
-        explicit = self.gemini_formulate_models if purpose == "formulate" else self.gemini_evaluate_models
+        explicit = {
+            "formulate": self.gemini_formulate_models,
+            "evaluate": self.gemini_evaluate_models,
+            "transcribe": self.gemini_transcribe_models,
+        }[purpose]
         own = list(dict.fromkeys(model.strip() for model in explicit if model.strip()))
         return own or _by_preference(result, GEMINI_PURPOSE_ORDER[purpose])
 

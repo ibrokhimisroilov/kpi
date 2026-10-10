@@ -1205,3 +1205,57 @@ def tick_schedule_summary(interval_sec: float | None = None) -> str   # расп
 **Настройки** (`bot/config.py`): `AUTO_CONFIRM_HOURS` (24; 0 — выключено), `AUTO_CONFIRM_MAX_SCORE` (100),
 `AUTO_CONFIRM_REMIND_HOURS` (3), `AUTO_REVISE_DAYS` (7), `AUTO_PROPOSAL_WEIGHT` (10).
 **Тесты:** `tests/test_auto.py`, `tests/test_admin.py`.
+
+## 13. Голосовой ввод
+
+Речь — на узбекском или русском (и вперемешку). Распознаёт бесплатный Gemini: модели, принимающие звук
+(`GeminiProvider.supports_audio` — все, кроме Gemma); запасные провайдеры звук не получают
+(`provider._supports_audio`). Назначение запроса — `transcribe` (`AI_PURPOSES`): порядок моделей
+`GEMINI_PURPOSE_ORDER["transcribe"]` (сначала модели посильнее) или `GEMINI_TRANSCRIBE_MODELS`; одна модель —
+не дольше `AI_TRANSCRIBE_TIMEOUT_SEC` (25), весь перебор — `AI_TRANSCRIBE_BUDGET_SEC` (45). Звук уходит в
+запрос как есть: голосовые Telegram (OGG/Opus), записи браузера (WebM/Opus, MP4/AAC → `audio/m4a`) —
+`dictate.audio_mime`. Узбекская речь записывается латиницей, русская — кириллицей; перевода нет.
+
+### 13.1 `bot/ai/dictate.py`
+
+```python
+class VoiceError(Exception):   # reason: off | format | too_long | empty | unavailable; message — текст пользователю
+@dataclass(frozen=True)
+class Dictation: transcript; assignee_id; title; expected_result; plan_value; plan_unit; deadline; source  # None — не названо
+
+async def transcribe(audio: bytes, mime_type, *, time_budget=None) -> str      # дословный текст; VoiceError
+async def dictate_task(*, audio=None, mime_type=None, text=None, employees=(), author="manager", now=None) -> Dictation
+def rules_dictation(text) -> Dictation       # без AI: название — первое предложение, результат и план — по правилам
+def voice_hint_enabled() -> bool             # VOICE_ENABLED и AI включён
+```
+
+`dictate_task` — один запрос к AI: дословный текст + поля задачи. Исполнитель — только id из переданного
+списка сотрудников (иначе None); срок — `YYYY-MM-DDTHH:MM` местного времени («завтра», «juma kuni» считает
+модель от «сейчас» из запроса), прошедший или дальше 5 лет — None; план — число > 0. Текст вместо звука
+(`text=`) при недоступном AI разбирается по правилам. Звук без AI — `VoiceError("off")`.
+
+### 13.2 Чат
+
+* **Ответ голосом на вопрос диалога** — `bot/voice.py::VoiceMiddleware` (`dp.message.outer_middleware`): голосовое
+  активного пользователя в состояниях групп `VOICE_GROUPS` (CreateTaskSG, ProposeTaskSG, DecideProposalSG,
+  SubmitSG, ReviewSG, EditTaskSG, CancelTaskSG) распознаётся и уходит хендлерам как текстовое сообщение
+  (`message.model_copy(update={"text": …, "voice": None})`). Пользователь видит «🎤 Распознаю речь…» →
+  «🎤 <i>текст</i>» и следующий шаг. Ошибка — текст `VoiceError.message`, шаг диалога не меняется. Не
+  распознаются: регистрация (ФИО — только текстом), `SubmitSG:sending`, неактивные пользователи, записи длиннее
+  `VOICE_MAX_SEC` (120 с; такие даже не скачиваются).
+* **Задача одним сообщением** — `bot/handlers/voice.py` (роутер подключён перед диалогами). Голосовое вне
+  диалога и на первом шаге (`CreateTaskSG:assignee`, `ProposeTaskSG:title` — `voice.ONE_SHOT_STATES`):
+  * начальник → `dictate_task(employees=активные сотрудники)` → `task_create.start_dictated`: черновик с пометкой
+    `dictated`, сообщение «🎤 Понял так: …», затем мастер спрашивает только недостающее (`_missing_step`:
+    сотрудник → название → результат → срок → приоритет → вес) и показывает сводку. Вес и приоритет всегда
+    выбираются кнопками;
+  * сотрудник → `dictate_task(author="employee")` → вопрос «Что это?» [➕ Новое поручение] [✅ Результат по
+    задаче] (`VoiceSG.choose`). Поручение → `task_propose.start_dictated` (спрашивает недостающее → сводка).
+    Результат → задача в работе (одна — сразу, несколько — выбор, `VoiceSG.task`) →
+    `task_submit.start_with_fact`: распознанный текст — ответ «Что фактически сделано?», диалог идёт со второго
+    вопроса. Задач в работе нет или голосовое пришло на первом шаге «Добавить поручение» — сразу поручение.
+* Подсказки: первый шаг «Поставить задачу» и «Добавить поручение», `/help` — только если голос включён и AI
+  доступен (`voice_hint_enabled`).
+
+**Настройки:** `VOICE_ENABLED` (true), `VOICE_MAX_SEC` (120), `AI_TRANSCRIBE_TIMEOUT_SEC`, `AI_TRANSCRIBE_BUDGET_SEC`,
+`GEMINI_TRANSCRIBE_MODELS`. **Тесты:** `tests/test_dictate.py`, `tests/e2e/test_voice.py` (`BotHarness.send_voice`).
