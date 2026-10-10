@@ -92,12 +92,13 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
-from sqlalchemy import event, text
+from sqlalchemy import event, inspect, text
 from sqlalchemy import exc as sa_exc
 from sqlalchemy.engine import URL, make_url
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase
 from sqlalchemy.pool import QueuePool, StaticPool
+from sqlalchemy.schema import CreateColumn
 
 try:  # SQLAlchemy 2.1
     from sqlalchemy.util.concurrency import await_, in_greenlet
@@ -644,7 +645,7 @@ async def warm_up(*engines: AsyncEngine | None) -> None:
 
 
 async def init_db(engine: AsyncEngine) -> None:
-    """Создать недостающие таблицы (существующие и данные не трогаются)."""
+    """Создать недостающие таблицы и добавить в существующие новые колонки моделей (данные не трогаются)."""
     from bot.db import models  # noqa: F401 - регистрирует таблицы в metadata
 
     async with engine.begin() as conn:
@@ -653,8 +654,36 @@ async def init_db(engine: AsyncEngine) -> None:
             # второй дождётся, пока первый создаст таблицы, и увидит их готовыми.
             await conn.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": _INIT_LOCK_KEY})
         await conn.run_sync(Base.metadata.create_all)
+        await conn.run_sync(_add_missing_columns)
         if conn.dialect.name == "postgresql":
             await _enable_row_level_security(conn)
+
+
+def _add_missing_columns(conn: Any) -> None:
+    """Добавить в существующие таблицы колонки, которые появились в моделях (``create_all`` создаёт
+    только недостающие таблицы целиком).
+
+    Так добавляются лишь колонки, которые можно дописать в таблицу с данными: допускающие NULL или
+    со значением по умолчанию на стороне базы (``server_default``). Прочие — ошибка запуска: такой
+    колонке нужна отдельная миграция. На PostgreSQL — ``ADD COLUMN IF NOT EXISTS`` (и вызывающий код
+    держит advisory-блокировку): два экземпляра бота, стартующие одновременно, не столкнутся.
+    """
+    inspector = inspect(conn)
+    preparer = conn.dialect.identifier_preparer
+    guard = "IF NOT EXISTS " if conn.dialect.name == "postgresql" else ""
+    for table in Base.metadata.sorted_tables:
+        existing = {column["name"] for column in inspector.get_columns(table.name)}
+        for column in table.columns:
+            if column.name in existing:
+                continue
+            if not column.nullable and column.server_default is None:
+                raise RuntimeError(
+                    f"Колонку {table.name}.{column.name} нельзя добавить в существующую таблицу автоматически: "
+                    "она обязательная и без server_default"
+                )
+            definition = CreateColumn(column).compile(dialect=conn.dialect)
+            conn.execute(text(f"ALTER TABLE {preparer.format_table(table)} ADD COLUMN {guard}{definition}"))
+            log.info("База: в таблицу %s добавлена колонка %s", table.name, column.name)
 
 
 async def _enable_row_level_security(conn: Any) -> None:

@@ -2,7 +2,7 @@
 
 * ``app`` — ``BotHarness``: БД из фикстуры ``engine`` (tests/conftest.py: in-memory SQLite, а с
   TEST_DATABASE_URL — очищенный PostgreSQL), ``bot.main.build_dispatcher(sessionmaker)``,
-  ``Bot("42:TEST", session=FakeSession(), parse_mode=HTML)``. Руководитель по ADMIN_IDS — 1001
+  ``Bot("42:TEST", session=FakeSession(), parse_mode=HTML)``. Начальник по ADMIN_IDS — 1001
   (``fakebot.MANAGER_TG_ID``). AI выключен (AI_PROVIDER=none) — всё работает на правилах.
 * ``db`` — фабрика сессий БД бота: ``async with db() as s: ...``.
 

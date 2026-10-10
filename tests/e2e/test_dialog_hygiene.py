@@ -26,7 +26,7 @@ from .fakebot import MANAGER_TG_ID, BotHarness
 
 pytestmark = pytest.mark.asyncio
 
-MGR = MANAGER_TG_ID  # Петрова — руководитель
+MGR = MANAGER_TG_ID  # Петрова — начальник
 EMP = 2001           # Иванов — сотрудник
 
 
@@ -153,7 +153,7 @@ async def test_cancel_in_submission_says_result_not_sent(app):
 
 
 async def test_employee_promoted_mid_draft_cannot_finish_proposal(app):
-    """Иванов вносит устное поручение, и в этот момент его роль меняют на «руководитель» в обход
+    """Иванов вносит устное поручение, и в этот момент его роль меняют на «начальник» в обход
     «👥 Сотрудники» (там диалог сбросился бы сам). Следующий его ответ не принимается как шаг
     черновика: бот пишет, что вносить поручения могут только сотрудники, черновик закрыт,
     задача не создана."""
@@ -172,7 +172,7 @@ async def test_employee_promoted_mid_draft_cannot_finish_proposal(app):
 
 
 async def test_menu_button_still_works_after_promotion_mid_draft(app):
-    """Тот же случай, но вместо ответа Иванов (уже руководитель) жмёт кнопку меню «📋 Задачи»:
+    """Тот же случай, но вместо ответа Иванов (уже начальник) жмёт кнопку меню «📋 Задачи»:
     кнопка меню не перехватывается — открывается список задач, черновик сброшен."""
     h = app
     await office(h)
@@ -219,7 +219,7 @@ async def test_blocked_user_pressing_old_button_learns_access_is_closed(app):
     assert (await h.get_task(task_id)).accepted_at is None
 
     log = await h.press(EMP, "k:skip:skip")  # кнопка «Пропустить» из давно закрытого диалога
-    assert log.alert == "⛔ Доступ закрыт. Обратитесь к руководителю."
+    assert log.alert == "⛔ Доступ закрыт. Обратитесь к начальнику."
     assert log.answers[0].show_alert
 
 

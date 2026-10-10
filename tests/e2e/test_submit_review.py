@@ -1,4 +1,4 @@
-"""Сценарии «сдача результата → AI-оценка → проверка руководителем» (ТЗ, шаги 4–6; SPEC 7.6, 7.7).
+"""Сценарии «сдача результата → AI-оценка → проверка начальником» (ТЗ, шаги 4–6; SPEC 7.6, 7.7).
 
 Бот целиком (bot.main.build_dispatcher) на фейковом Telegram API (tests/e2e/fakebot.py), БД в памяти.
 AI по умолчанию выключен (оценка по правилам); фикстура ``gemini`` «включает» AI и подменяет
@@ -49,8 +49,8 @@ from .fakebot import MANAGER_TG_ID, BotHarness, RequestLog
 
 pytestmark = pytest.mark.asyncio
 
-MGR = MANAGER_TG_ID   # Петрова — руководитель, поставила задачу
-MGR2 = 1002           # Сидоров — второй руководитель
+MGR = MANAGER_TG_ID   # Петрова — начальник, поставила задачу
+MGR2 = 1002           # Сидоров — второй начальник
 EMP = 2001            # Иванов — исполнитель
 EMP2 = 2002           # Кузнецова — другой сотрудник
 
@@ -139,7 +139,7 @@ def analysis_xlsx() -> bytes:
 
 
 async def _team(h: BotHarness) -> tuple[User, User]:
-    """Руководитель Петрова и сотрудник Иванов открыли бота (/start -> главное меню)."""
+    """Начальник Петрова и сотрудник Иванов открыли бота (/start -> главное меню)."""
     mgr = await h.seed_user(MGR, "Петрова Анна Сергеевна", role="manager")
     emp = await h.seed_user(EMP, "Иванов Иван Иванович", position="Юрист")
     await h.send_command(MGR, "start")
@@ -221,7 +221,7 @@ async def _events(h: BotHarness, task_id: int) -> list[TaskEvent]:
 
 
 async def _cancel_in_db(h: BotHarness, task_id: int, mgr: User) -> None:
-    """Руководитель отменил задачу (то же, что «🚫 Отменить» в карточке)."""
+    """Начальник отменил задачу (то же, что «🚫 Отменить» в карточке)."""
     async with h.db() as s:
         manager = await s.get(User, mgr.id)
         await tasks_svc.cancel_task(s, task_id, manager, "Договоры передали в другой отдел")
@@ -238,7 +238,7 @@ async def _submitted_in_db(h: BotHarness, emp: User, task_id: int, ai_score: flo
         return sub.id
 
 
-# --- ТЗ: план 100 → факт 110, AI предлагает 110 %, руководитель подтверждает ------------------------
+# --- ТЗ: план 100 → факт 110, AI предлагает 110 %, начальник подтверждает ------------------------
 
 
 async def test_tz_example_ai_suggests_110_and_manager_confirms(app: BotHarness, gemini: FakeGemini) -> None:
@@ -299,12 +299,12 @@ async def test_tz_example_ai_suggests_110_and_manager_confirms(app: BotHarness, 
 
     # Сотрудник: «отправлено на проверку», без оценки AI.
     employee_view = log.to(EMP).text
-    assert "Результат отправлен руководителю на проверку" in employee_view
+    assert "Результат отправлен начальнику на проверку" in employee_view
     assert "Файлов: 4" in employee_view
     for leak in ("110 %", "AI", "🤖", "перевыполнение"):
         assert leak not in employee_view
 
-    # Руководитель: план ↔ факт, «AI предлагает: 110 %», обоснование, кнопки решения и сами файлы.
+    # Начальник: план ↔ факт, «AI предлагает: 110 %», обоснование, кнопки решения и сами файлы.
     to_mgr = log.to(MGR)
     review = h.find_message(MGR, f"Результат по задаче #{task_id}")
     assert "🤖 AI предлагает: 110 %" in review.content
@@ -333,7 +333,7 @@ async def test_tz_example_ai_suggests_110_and_manager_confirms(app: BotHarness, 
     assert "Итоговая оценка: 110 %" in notice
     assert "подтвердил предварительную оценку" in notice
     for leak in ("AI", "🤖", "перевыполнение"):
-        assert leak not in notice  # сотруднику — итог руководителя, без «кухни» AI
+        assert leak not in notice  # сотруднику — итог начальника, без «кухни» AI
 
     # Через неделю Петрова снова открывает подтверждения из этого же сообщения.
     log = await h.press_button(MGR, "Файлы (4)", review.message_id)
@@ -351,7 +351,7 @@ async def test_tz_example_ai_suggests_110_and_manager_confirms(app: BotHarness, 
 
 async def test_without_ai_rules_compare_plan_and_fact(app: BotHarness) -> None:
     """AI выключен (нет ключа Gemini): бот всё равно сравнивает план и факт по правилам —
-    руководитель видит «Расчёт по правилам (AI недоступен): 110 %» и может подтвердить.
+    начальник видит «Расчёт по правилам (AI недоступен): 110 %» и может подтвердить.
     """
     h = app
     mgr, emp = await _team(h)
@@ -381,7 +381,7 @@ async def test_ai_failure_falls_back_to_rules(
     app: BotHarness, gemini: FakeGemini, monkeypatch: pytest.MonkeyPatch, failure: str
 ) -> None:
     """Gemini включён, но исчерпан бесплатный лимит или зависла модель: сдача всё равно доходит
-    до руководителя с оценкой по правилам, сотрудник видит «отправлено», ничего не «ломается».
+    до начальника с оценкой по правилам, сотрудник видит «отправлено», ничего не «ломается».
     """
     h = app
     mgr, emp = await _team(h)
@@ -395,7 +395,7 @@ async def test_ai_failure_falls_back_to_rules(
     log = await _submit(h)
 
     assert len(gemini.calls) == 1
-    assert "Результат отправлен руководителю на проверку" in log.to(EMP).text
+    assert "Результат отправлен начальнику на проверку" in log.to(EMP).text
     assert "Расчёт по правилам (AI недоступен): 110 %" in log.to(MGR).text
     sub = await _sub(h, task_id)
     assert (sub.ai_score, sub.ai_source) == (110, "rules")
@@ -406,7 +406,7 @@ async def test_database_error_saving_ai_score_falls_back_to_rules(
 ) -> None:
     """AI ответил, но запись его оценки упала с ошибкой базы внутри транзакции хендлера (на PostgreSQL
     после такой ошибки транзакция «сломана» до ROLLBACK). Бот откатывает её, считает по правилам
-    и всё равно отправляет результат руководителю — сдача не теряется."""
+    и всё равно отправляет результат начальнику — сдача не теряется."""
     h = app
     mgr, emp = await _team(h)
     task_id = await _task(h, mgr, emp)
@@ -425,14 +425,14 @@ async def test_database_error_saving_ai_score_falls_back_to_rules(
     log = await _submit(h)
 
     assert failed == ["ai"] and len(gemini.calls) == 1
-    assert "Результат отправлен руководителю на проверку" in log.to(EMP).text
+    assert "Результат отправлен начальнику на проверку" in log.to(EMP).text
     assert "Расчёт по правилам" in log.to(MGR).text and "✅ Подтвердить 110 %" in h.buttons(MGR)
     sub = await _sub(h, task_id)
     assert (sub.ai_score, sub.ai_source) == (110, "rules")
     assert (await h.get_task(task_id)).status == TaskStatus.SUBMITTED
 
 
-# --- Руководитель меняет оценку ---------------------------------------------------------------------
+# --- Начальник меняет оценку ---------------------------------------------------------------------
 
 
 async def test_manager_changes_score_to_100_with_comment(app: BotHarness, gemini: FakeGemini) -> None:
@@ -470,7 +470,7 @@ async def test_manager_changes_score_to_100_with_comment(app: BotHarness, gemini
     assert "Оценка изменена: 100 %" in closed.content and closed.buttons == []
     notice = log.to(EMP).text
     assert "Итоговая оценка: 100 %" in notice
-    assert "Оценку выставил руководитель" in notice
+    assert "Оценку выставил начальник" in notice
     assert comment in notice
     assert await h.get_state(MGR) is None
     # В чате не осталось «живых» кнопок пройденных шагов (оценки, «Пропустить», решения).
@@ -492,7 +492,7 @@ async def test_manager_changes_score_to_100_with_comment(app: BotHarness, gemini
 )
 async def test_manager_types_score_and_skips_comment(app: BotHarness, typed: str, shown: str, stored: int) -> None:
     """Оценку можно написать текстом («95 %»), комментарий — пропустить. Дробную оценку бот
-    округляет до целого: сохраняется ровно то, что руководитель и сотрудник видят на экране.
+    округляет до целого: сохраняется ровно то, что начальник и сотрудник видят на экране.
     """
     h = app
     mgr, emp = await _team(h)
@@ -567,7 +567,7 @@ async def test_rework_with_comment_and_new_deadline_then_second_attempt(
     await h.press_button(EMP, "Готово")
     log = await h.press_button(EMP, "Отправить")
 
-    assert f"Что руководитель просил доработать в прошлый раз: «{comment}»" in gemini.prompt
+    assert f"Что начальник просил доработать в прошлый раз: «{comment}»" in gemini.prompt
     assert "попытка 2" in log.to(MGR).text
     assert [f.file_name for f in log.to(MGR).documents] == ["Акты.pdf"]  # только файлы новой попытки
 
@@ -608,7 +608,7 @@ async def test_rework_deadline_in_past_is_rejected_and_keep_current(app: BotHarn
 
 async def test_late_submission_gets_late_days_and_rules_penalty(app: BotHarness) -> None:
     """Срок истёк 2,5 дня назад. Иванов выполнил план (100 из 100), но с опозданием:
-    в сводке — предупреждение, у руководителя — «с опозданием 2,5 дн.» и оценка по правилам
+    в сводке — предупреждение, у начальника — «с опозданием 2,5 дн.» и оценка по правилам
     100 − 2,5 × 2 = 95 % (как во втором примере ТЗ).
     """
     h = app
@@ -653,7 +653,7 @@ async def test_second_manager_gets_already_processed_alert(app: BotHarness) -> N
     await h.send_command(MGR2, "start")
     task_id = await _task(h, mgr, emp)
     log = await _submit(h)
-    assert MGR2 not in log.chats  # результат ушёл только ответственному руководителю
+    assert MGR2 not in log.chats  # результат ушёл только ответственному начальнику
 
     await h.press_menu(MGR2, BTN_REVIEW)
     assert "На проверке" in h.last_text(MGR2) and "Иванов И. И." in h.last_text(MGR2)
@@ -727,7 +727,7 @@ async def test_employee_cannot_review_and_stranger_cannot_submit(app: BotHarness
 
 
 async def test_files_button_resends_attachments(app: BotHarness) -> None:
-    """«📎 Файлы (4)» присылает руководителю все подтверждения ещё раз: Analysis.xlsx и альбом фото."""
+    """«📎 Файлы (4)» присылает начальнику все подтверждения ещё раз: Analysis.xlsx и альбом фото."""
     h = app
     mgr, emp = await _team(h)
     task_id = await _task(h, mgr, emp)
@@ -762,7 +762,7 @@ async def test_files_button_without_attachments(app: BotHarness) -> None:
 
 
 async def test_employee_never_sees_ai_score_before_decision(app: BotHarness, gemini: FakeGemini) -> None:
-    """Пока руководитель не решил, Иванов нигде не видит предложение AI: ни после отправки,
+    """Пока начальник не решил, Иванов нигде не видит предложение AI: ни после отправки,
     ни в карточке задачи, ни в её истории. Повторно сдать нельзя — результат уже на проверке.
     После решения — видит итоговую оценку.
     """
@@ -799,7 +799,7 @@ async def test_employee_never_sees_ai_score_before_decision(app: BotHarness, gem
 
 async def test_submit_button_on_cancelled_task(app: BotHarness) -> None:
     """Иванов открыл «✅ Сдать результат» (две задачи), а Петрова тем временем отменила одну.
-    Кнопка отменённой задачи объясняет «Задача отменена руководителем — сдавать результат не нужно»,
+    Кнопка отменённой задачи объясняет «Задача отменена начальником — сдавать результат не нужно»,
     диалог не начинается, а список обновляется — в нём остаётся только задача, которую ещё можно сдать.
     """
     h = app
@@ -812,7 +812,7 @@ async def test_submit_button_on_cancelled_task(app: BotHarness) -> None:
 
     log = await h.press_button(EMP, TITLE)
 
-    assert log.alert == "🚫 Задача отменена руководителем — сдавать результат не нужно."
+    assert log.alert == "🚫 Задача отменена начальником — сдавать результат не нужно."
     assert await h.get_state(EMP) is None
     assert not h.has_button(EMP, TITLE)
     assert h.has_button(EMP, "Отчёт по закупкам")
@@ -822,7 +822,7 @@ async def test_submit_button_on_cancelled_task(app: BotHarness) -> None:
     other_id = task_id + 1
     await _cancel_in_db(h, other_id, mgr)
     log = await h.press_button(EMP, "Отчёт по закупкам")
-    assert log.alert == "🚫 Задача отменена руководителем — сдавать результат не нужно."
+    assert log.alert == "🚫 Задача отменена начальником — сдавать результат не нужно."
     assert "Нет задач для сдачи" in h.last_text(EMP)
     assert h.buttons(EMP) == []
 
@@ -955,11 +955,11 @@ async def test_cancel_submission_dialog(app: BotHarness) -> None:
     assert await h.get_state(EMP) is None
     assert (await h.get_task(task_id)).status == TaskStatus.ACTIVE
     assert await h.scalar(select(Submission).where(Submission.task_id == task_id)) is None
-    assert not h.sent_to(MGR)[2:]  # руководителю ничего не пришло (после приветствия)
+    assert not h.sent_to(MGR)[2:]  # начальнику ничего не пришло (после приветствия)
 
 
 async def test_double_press_send_creates_one_submission(app: BotHarness) -> None:
-    """Иванов нажал «📤 Отправить» дважды: сдача одна, руководитель получил одно уведомление."""
+    """Иванов нажал «📤 Отправить» дважды: сдача одна, начальник получил одно уведомление."""
     h = app
     mgr, emp = await _team(h)
     task_id = await _task(h, mgr, emp)
@@ -1037,8 +1037,8 @@ async def test_overdue_task_rework_needs_new_deadline_and_resubmission_is_on_tim
 
 async def test_huge_submission_fits_telegram_limits(app: BotHarness) -> None:
     """Иванов пишет очень длинные ответы с символами «<», «&», прикладывает 20 файлов разных типов
-    (21-й бот не берёт) и длинное описание материалов. Сводка, уведомление руководителю, подписи файлов,
-    повторная отправка файлов и длинный комментарий руководителя укладываются в лимиты Telegram
+    (21-й бот не берёт) и длинное описание материалов. Сводка, уведомление начальнику, подписи файлов,
+    повторная отправка файлов и длинный комментарий начальника укладываются в лимиты Telegram
     (это проверяет harness), ничего не теряется.
     """
     h = app
@@ -1088,15 +1088,15 @@ async def test_huge_submission_fits_telegram_limits(app: BotHarness) -> None:
 
 
 async def test_blocked_chats_do_not_break_submission_or_review(app: BotHarness) -> None:
-    """Руководитель временно заблокировал бота — сдача Иванова всё равно сохраняется и ждёт в очереди.
-    Потом Иванов заблокировал бота — решение руководителя всё равно сохраняется."""
+    """Начальник временно заблокировал бота — сдача Иванова всё равно сохраняется и ждёт в очереди.
+    Потом Иванов заблокировал бота — решение начальника всё равно сохраняется."""
     h = app
     mgr, emp = await _team(h)
     task_id = await _task(h, mgr, emp)
 
     h.api.blocked_chats.add(MGR)
     log = await _submit(h)
-    assert "Результат отправлен руководителю на проверку" in log.to(EMP).text
+    assert "Результат отправлен начальнику на проверку" in log.to(EMP).text
     assert (await h.get_task(task_id)).status == TaskStatus.SUBMITTED
 
     h.api.blocked_chats.discard(MGR)
@@ -1126,7 +1126,7 @@ async def test_manager_decides_from_queue_while_ai_is_thinking(app: BotHarness, 
     async def manager_reviews() -> None:
         await h.press_menu(MGR, BTN_REVIEW)
         await h.press_button(MGR, f"#{task_id}")
-        # Пока AI думает, руководителю обещано, что оценка придёт отдельным сообщением.
+        # Пока AI думает, начальнику обещано, что оценка придёт отдельным сообщением.
         assert "Предварительная оценка ещё не рассчитана — пришлю её отдельным сообщением" in h.last_text(MGR)
         await h.press_button(MGR, "Изменить оценку")
         await h.send_text(MGR, "90")
@@ -1137,7 +1137,7 @@ async def test_manager_decides_from_queue_while_ai_is_thinking(app: BotHarness, 
 
     assert not any("Подтвердить" in text for m in h.messages(MGR) for text in m.button_texts)
     assert sum("AI предлагает" in text for text in h.sent_to(MGR)) == 0
-    assert "Руководитель уже принял решение" in log.to(EMP).text
+    assert "Начальник уже принял решение" in log.to(EMP).text
     assert "Итоговая оценка: 90 %" in "\n".join(h.sent_to(EMP))
     task = await h.get_task(task_id)
     sub = await _sub(h, task_id)
@@ -1147,7 +1147,7 @@ async def test_manager_decides_from_queue_while_ai_is_thinking(app: BotHarness, 
 
 async def test_task_cancelled_while_ai_is_thinking(app: BotHarness, gemini: FakeGemini) -> None:
     """Пока AI оценивал сдачу, Петрова отменила задачу. Результат сохранён, но проверять его
-    некому и незачем: руководителю кнопки проверки не приходят, Иванов видит, что задачу отменили.
+    некому и незачем: начальнику кнопки проверки не приходят, Иванов видит, что задачу отменили.
     """
     h = app
     mgr, emp = await _team(h)
@@ -1157,8 +1157,8 @@ async def test_task_cancelled_while_ai_is_thinking(app: BotHarness, gemini: Fake
     log = await _submit(h)
 
     assert MGR not in log.chats
-    assert "руководитель тем временем отменил задачу" in log.to(EMP).text
-    assert "отправлен руководителю на проверку" not in h.last_text(EMP)
+    assert "начальник тем временем отменил задачу" in log.to(EMP).text
+    assert "отправлен начальнику на проверку" not in h.last_text(EMP)
     task = await h.get_task(task_id)
     assert task.status == TaskStatus.CANCELLED
     assert (await _sub(h, task_id)).ai_score == 110
@@ -1169,7 +1169,7 @@ async def test_task_cancelled_while_ai_is_thinking(app: BotHarness, gemini: Fake
 
 async def test_task_without_plan_number_has_three_steps_and_rules_give_100(app: BotHarness) -> None:
     """У задачи нет планового числа («Подготовить отчёт по закупкам»): вопроса про фактическое значение
-    нет (3 шага), правила берут за основу полное выполнение — 100 %, качество оценивает руководитель.
+    нет (3 шага), правила берут за основу полное выполнение — 100 %, качество оценивает начальник.
     """
     h = app
     mgr, emp = await _team(h)
@@ -1238,7 +1238,7 @@ async def test_review_queue_pages_and_shrinks_after_decisions(app: BotHarness) -
 
 
 async def test_bulk_confirm_by_submission_from_task_list(app: BotHarness) -> None:
-    """Руководитель (или служебный скрипт) подтверждает результаты пачкой: берёт последнюю сдачу
+    """Начальник (или служебный скрипт) подтверждает результаты пачкой: берёт последнюю сдачу
     из задачи и подтверждает её в той же сессии БД. Сервис должен сам загрузить задачу сдачи,
     а не падать с MissingGreenlet, если объект задачи уже не держится в памяти.
     """
@@ -1317,10 +1317,10 @@ async def test_manager_gets_evidence_files_from_card_of_done_task(app: BotHarnes
 
 async def test_submission_reaches_manager_after_bot_stopped_mid_evaluation(app: BotHarness, gemini: FakeGemini) -> None:
     """Бота остановили, пока AI оценивал сдачу (обновление на Render прерывает незаконченное, сбой,
-    нехватка памяти): сдача сохранена, но без оценки, руководитель о ней не знает, у сотрудника висит
+    нехватка памяти): сдача сохранена, но без оценки, начальник о ней не знает, у сотрудника висит
     «⏳ Анализирую…». Задания по расписанию (фоновый цикл — каждые 5 мин) через бюджет AI + 5 мин
-    находят такую сдачу: оценка по правилам, руководителю — сдача с кнопками проверки, сотруднику —
-    «передан руководителю». Раньше времени (оценка ещё может идти) и повторно — ничего."""
+    находят такую сдачу: оценка по правилам, начальнику — сдача с кнопками проверки, сотруднику —
+    «передан начальнику». Раньше времени (оценка ещё может идти) и повторно — ничего."""
     h = app
     mgr, emp = await _team(h)
     task_id = await _task(h, mgr, emp)
@@ -1348,7 +1348,7 @@ async def test_submission_reaches_manager_after_bot_stopped_mid_evaluation(app: 
     assert not h.has_button(MGR, "Подтвердить")
     assert await jobs.recover_stalled_evaluations(h.bot, h.sessionmaker, now=created + timedelta(minutes=10)) == 1
     assert "Расчёт по правилам" in h.last_text(MGR) and h.has_button(MGR, "Подтвердить 110 %")
-    assert "передан руководителю на проверку" in h.last_text(EMP)
+    assert "передан начальнику на проверку" in h.last_text(EMP)
     assert await jobs.recover_stalled_evaluations(h.bot, h.sessionmaker, now=created + timedelta(minutes=15)) == 0
     sub = await _sub(h, task_id)
     assert (sub.ai_score, sub.ai_source) == (110, "rules")

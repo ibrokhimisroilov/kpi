@@ -66,7 +66,9 @@ EVENT_NAMES = {
     EventType.REWORK: "Возвращена на доработку",
     EventType.CANCELLED: "Задача отменена",
     EventType.REMINDER: "Отправлено напоминание",
+    EventType.WEIGHT_SUGGESTED: "Предложен вес поручения",
 }
+AUTO_DECISION_NAME = "Оценка AI подтверждена автоматически"  # начальник не ответил вовремя (bot.services.auto)
 # Подписи ключей TaskEvent.data для колонки «Детали».
 _DATA_LABELS = {
     "title": "Название",
@@ -93,11 +95,15 @@ _DATA_LABELS = {
     "late_days": "Просрочка, дн.",
     "is_late": "С опозданием",
     "kind": "Напоминание",
+    "auto": "Автоматически",
+    "previous": "Прежняя оценка",
+    "after_auto": "После автоподтверждения",
+    "note": "Пояснение",
 }
 # Служебные ключи (id записей) в отчёт не выводятся.
 _HIDDEN_KEYS = frozenset({"submission_id", "assignee_id", "task_id"})
-_PERCENT_KEYS = frozenset({"score", "ai_score", "final_score", "weight"})
-_SOURCE_NAMES = {"ai": "AI", "rules": "правила", "manager": "руководитель", "employee": "сотрудник"}
+_PERCENT_KEYS = frozenset({"score", "ai_score", "final_score", "weight", "previous"})
+_SOURCE_NAMES = {"ai": "AI", "rules": "правила", "manager": "начальник", "employee": "сотрудник"}
 _DETAILS_LIMIT = 500
 
 _HEADER_FONT = Font(bold=True)
@@ -197,7 +203,7 @@ async def _events(session: AsyncSession, task_ids: list[int]) -> list[TaskEvent]
 def _former_members(
     team: list[tuple[User, KpiResult]], tasks: Sequence[Task], now: datetime
 ) -> list[tuple[User, KpiResult]]:
-    """Исполнители задач периода, которых нет среди активных сотрудников (заблокирован, стал руководителем).
+    """Исполнители задач периода, которых нет среди активных сотрудников (заблокирован, стал начальником).
 
     Их задачи есть на листе «Задачи», поэтому они нужны и в «Сводке» — иначе «Итого по команде»
     не сходится с таблицей задач. Дашборд бота показывает только действующих сотрудников.
@@ -222,7 +228,7 @@ def _position(user: User) -> str | None:
     elif user.status != UserStatus.ACTIVE:
         note = "не подтверждён"
     elif user.role == Role.MANAGER:
-        note = "сейчас руководитель"
+        note = "сейчас начальник"
     else:
         return user.position
     return f"{user.position} ({note})" if user.position else f"({note})"
@@ -296,7 +302,7 @@ def _task_row(task: Task, now: datetime) -> list[Any]:
         _status_name(task, now),
         task.ai_score,
         task.final_score,
-        DECISION_NAMES.get(last.decision) if last and last.decision else None,
+        _decision_name(last),
         last.review_comment if last else None,
     ]
 
@@ -368,6 +374,15 @@ def _change_line(field: str, change: Any) -> str:
     return f"{label}: {_data_value(field, change)}"
 
 
+def _decision_name(sub: Submission | None) -> str | None:
+    """Решение по последней сдаче для отчёта (None — решения ещё нет)."""
+    if sub is None or not sub.decision:
+        return None
+    if sub.auto_confirmed:
+        return AUTO_DECISION_NAME
+    return DECISION_NAMES.get(sub.decision)
+
+
 def _data_value(key: str, value: Any) -> str:
     if value is None or value == "":
         return "—"
@@ -402,7 +417,7 @@ def _reminder_name(kind: str) -> str:
     fixed = {
         "before_hours": "в день срока",
         "deadline_passed": "срок истёк",
-        "overdue_manager": "руководителю о просрочке",
+        "overdue_manager": "начальнику о просрочке",
     }
     if kind in fixed:
         return fixed[kind]

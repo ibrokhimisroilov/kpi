@@ -38,6 +38,7 @@ from bot.services import tasks as tasks_svc
 from bot.utils.dates import to_utc
 
 MGR, MGR2, EMP = 1001, 1002, 2001
+AUTO_IDLE = {"confirmed": 0, "approved": 0, "reminded": 0}  # шаг «автоподтверждение»: делать нечего
 
 
 def local(month: int, day: int, hour: int = 0, minute: int = 0) -> datetime:
@@ -101,7 +102,7 @@ async def pair(tmp_path: Path) -> AsyncIterator[tuple[Instance, Instance]]:
 
 
 async def seed(instance: Instance, *, employees: bool = True) -> None:
-    """Два активных руководителя и (по умолчанию) один активный сотрудник."""
+    """Два активных начальника и (по умолчанию) один активный сотрудник."""
     async with instance.sessionmaker() as session:
         session.add_all([
             User(tg_id=MGR, full_name="Петрова Анна Сергеевна", role=Role.MANAGER, status=UserStatus.ACTIVE),
@@ -133,8 +134,11 @@ async def add_task(instance: Instance, deadline: datetime) -> int:
 
 
 async def rows(instance: Instance, model: type) -> list[Any]:
+    """Строки таблицы. У JobLog — без служебной отметки «автоподтверждение впервые запущено»
+    (её ставит первый же тик; сама функция — tests/test_auto.py)."""
     async with instance.sessionmaker() as session:
-        return list(await session.scalars(select(model)))
+        found = list(await session.scalars(select(model)))
+    return [row for row in found if not (model is JobLog and row.job == jobs.JOB_AUTO)]
 
 
 def chats(requests: list[Any]) -> list[int]:
@@ -148,7 +152,7 @@ async def test_backup_sent_once_when_two_instances_tick_at_the_same_time(
     pair: tuple[Instance, Instance], clock: Any
 ) -> None:
     """Пятница 23:05: будильник одновременно попал в старый и новый экземпляры бота. Копию базы
-    каждый руководитель получает один раз; повторный вызов в тот же вечер ничего не шлёт."""
+    каждый начальник получает один раз; повторный вызов в тот же вечер ничего не шлёт."""
     old, new = pair
     await seed(old)
     clock.set(local(10, 2, 23, 5))
@@ -234,7 +238,7 @@ async def test_backup_disabled_and_invalid_hour(
 
 async def test_digest_sent_on_first_tick_after_schedule_once(pair: tuple[Instance, Instance], clock: Any) -> None:
     """Понедельник 12.10: в 8:55 сводки ещё нет; первый «тик» после 9:00 отправляет её обоим
-    руководителям за неделю 05.10–11.10; следующие «тики» в этот день — ничего."""
+    начальникам за неделю 05.10–11.10; следующие «тики» в этот день — ничего."""
     bot, _ = pair
     await seed(bot)
     clock.set(local(10, 12, 8, 55))
@@ -302,7 +306,7 @@ async def test_digest_sent_once_when_two_instances_tick_at_the_same_time(
 async def test_digest_not_delivered_to_anyone_is_retried_on_next_tick(
     pair: tuple[Instance, Instance], clock: Any
 ) -> None:
-    """Оба руководителя заблокировали бота — сводка никому не дошла и не считается отправленной:
+    """Оба начальника заблокировали бота — сводка никому не дошла и не считается отправленной:
     следующий «тик» после разблокировки её отправляет."""
     bot, _ = pair
     await seed(bot)
@@ -388,7 +392,9 @@ async def test_failing_job_does_not_stop_the_others(
     monkeypatch.setattr(jobs, "run_reminders", broken)
     clock.set(local(10, 2, 23, 5))
     result = await bot.tick(local(10, 2, 23, 5))
-    assert result == {"evaluations": 0, "reminders": "error", "digest": "not_due", "backup": "sent:2"}
+    assert result == {
+        "evaluations": 0, "auto": AUTO_IDLE, "reminders": "error", "digest": "not_due", "backup": "sent:2"
+    }
 
 
 async def test_tick_without_now_uses_current_time(
@@ -400,7 +406,7 @@ async def test_tick_without_now_uses_current_time(
     monkeypatch.setattr(jobs, "utcnow", lambda: clock.now)
     clock.set(local(10, 2, 23, 5))
     assert await run_due_jobs(bot.bot, bot.sessionmaker) == {
-        "evaluations": 0, "reminders": 0, "digest": "not_due", "backup": "sent:2"
+        "evaluations": 0, "auto": AUTO_IDLE, "reminders": 0, "digest": "not_due", "backup": "sent:2"
     }
 
 
@@ -431,8 +437,8 @@ async def submit(instance: Instance, task_id: int, *, fact_value: float | None =
 
 async def test_interrupted_evaluation_reaches_manager_once(pair: tuple[Instance, Instance], clock: Any) -> None:
     """Сдача без оценки (экземпляр бота остановили посреди AI-оценки): пока оценка ещё могла идти —
-    ничего; через бюджет AI + 5 мин — оценка по правилам, руководителю — сдача, сотруднику — «передан
-    руководителю». Оба экземпляра тикают одновременно — сдача передаётся один раз (JobLog «eval»)."""
+    ничего; через бюджет AI + 5 мин — оценка по правилам, начальнику — сдача, сотруднику — «передан
+    начальнику». Оба экземпляра тикают одновременно — сдача передаётся один раз (JobLog «eval»)."""
     old, new = pair
     await seed(old)
     task_id = await add_task(old, local(10, 20, 18))
@@ -451,7 +457,7 @@ async def test_interrupted_evaluation_reaches_manager_once(pair: tuple[Instance,
     [to_manager] = [message for message in messages if message.chat_id == MGR]
     [to_employee] = [message for message in messages if message.chat_id == EMP]
     assert "Анализ договоров" in to_manager.text and to_manager.reply_markup is not None
-    assert "передан руководителю на проверку" in to_employee.text
+    assert "передан начальнику на проверку" in to_employee.text
     async with old.sessionmaker() as session:
         sub = await session.get(Submission, sub_id)
         assert sub is not None and (sub.ai_source, sub.ai_score) == ("rules", 90)
@@ -466,7 +472,7 @@ async def test_interrupted_evaluation_reaches_manager_once(pair: tuple[Instance,
 
 
 async def test_evaluated_or_old_submissions_are_not_touched(pair: tuple[Instance, Instance], clock: Any) -> None:
-    """Оценённую сдачу (обработчик успел) не трогаем; сдачу старше суток — тоже: о ней руководителю
+    """Оценённую сдачу (обработчик успел) не трогаем; сдачу старше суток — тоже: о ней начальнику
     напомнит review_pending. Режим polling запускает ту же проверку из APScheduler."""
     bot, _ = pair
     await seed(bot)

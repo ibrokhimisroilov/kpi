@@ -67,7 +67,7 @@ from bot.db.models import (
 )
 from bot.middlewares import load_user
 from bot.services import export as export_service
-from bot.services import kpi, periods
+from bot.services import kpi, periods, proposal_flow
 from bot.services import tasks as tasks_svc
 from bot.services import users as users_svc
 from bot.services.dbsafe import clip_file_name, is_db_id, non_negative, sql_limit
@@ -162,23 +162,23 @@ NOT_DELIVERED = (  # = handlers.common.NOT_DELIVERED
     "сообщите ему лично."
 )
 TXT_PENDING = (  # = handlers.start.TXT_PENDING
-    "⏳ Заявка на рассмотрении у руководителя.\nКак только вас подтвердят, придёт уведомление."
+    "⏳ Заявка на рассмотрении у начальника.\nКак только вас подтвердят, придёт уведомление."
 )
-TXT_BLOCKED = "⛔ Доступ закрыт. Обратитесь к руководителю."  # = handlers.start.TXT_BLOCKED
+TXT_BLOCKED = "⛔ Доступ закрыт. Обратитесь к начальнику."  # = handlers.start.TXT_BLOCKED
 GENERIC_ERROR = "⚠️ Произошла ошибка, попробуйте ещё раз"  # = main.GENERIC_ERROR
 EXPORT_FAILED = "⚠️ Не удалось подготовить отчёт. Попробуйте ещё раз чуть позже."  # = dashboard.EXPORT_FAILED
 EXPORT_SEND_FAILED = "⚠️ Не удалось отправить файл. Попробуйте ещё раз."  # = dashboard.EXPORT_SEND_FAILED
 NOT_OPEN_TEXTS: dict[TaskStatus, str] = {  # = task_submit._NOT_OPEN_TEXTS
-    TaskStatus.SUBMITTED: "📝 Результат уже отправлен и ждёт проверки руководителя.",
+    TaskStatus.SUBMITTED: "📝 Результат уже отправлен и ждёт проверки начальника.",
     TaskStatus.DONE: "✅ Задача уже выполнена и оценена — сдавать результат не нужно.",
-    TaskStatus.CANCELLED: "🚫 Задача отменена руководителем — сдавать результат не нужно.",
-    TaskStatus.PROPOSED: "📥 Поручение ещё не подтверждено руководителем — сдать результат можно после подтверждения.",
-    TaskStatus.REJECTED: "❌ Поручение отклонено руководителем — сдавать результат не нужно.",
+    TaskStatus.CANCELLED: "🚫 Задача отменена начальником — сдавать результат не нужно.",
+    TaskStatus.PROPOSED: "📥 Поручение ещё не подтверждено начальником — сдать результат можно после подтверждения.",
+    TaskStatus.REJECTED: "❌ Поручение отклонено начальником — сдавать результат не нужно.",
 }
 NOT_OPEN_DEFAULT = "Задача не в работе — сдать результат нельзя."
 
 NOT_REGISTERED = "Вы ещё не зарегистрированы. Откройте чат с ботом и нажмите /start."
-MANAGER_ONLY = "Действие доступно только руководителю"
+MANAGER_ONLY = "Действие доступно только начальнику"
 EMPLOYEE_ONLY = "Действие доступно только сотруднику"
 TASK_NOT_FOUND = "Задача не найдена."
 SUB_NOT_FOUND = "Результат не найден."
@@ -202,8 +202,8 @@ TG_BLOCKED = (
 )
 TG_FILE_FAILED = "Telegram не принял файл «{name}». Попробуйте ещё раз или отправьте файл через чат."
 NO_MANAGER_NOTICE = (
-    "📥 Поручение #{task_id} сохранено, но уведомить руководителя сейчас не удалось — в боте нет "
-    "активного руководителя. Сообщите руководителю о нём лично."
+    "📥 Поручение #{task_id} сохранено, но уведомить начальника сейчас не удалось — в боте нет "
+    "активного начальника. Сообщите начальнику о нём лично."
 )
 AI_RETRY_NOTICE = "⚠️ AI сейчас недоступен — другой вариант предложить не получилось. Отредактируйте формулировку сами."
 AI_TEAM_LIMIT_NOTICE = (
@@ -227,7 +227,7 @@ BUSY: dict[str, str] = {
 
 _LIST_SCOPES = ("my", "all", "emp")
 _LIST_STATUSES = ("open", "overdue", "review", "done", "proposed", "all")
-# «Все» для сотрудника — без отклонённых и отменённых; руководитель видит и отменённые (task_view).
+# «Все» для сотрудника — без отклонённых и отменённых; начальник видит и отменённые (task_view).
 _ALL_FOR_EMPLOYEE = (TaskStatus.PROPOSED, TaskStatus.ACTIVE, TaskStatus.REWORK, TaskStatus.SUBMITTED, TaskStatus.DONE)
 _ALL_FOR_MANAGER = (*_ALL_FOR_EMPLOYEE, TaskStatus.CANCELLED)
 _PHOTO_TYPES = frozenset({"image/jpeg", "image/png", "image/webp"})
@@ -734,7 +734,7 @@ async def tab_counts(
 
 
 async def me_counts(session: AsyncSession, viewer: User, now: datetime) -> dict[str, int]:
-    """Бейджи вкладок /api/me одним запросом. Руководитель: review, proposals, open, overdue, pending_users
+    """Бейджи вкладок /api/me одним запросом. Начальник: review, proposals, open, overdue, pending_users
     (заявки: PENDING с ФИО — скалярный подзапрос); сотрудник: open, overdue, unaccepted, rework, review, proposed."""
     is_open = Task.status.in_(OPEN_STATUSES)
     overdue = is_open & (Task.deadline < now)
@@ -1290,7 +1290,7 @@ async def create_proposal(request: web.Request) -> web.Response:
     data = await _body(request, _TASK_FIELDS)
     fields = _task_texts(data, partial=False)
     async with ctx.gate.hold("propose", viewer.tg_id, BUSY["propose"]):
-        # Каждое поручение — карточка с кнопками всем руководителям: не чаще лимита на сотрудника.
+        # Каждое поручение — карточка с кнопками всем начальникам: не чаще лимита на сотрудника.
         _rate_limit(ctx, "propose", viewer.tg_id, PROPOSAL_LIMITS, PROPOSE_TOO_OFTEN)
         try:
             task = await tasks_svc.propose_task(session, employee=viewer, **fields)
@@ -1298,8 +1298,8 @@ async def create_proposal(request: web.Request) -> web.Response:
             ctx.limits.undo("propose", viewer.tg_id)  # поручение не создано — попытка не в счёт
             raise
         await session.commit()
-        notified = await notify.notify_proposal(ctx.bot, session, task)
-    count = int(notified or 0)
+        # Вес поручения подбирает AI (не дольше proposal_flow.WEIGHT_BUDGET_SEC), затем уведомление начальникам.
+        count = await proposal_flow.run_after_propose(ctx.bot, session, task)
     return _ok(
         {
             "task": ser.task_detail(task, viewer, utcnow()),
@@ -1663,7 +1663,7 @@ async def submit_result(request: web.Request) -> web.Response:
             raise DomainError(_not_open_text(task.status) if not task.is_open else exc.message) from exc
         await session.commit()
         sub_id, attempt, count = sub.id, sub.attempt, len(sub.attachments)
-    # 5. Оценка и уведомление руководителю — в фоне, общим конвейером чата.
+    # 5. Оценка и уведомление начальнику — в фоне, общим конвейером чата.
     ctx.tasks.spawn(_after_submit(ctx, task_id, sub_id), name=f"webapp-submit-{sub_id}")
     return _ok(
         {
@@ -1692,7 +1692,7 @@ def _result_with_notes(result: str | None, notes: Sequence[str]) -> str | None:
 
 
 async def _after_submit(ctx: WebappContext, task_id: int, sub_id: int) -> None:
-    """Фон: оценка (AI или правила) и уведомление руководителю — submission_flow, как в чате. Остановка
+    """Фон: оценка (AI или правила) и уведомление начальнику — submission_flow, как в чате. Остановка
     сервера посреди оценки — сдачу доведёт jobs.recover_stalled_evaluations."""
     from bot.services import submission_flow
 
@@ -1768,6 +1768,21 @@ async def review_score(request: web.Request) -> web.Response:
     return _ok({"task": ser.task_detail(task, viewer, utcnow()), "delivered": bool(delivered), "notice": _notice(delivered)})
 
 
+async def review_revise(request: web.Request) -> web.Response:
+    """Изменить оценку, подтверждённую автоматически (в течение AUTO_REVISE_DAYS) — как SubCB("revise") в чате."""
+    ctx = _ctx(request)
+    viewer = manager_viewer(request)
+    session = _session(request)
+    sub = await _load_submission(request)
+    data = await _body(request, ("score", "comment"))
+    score = _score(data.get("score"))
+    comment = _text(data, "comment", "Комментарий", max_len=COMMENT_MAX)
+    task = await tasks_svc.review_revise_auto(session, sub.id, viewer, score, comment)
+    await session.commit()
+    delivered = await notify.notify_review_result(ctx.bot, task, sub)
+    return _ok({"task": ser.task_detail(task, viewer, utcnow()), "delivered": bool(delivered), "notice": _notice(delivered)})
+
+
 async def review_rework(request: web.Request) -> web.Response:
     ctx = _ctx(request)
     viewer = manager_viewer(request)
@@ -1806,7 +1821,7 @@ async def review_files(request: web.Request) -> web.Response:
 
 
 async def _send_files_job(ctx: WebappContext, chat_id: int, sub: Submission) -> None:
-    """Фон: файлы сдачи — в чат руководителя (как «📎 Файлы» в чате). Сдача и файлы уже загружены — к базе
+    """Фон: файлы сдачи — в чат начальника (как «📎 Файлы» в чате). Сдача и файлы уже загружены — к базе
     фон не обращается. «Занято» снимается в конце."""
     try:
         await notify.send_attachments(ctx.bot, chat_id, sub)
@@ -1833,7 +1848,7 @@ def _trend_weeks(now: datetime) -> list[periods.Period]:
 
 
 async def _team_dashboard(session: AsyncSession, kind: str, offset: int, now: datetime) -> dict[str, Any]:
-    """Дашборд руководителя: те же числа и порядок строк, что kpi.kpi_for_team / kpi.team_kpi."""
+    """Дашборд начальника: те же числа и порядок строк, что kpi.kpi_for_team / kpi.team_kpi."""
     period = periods.get_period(kind, offset, now)
     weeks = _trend_weeks(now)
     employees = list(
@@ -1963,7 +1978,7 @@ async def export_report(request: web.Request) -> web.Response:
 
 
 async def _export_job(ctx: WebappContext, chat_id: int, period: periods.Period, now: datetime) -> None:
-    """Фон: Excel-отчёт за период — документом в чат руководителя (как dashboard.export_report)."""
+    """Фон: Excel-отчёт за период — документом в чат начальника (как dashboard.export_report)."""
     bot = ctx.bot
     try:
         try:
@@ -1972,7 +1987,7 @@ async def _export_job(ctx: WebappContext, chat_id: int, period: periods.Period, 
         except DomainError as exc:
             await notify.safe_send(bot, chat_id, f"⚠️ {esc(exc.message)}")
             return
-        except Exception:  # noqa: BLE001 - руководителю — понятный текст, подробности — в лог
+        except Exception:  # noqa: BLE001 - начальнику — понятный текст, подробности — в лог
             log.exception("Не удалось собрать Excel-отчёт (%s, offset=%s)", period.kind, period.offset)
             await notify.safe_send(bot, chat_id, EXPORT_FAILED)
             return
@@ -2040,6 +2055,7 @@ _TABLE: list[tuple[str, str, Handler]] = [
     ("GET", "/review", list_review),
     ("POST", "/submissions/{sub_id}/confirm", review_confirm),
     ("POST", "/submissions/{sub_id}/score", review_score),
+    ("POST", "/submissions/{sub_id}/revise", review_revise),
     ("POST", "/submissions/{sub_id}/rework", review_rework),
     ("POST", "/submissions/{sub_id}/files", review_files),
     ("GET", "/proposals", list_proposals),

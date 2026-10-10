@@ -12,7 +12,7 @@
 загруженные в сессию, повторно не читаются.
 
 Гонки. Апдейты разных пользователей бот обрабатывает параллельно, каждый — в своей сессии БД,
-поэтому два руководителя могут одновременно решать по одной сдаче или одному предложению.
+поэтому два начальника могут одновременно решать по одной сдаче или одному предложению.
 Смена статуса (решение по предложению, проверка, отмена, сдача результата) делается атомарным
 условным UPDATE — ``UPDATE tasks SET status=… WHERE id=? AND status=<ожидаемый>`` (см.
 ``_claim_status``): пройдёт только у первого, второй получит понятный DomainError
@@ -77,13 +77,14 @@ from bot.services.dbsafe import (
 from bot.services.errors import DomainError
 from bot.services.users import require_manager
 from bot.utils.dates import days_between, to_local, to_utc, utcnow
+from bot.utils.text import plural
 
 _EDITABLE_FIELDS = frozenset(
     {"title", "expected_result", "description", "plan_value", "plan_unit", "deadline", "priority", "weight"}
 )
 _EDITABLE_STATUSES = (TaskStatus.PROPOSED, TaskStatus.ACTIVE, TaskStatus.REWORK)
 _CANCELLABLE_STATUSES = (TaskStatus.PROPOSED, TaskStatus.ACTIVE, TaskStatus.REWORK, TaskStatus.SUBMITTED)
-_PROPOSAL_WEIGHT = 10  # временный вес предложения; окончательный задаёт руководитель
+_PROPOSAL_WEIGHT = 10  # временный вес предложения; окончательный задаёт начальник
 # Срок дальше — опечатка в годе (и даты у предела datetime ломают расчёт недель): не принимаем.
 _MAX_DEADLINE_AHEAD = timedelta(days=5 * 366)
 _MAX_TITLE_LEN = 255
@@ -95,9 +96,11 @@ _MAX_FILE_NAME_LEN = column_length(Attachment.file_name)
 _MAX_MIME_LEN = column_length(Attachment.mime_type)
 _EVAL_SOURCES = ("ai", "rules")
 
-# Тексты отказов, когда решение уже принято (в т.ч. другим руководителем секундой раньше).
+# Тексты отказов, когда решение уже принято (в т.ч. другим начальником секундой раньше).
 REVIEW_ALREADY_PROCESSED = "Результат уже обработан"
 PROPOSAL_ALREADY_PROCESSED = "Предложение уже обработано"
+AUTO_NOT_ALLOWED = "Эту оценку подтверждает только начальник"
+REVISE_CLOSED = "Изменить можно только автоматически подтверждённую оценку и только в течение {days} после подтверждения"
 _NOT_CANCELLABLE = "Отменить можно только незавершённую задачу"
 _ALREADY_SUBMITTED = "Результат уже отправлен и ждёт проверки"
 _NOT_OPEN_FOR_SUBMIT = "Задача не в работе — сдать результат нельзя"
@@ -197,7 +200,7 @@ async def create_task(
     plan_value: float | None = None,
     plan_unit: str | None = None,
 ) -> Task:
-    """Руководитель ставит задачу активному сотруднику. Статус ACTIVE, событие CREATED."""
+    """Начальник ставит задачу активному сотруднику. Статус ACTIVE, событие CREATED."""
     require_manager(creator)
     assignee = await session.get(User, assignee_id) if is_db_id(assignee_id) else None
     if assignee is None or not _is_active_employee(assignee):
@@ -300,6 +303,57 @@ async def approve_proposal(
     return task
 
 
+async def set_proposal_weight(
+    session: AsyncSession, task_id: int, *, weight: int, source: str, note: str | None = None
+) -> Task:
+    """Записать предложенный вес поручения (AI или по умолчанию): временный вес задачи + событие
+    WEIGHT_SUGGESTED. Начальник видит его как подсказку; с ним поручение принимается автоматически.
+    Поручение уже не ждёт решения — DomainError."""
+    if source not in _EVAL_SOURCES:
+        raise ValueError(f"set_proposal_weight: source должен быть одним из {_EVAL_SOURCES}")
+    task = await _task_or_error(session, task_id)
+    weight = _normalize_field("weight", weight)
+    note = _optional_text(note)
+    if not await _claim_status(session, task, TaskStatus.PROPOSED, TaskStatus.PROPOSED, values={"weight": weight}):
+        raise DomainError(PROPOSAL_ALREADY_PROCESSED)
+    await add_event(session, task, None, EventType.WEIGHT_SUGGESTED, weight=weight, source=source, note=note)
+    return task
+
+
+async def suggested_weight(session: AsyncSession, task_id: int) -> tuple[int, str] | None:
+    """Последний предложенный вес поручения: (вес, "ai" | "rules"); None — подсказки ещё не было."""
+    stmt = (
+        select(TaskEvent.data)
+        .where(TaskEvent.task_id == task_id, TaskEvent.type == EventType.WEIGHT_SUGGESTED)
+        .order_by(TaskEvent.id.desc())
+        .limit(1)
+    )
+    data = await session.scalar(stmt)
+    if not isinstance(data, dict) or isinstance(data.get("weight"), bool) or not isinstance(data.get("weight"), int):
+        return None
+    return data["weight"], str(data.get("source") or "rules")
+
+
+async def auto_approve_proposal(session: AsyncSession, task_id: int) -> Task:
+    """PROPOSED -> ACTIVE без начальника (он не ответил вовремя — bot.services.auto): вес — предложенный
+    (временный вес поручения), приоритет средний. Ответственного начальника у задачи нет: результат
+    получат все начальники."""
+    task = await _task_or_error(session, task_id)
+    if task.status != TaskStatus.PROPOSED:
+        raise DomainError(PROPOSAL_ALREADY_PROCESSED)
+    if not _is_active_employee(task.assignee):
+        raise DomainError("Сотрудник неактивен — подтвердить поручение нельзя")
+    now = utcnow()
+    if task.deadline <= now:
+        raise DomainError("Срок поручения уже прошёл — сначала измените срок")
+    weight = _normalize_field("weight", task.weight)
+    approved = {"weight": weight, "priority": Priority.MEDIUM, "approved_at": now, "accepted_at": now}
+    if not await _claim_status(session, task, TaskStatus.PROPOSED, TaskStatus.ACTIVE, values=approved):
+        raise DomainError(PROPOSAL_ALREADY_PROCESSED)
+    await add_event(session, task, None, EventType.APPROVED, weight=weight, priority=Priority.MEDIUM, auto=True)
+    return task
+
+
 async def reject_proposal(
     session: AsyncSession, task_id: int, manager: User, reason: str | None = None
 ) -> Task:
@@ -388,7 +442,7 @@ async def cancel_task(
 ) -> Task:
     """PROPOSED/ACTIVE/REWORK/SUBMITTED -> CANCELLED, событие CANCELLED(reason).
 
-    Если статус задачи успел измениться (другой руководитель отменил или проверил её, сотрудник
+    Если статус задачи успел измениться (другой начальник отменил или проверил её, сотрудник
     сдал результат), отмена не выполняется — DomainError с объяснением.
     """
     require_manager(manager)
@@ -425,7 +479,7 @@ async def submit_result(
     value = _fact_value(fact_value)
     items = [att for att in map(_attachment, attachments) if att is not None]
 
-    # Руководитель мог отменить задачу, пока сотрудник заполнял ответы: сдача не должна её «оживить».
+    # Начальник мог отменить задачу, пока сотрудник заполнял ответы: сдача не должна её «оживить».
     # Поля сдачи у задачи пишет тот же UPDATE; срок мог измениться в другой сессии уже после чтения
     # задачи — RETURNING возвращает актуальный, просрочку считаем по нему.
     now = utcnow()
@@ -508,7 +562,7 @@ async def record_evaluation(
 
 
 async def review_confirm(session: AsyncSession, sub_id: int, manager: User) -> Task:
-    """Руководитель подтверждает оценку AI: задача -> DONE с final_score = sub.ai_score."""
+    """Начальник подтверждает оценку AI: задача -> DONE с final_score = sub.ai_score."""
     task, sub = await _reviewable(session, sub_id, manager)
     if sub.ai_score is None:
         raise DomainError("Предварительной оценки нет — введите оценку вручную")
@@ -520,10 +574,87 @@ async def review_confirm(session: AsyncSession, sub_id: int, manager: User) -> T
     return task
 
 
+async def review_auto_confirm(session: AsyncSession, sub_id: int) -> Task:
+    """Оценка AI подтверждается без начальника (он не ответил вовремя — bot.services.auto): задача -> DONE.
+
+    Только оценка AI не выше AUTO_CONFIRM_MAX_SCORE: расчёт по правилам и оценку выше подтверждает
+    начальник (DomainError AUTO_NOT_ALLOWED). Проверяющего у сдачи нет — признак Submission.auto_confirmed.
+    """
+    sub = await _submission_or_error(session, sub_id)
+    task = sub.task
+    if task.status != TaskStatus.SUBMITTED or task.last_submission is not sub or sub.decision is not None:
+        raise DomainError(REVIEW_ALREADY_PROCESSED)
+    score = sub.ai_score
+    if score is None or sub.ai_source != "ai" or score > get_settings().auto_confirm_max_score:
+        raise DomainError(AUTO_NOT_ALLOWED)
+    now = utcnow()
+    await _claim_review(session, task, sub, TaskStatus.DONE, values={"final_score": score, "completed_at": now})
+    _complete(sub, None, score, ReviewDecision.APPROVED, comment=None, now=now)
+    await add_event(session, task, None, EventType.SCORE_CONFIRMED, submission_id=sub.id, score=score, auto=True)
+    return task
+
+
+async def review_revise_auto(
+    session: AsyncSession, sub_id: int, manager: User, score: float, comment: str | None = None
+) -> Task:
+    """Начальник меняет оценку, подтверждённую автоматически (в течение AUTO_REVISE_DAYS): задача остаётся
+    DONE, итоговая оценка — новая, решение сдачи — CHANGED (дальше она как выставленная начальником).
+
+    Занимается условным UPDATE: задача DONE, сдача последняя и всё ещё без проверяющего — из двух
+    начальников оценку изменит первый.
+    """
+    require_manager(manager)
+    sub = await _submission_or_error(session, sub_id)
+    task = sub.task
+    days = get_settings().auto_revise_days
+    closed = DomainError(REVISE_CLOSED.format(days=plural(max(days, 0), "дня", "дней", "дней")))
+    now = utcnow()
+    if task.status != TaskStatus.DONE or task.last_submission is not sub or not sub.auto_confirmed:
+        raise closed
+    if days <= 0 or sub.reviewed_at is None or now > sub.reviewed_at + timedelta(days=days):
+        raise closed
+    if task.assignee_id == manager.id:
+        raise DomainError("Нельзя оценивать результат собственной задачи")
+    max_score = get_settings().max_score
+    if isinstance(score, bool) or not isinstance(score, (int, float)) or not 0 <= score <= max_score:
+        raise DomainError(f"Оценка должна быть от 0 до {max_score} %")
+    final = _round_half_up(float(score))
+    comment = _optional_text(comment)
+    previous = sub.final_score
+    still_auto = (
+        select(Submission.id)
+        .where(
+            Submission.id == sub.id,
+            Submission.decision == ReviewDecision.APPROVED,
+            Submission.reviewer_id.is_(None),
+        )
+        .exists()
+    )
+    newer_exists = select(Submission.id).where(Submission.task_id == task.id, Submission.id > sub.id).exists()
+    if not await _claim_status(
+        session, task, TaskStatus.DONE, TaskStatus.DONE, still_auto, ~newer_exists, values={"final_score": final}
+    ):
+        raise closed
+    _complete(sub, manager, final, ReviewDecision.CHANGED, comment=comment, now=now)
+    await add_event(
+        session,
+        task,
+        manager,
+        EventType.SCORE_CHANGED,
+        submission_id=sub.id,
+        ai_score=sub.ai_score,
+        score=final,
+        comment=comment,
+        previous=previous,
+        after_auto=True,
+    )
+    return task
+
+
 async def review_set_score(
     session: AsyncSession, sub_id: int, manager: User, score: float, comment: str | None = None
 ) -> Task:
-    """Руководитель ставит свою оценку (0..max_score): задача -> DONE, решение CHANGED.
+    """Начальник ставит свою оценку (0..max_score): задача -> DONE, решение CHANGED.
 
     Оценка округляется до целого (половина — вверх), как предварительная: везде показываются целые
     проценты, и KPI должен сходиться с тем, что видно (одно правило для чата и приложения).
@@ -664,6 +795,27 @@ async def weight_load(
     return int(await session.scalar(stmt) or 0)
 
 
+async def week_tasks(
+    session: AsyncSession, assignee_id: int, deadline: datetime, exclude_task_id: int | None = None
+) -> list[tuple[str, int]]:
+    """(название, вес) задач сотрудника со сроком в той же местной неделе, что и deadline, — те же задачи,
+    что считает weight_load. Нужны AI, чтобы предложить вес нового поручения (bot.ai.weigh)."""
+    start, end = _local_week_bounds(naive_utc(deadline))
+    stmt = (
+        select(Task.title, Task.weight)
+        .where(
+            Task.assignee_id == assignee_id,
+            Task.status.not_in(EXCLUDED_FROM_KPI),
+            Task.deadline >= start,
+            Task.deadline < end,
+        )
+        .order_by(Task.deadline, Task.id)
+    )
+    if exclude_task_id is not None:
+        stmt = stmt.where(Task.id != exclude_task_id)
+    return [(title, int(weight)) for title, weight in await session.execute(stmt)]
+
+
 async def evaluated_history(
     session: AsyncSession, assignee_id: int, *, limit: int = 10, offset: int = 0
 ) -> list[Task]:
@@ -683,6 +835,7 @@ async def evaluated_history(
 
 async def _add_task(session: AsyncSession, **values: Any) -> Task:
     """Создать задачу с заполненными связями (без ленивых загрузок) и получить id."""
+    values.setdefault("created_at", utcnow())  # те же часы, что у остальных отметок времени сервиса
     task = Task(rework_count=0, submissions=[], **values)
     session.add(task)
     await session.flush()
@@ -748,7 +901,7 @@ async def _claim_review(
 ) -> None:
     """Атомарно занять решение по сдаче: задача ещё SUBMITTED, сдача — последняя и без решения.
 
-    Условие проверяется одним UPDATE, поэтому из двух руководителей, нажавших кнопки
+    Условие проверяется одним UPDATE, поэтому из двух начальников, нажавших кнопки
     одновременно, решение примет только первый; второй получит «Результат уже обработан».
     ``values`` — поля задачи, которые решение меняет вместе со статусом (тем же UPDATE).
     """
@@ -827,7 +980,7 @@ def _ensure_submittable(task: Task) -> None:
 
 def _complete(
     sub: Submission,
-    manager: User,
+    manager: User | None,
     score: float,
     decision: ReviewDecision,
     *,
@@ -835,7 +988,7 @@ def _complete(
     now: datetime,
 ) -> None:
     """Зафиксировать решение в сдаче (статус DONE, итоговую оценку и время у задачи уже записал
-    тот же UPDATE, что занял решение, — _claim_review)."""
+    тот же UPDATE, что занял решение, — _claim_review). manager None — оценку подтвердил бот."""
     sub.final_score = score
     sub.decision = decision
     sub.review_comment = comment

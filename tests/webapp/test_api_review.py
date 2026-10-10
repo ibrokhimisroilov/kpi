@@ -16,7 +16,7 @@ from .conftest import EMP, EMP2, MGR, MiniApp
 
 
 async def submitted_via_api(ma: MiniApp, emp: Any, *, deadline: str = "2026-10-09", files: int = 0) -> tuple[int, int]:
-    """Руководитель ставит задачу, сотрудник сдаёт через API (правила: 110 %), руководителю пришёл результат."""
+    """Начальник ставит задачу, сотрудник сдаёт через API (правила: 110 %), начальнику пришёл результат."""
     resp = await ma.post("/api/tasks", as_=MGR, json={
         "assignee_id": emp.id, "title": "Анализ договоров", "expected_result": "Проверить 100 договоров",
         "plan_value": 100, "plan_unit": "договоров", "deadline": deadline, "weight": 20,
@@ -70,7 +70,7 @@ async def test_score_boundaries_and_types(ma: MiniApp, frozen: Any) -> None:
     resp = await ma.post(f"/api/submissions/{sub_id}/score", as_=MGR, json={"score": 150, "comment": "Отлично"})
     assert resp.status == 200 and resp["task"]["final_score"] == 150
     text = ma.h.last_text(EMP)
-    assert "150 %" in text and "Отлично" in text and "✏️ Оценку выставил руководитель." in text
+    assert "150 %" in text and "Отлично" in text and "✏️ Оценку выставил начальник." in text
 
     _, sub2 = await submitted_via_api(ma, emp)
     resp = await ma.post(f"/api/submissions/{sub2}/score", as_=MGR, json={"score": 0})
@@ -113,7 +113,7 @@ async def test_second_confirm_and_chat_after_api_are_refused(ma: MiniApp, frozen
     other = await ma.post(f"/api/submissions/{sub_id}/score", as_=MGR, json={"score": 90})
     assert other.status == 400 and other.error.startswith("Результат уже обработан")
 
-    # Руководитель жмёт «✅ Подтвердить» в старом сообщении чата — решение уже принято в приложении.
+    # Начальник жмёт «✅ Подтвердить» в старом сообщении чата — решение уже принято в приложении.
     log = await ma.h.press_button(MGR, "Подтвердить 110 %", review.message_id)
     assert "уже обработан" in (log.alert or "").lower()
     task = await ma.task(task_id)
@@ -137,7 +137,7 @@ async def test_own_task_and_missing_ai_score(ma: MiniApp, frozen: Any) -> None:
     assert resp.status == 400 and resp.error == "Предварительной оценки нет — введите оценку вручную"
     assert (await ma.post(f"/api/submissions/{sub_id}/score", as_=MGR, json={"score": 95})).status == 200
 
-    # Исполнителя повысили до руководителя: оценивать собственную задачу нельзя.
+    # Исполнителя повысили до начальника: оценивать собственную задачу нельзя.
     own = await ma.seed_task(emp, mgr, kind="submitted")
     own_sub = (await ma.task(own)).submissions[0].id
     async with ma.db() as session:

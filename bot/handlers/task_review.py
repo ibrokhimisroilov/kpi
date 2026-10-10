@@ -1,14 +1,18 @@
-"""Проверка результатов руководителем (SPEC 7.7, шаг 6 ТЗ).
+"""Проверка результатов начальником (SPEC 7.7, шаг 6 ТЗ).
 
-Руководитель видит «🤖 AI предлагает: 110 %» и решает:
+Начальник видит «🤖 AI предлагает: 110 %» и решает:
 * ✅ подтвердить оценку AI (`SubCB("ok")`);
 * ✏️ изменить оценку (`SubCB("change")` -> оценка -> комментарий);
 * ↩ вернуть на доработку (`SubCB("rework")` -> что доработать -> срок);
 * 📎 посмотреть приложенные файлы (`SubCB("files")`) — кнопка остаётся и после решения.
 
+Если начальник не ответил за AUTO_CONFIRM_HOURS, оценку AI подтверждает бот (bot.services.auto). Такую
+оценку начальник может изменить в течение AUTO_REVISE_DAYS: `SubCB("revise")` -> оценка -> комментарий —
+тот же диалог, что у «✏️ изменить оценку», с пометкой ``revise`` в данных диалога.
+
 Очередь проверки — «📝 На проверке» / /review и `ListCB("review")`, открыть сдачу — `TaskCB("review")`.
 Любое действие возможно только над последней сдачей задачи, которая ещё на проверке: если другой
-руководитель успел принять решение, показывается «Результат уже обработан».
+начальник успел принять решение, показывается «Результат уже обработан».
 
 Кнопки выбора внутри диалога (оценка, «Пропустить», срок) привязаны к сдаче: `PickCB.value` =
 «<sub_id>/<значение>». Кнопка, оставшаяся в вопросе старого диалога по другой сдаче, не действует
@@ -45,7 +49,7 @@ from bot.handlers.common import (
     remove_markup,
     send_new,
 )
-from bot.services import tasks
+from bot.services import auto, tasks
 from bot.services.errors import DomainError
 from bot.ui import keyboards, render
 from bot.ui.callbacks import ListCB, PickCB, SubCB, TaskCB
@@ -65,13 +69,13 @@ COMMENT_HTML_LIMIT = 1500  # комментарий в итоговом сооб
 
 ALREADY_PROCESSED = "Результат уже обработан"
 CANCELLED_TASK = "Результат уже обработан: задача отменена"
-STALE_TEXT = "⚠️ Результат уже обработан — возможно, его проверил другой руководитель."
+STALE_TEXT = "⚠️ Результат уже обработан — возможно, его проверил другой начальник."
 OWN_TASK = "Нельзя оценивать результат собственной задачи"
 STALE_BUTTON = "Кнопка уже неактуальна"
 EMPTY_QUEUE = "Нет результатов на проверке ✨"
 DEADLINE_EXAMPLES = "«завтра», «в пятницу», «через неделю», «5 октября», «05.10 18:00»"
 # Последняя строка render.submission_text до решения; после решения её убираем из текста.
-PENDING_LINE = "Окончательное решение — за руководителем."
+PENDING_LINE = "Окончательное решение — за начальником."
 
 
 class ReviewSG(StatesGroup):
@@ -103,6 +107,20 @@ async def _load_reviewable(session: AsyncSession, sub_id: int | None) -> tuple[T
     if not sub_id:
         return None
     return _reviewable(await tasks.get_submission(session, int(sub_id)))
+
+
+async def _load_revisable(session: AsyncSession, sub_id: int | None) -> tuple[Task, Submission] | None:
+    """Сдача, оценку которой подтвердил бот и которую начальник ещё может изменить (bot.services.auto)."""
+    sub = await tasks.get_submission(session, int(sub_id)) if sub_id else None
+    if sub is None or sub.task is None or not auto.can_revise(sub.task, sub):
+        return None
+    return sub.task, sub
+
+
+def _revise_closed() -> str:
+    """Почему автоматически подтверждённую оценку уже не изменить (как отвечает сервис)."""
+    days = plural(max(get_settings().auto_revise_days, 0), "дня", "дней", "дней")
+    return tasks.REVISE_CLOSED.format(days=days)
 
 
 async def _refusal(session: AsyncSession, sub_id: int | None) -> str:
@@ -142,7 +160,7 @@ async def _recheck(
     user: User | None,
     data: dict[str, Any],
 ) -> tuple[Task, Submission] | None:
-    """Повторная проверка внутри диалога (пока руководитель писал, ситуация могла измениться).
+    """Повторная проверка внутри диалога (пока начальник писал, ситуация могла измениться).
 
     При отказе закрывает диалог (у вопроса убираются кнопки), сообщает пользователю (для callback —
     отвечает на него) и возвращает None.
@@ -154,21 +172,25 @@ async def _recheck(
         else:
             await event.answer(NO_RIGHTS)
         return None
-    pair = await _load_reviewable(session, data.get("sub_id"))
+    if data.get("revise"):
+        pair = await _load_revisable(session, data.get("sub_id"))
+        reason = _revise_closed()
+    else:
+        pair = await _load_reviewable(session, data.get("sub_id"))
+        reason = "" if pair is not None else await _refusal(session, data.get("sub_id"))
     if pair is None:
-        reason = await _refusal(session, data.get("sub_id"))
         await _close_dialog(event, state, keep_id=_clicked_id(event))  # нажатое очистит remove_markup
         if isinstance(event, CallbackQuery):
             await event.answer(reason, show_alert=True)
             await remove_markup(event)
         else:
-            await event.answer(f"⚠️ {reason}." if reason == CANCELLED_TASK else STALE_TEXT)
+            await event.answer(f"⚠️ {reason}." if reason == CANCELLED_TASK or data.get("revise") else STALE_TEXT)
         return None
     return pair
 
 
 async def _close_stale_review(callback: CallbackQuery, session: AsyncSession, sub_id: int) -> None:
-    """Решение по сдаче уже принято (например, другим руководителем): у сообщения, где нажали кнопку,
+    """Решение по сдаче уже принято (например, другим начальником): у сообщения, где нажали кнопку,
     убрать кнопки решения — остаются «📎 Файлы» и переход к очереди, чтобы по мёртвым кнопкам больше
     не нажимали. Трогаем, только если нажатая кнопка действительно есть в этом сообщении."""
     msg = callback.message
@@ -185,7 +207,7 @@ async def _close_stale_review(callback: CallbackQuery, session: AsyncSession, su
 
 
 async def _drop_dialog_for(state: FSMContext, sub_id: int, bot: Bot) -> None:
-    """Если руководитель был в диалоге проверки этой же сдачи — диалог больше не нужен."""
+    """Если начальник был в диалоге проверки этой же сдачи — диалог больше не нужен."""
     current = await state.get_state()
     if current is not None and current in ReviewSG:
         data = await state.get_data()
@@ -432,9 +454,9 @@ def _files_rows(sub: Submission | None) -> list[list[InlineKeyboardButton]]:
 
 
 def _original_text(task: Task, sub: Submission) -> str:
-    """Текст сдачи, каким его видел руководитель до решения (вызывать ДО сервиса проверки).
+    """Текст сдачи, каким его видел начальник до решения (вызывать ДО сервиса проверки).
 
-    Строку «Окончательное решение — за руководителем.» убираем: решение уже принято.
+    Строку «Окончательное решение — за начальником.» убираем: решение уже принято.
     """
     return render.submission_text(task, sub).replace("\n" + PENDING_LINE, "")
 
@@ -646,6 +668,39 @@ async def change_start(
     )
 
 
+@router.callback_query(SubCB.filter(F.action == "revise"))
+async def revise_start(
+    callback: CallbackQuery,
+    callback_data: SubCB,
+    session: AsyncSession,
+    user: User | None,
+    state: FSMContext,
+) -> None:
+    """«✏️ Изменить оценку» под сообщением об автоподтверждении или в карточке выполненной задачи."""
+    if not is_manager(user):
+        await deny(callback)
+        return
+    pair = await _load_revisable(session, callback_data.sub_id)
+    if pair is None:
+        await callback.answer(_revise_closed(), show_alert=True)
+        return
+    task, sub = pair
+    if user is not None and task.assignee_id == user.id:
+        await callback.answer(OWN_TASK, show_alert=True)
+        return
+    await _start_dialog(state, ReviewSG.score, {"sub_id": sub.id, "task_id": task.id, "ai_score": sub.ai_score, "revise": True})
+    await callback.answer()
+    until = auto.revise_until(sub)
+    prompt = (
+        "✏️ <b>Изменение автоматически подтверждённой оценки</b>\n"
+        f"{_task_ref(task)}\n"
+        f"🏁 Сейчас: <b>{fmt_pct(sub.final_score)}</b> (подтверждена автоматически)\n"
+        + (f"Изменить можно до {render.auto_when(until)}.\n" if until is not None else "")
+        + f"\nВыберите новую оценку кнопкой или напишите число от 0 до {get_settings().max_score}."
+    )
+    await _show_prompt(callback, state, prompt, _score_kb(sub.id, sub.ai_score), new_message=True)
+
+
 async def _ask_comment(event: Message | CallbackQuery, state: FSMContext, sub_id: int, score: float) -> None:
     await state.update_data(score=score)
     await state.set_state(ReviewSG.comment)
@@ -747,10 +802,13 @@ async def _finish_change(
         await _show_prompt(event, state, _score_prompt(task, sub.ai_score), _score_kb(sub.id, sub.ai_score))
         return
     assert user is not None
+    if data.get("revise"):
+        await _finish_revise(event, state, session, user, bot, task, sub, float(score), comment)
+        return
     original = _original_text(task, sub)
     try:
         task = await tasks.review_set_score(session, sub.id, user, float(score), comment)
-    except DomainError:  # например, другой руководитель успел раньше: диалог закончен, текст покажет main.py
+    except DomainError:  # например, другой начальник успел раньше: диалог закончен, текст покажет main.py
         await _close_dialog(event, state)
         raise
     await session.commit()
@@ -766,6 +824,39 @@ async def _finish_change(
     lines += ["", "Сотруднику отправлено уведомление с итоговой оценкой." if delivered else NOT_DELIVERED]
     await edit_or_answer(event, truncate("\n".join(lines), MSG_LIMIT), await _queue_kb(session))
     await _close_review_message(bot, data, original, summary, sub)
+
+
+async def _finish_revise(
+    event: Message | CallbackQuery,
+    state: FSMContext,
+    session: AsyncSession,
+    user: User,
+    bot: Bot,
+    task: Task,
+    sub: Submission,
+    score: float,
+    comment: str | None,
+) -> None:
+    """Сохранить новую оценку вместо подтверждённой автоматически и сообщить сотруднику."""
+    previous = sub.final_score
+    try:
+        task = await tasks.review_revise_auto(session, sub.id, user, score, comment)
+    except DomainError:  # срок вышел или оценку уже изменил другой начальник: текст покажет main.py
+        await _close_dialog(event, state)
+        raise
+    await session.commit()
+    await _close_dialog(event, state, keep_id=_clicked_id(event))
+    if isinstance(event, CallbackQuery):
+        await event.answer("✏️ Оценка изменена")
+    delivered = await notify.notify_review_result(bot, task, sub)
+    lines = [
+        f"<b>✏️ Оценка изменена: {fmt_pct(previous)} → {fmt_pct(task.final_score)}</b>",
+        f"📌 {_task_ref(task)}",
+    ]
+    if comment:
+        lines.append(f"💬 Комментарий: {_comment_html(comment)}")
+    lines += ["", "Сотруднику отправлено уведомление с новой оценкой." if delivered else NOT_DELIVERED]
+    await edit_or_answer(event, truncate("\n".join(lines), MSG_LIMIT), await _queue_kb(session))
 
 
 # --- ↩ Вернуть на доработку ------------------------------------------------------------------------
@@ -902,7 +993,7 @@ async def _finish_rework(
     old_deadline = task.deadline
     try:
         task = await tasks.review_rework(session, sub.id, user, comment, new_deadline)
-    except DomainError:  # например, другой руководитель успел раньше: диалог закончен, текст покажет main.py
+    except DomainError:  # например, другой начальник успел раньше: диалог закончен, текст покажет main.py
         await _close_dialog(event, state)
         raise
     await session.commit()
@@ -938,7 +1029,7 @@ async def send_files(
     bot: Bot,
 ) -> None:
     # Файлы-подтверждения нужны и после решения («что фактически получено?»), поэтому здесь
-    # не требуется, чтобы сдача ещё ждала проверки — только права руководителя.
+    # не требуется, чтобы сдача ещё ждала проверки — только права начальника.
     if not is_manager(user):
         await deny(callback)
         return

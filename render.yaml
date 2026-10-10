@@ -1,5 +1,5 @@
 # Render Blueprint: бот «Эффективность» на бесплатном тарифе Render (без банковской карты).
-# Инструкция для руководителя — docs/DEPLOY_RENDER.md.
+# Инструкция для начальника — docs/DEPLOY_RENDER.md.
 #
 # Как это работает: Telegram присылает сообщения на веб-адрес бота (RUN_MODE=webhook),
 # данные хранятся в бесплатной базе Supabase (DATABASE_URL + DATABASE_PASSWORD).

@@ -27,6 +27,7 @@ from bot.db.models import (
     User,
     UserStatus,
 )
+from bot.services import auto
 from bot.ui import texts
 from bot.utils.dateparse import iso_to_deadline
 from bot.utils.dates import fmt_deadline, to_local, utcnow
@@ -47,6 +48,7 @@ __all__ = [
     "task_summary_draft",
     "submission_text",
     "review_result_text",
+    "auto_when",
     "events_text",
     "kpi_block",
     "employee_card",
@@ -83,7 +85,8 @@ _RULES_LABEL = "Расчёт по правилам"  # начало обосно
 _SHRINK_STEPS = (1.0, 0.7, 0.45, 0.25)
 _MIN_FIELD = 60
 
-_ROLE_LABELS = {Role.MANAGER: "👔 руководитель", Role.EMPLOYEE: "👤 сотрудник"}
+_ROLE_LABELS = {Role.MANAGER: "👔 начальник", Role.EMPLOYEE: "👤 сотрудник"}
+_ADMIN_LABEL = "🛡 админ"  # начальник с отметкой users.is_admin
 _USER_STATUS_ICONS = {UserStatus.ACTIVE: "🟢", UserStatus.PENDING: "⏳", UserStatus.BLOCKED: "⛔"}
 _USER_STATUS_NOTES = {UserStatus.PENDING: "⏳ ждёт подтверждения", UserStatus.BLOCKED: "⛔ заблокирован"}
 _ATTACHMENT_NAMES = {
@@ -106,7 +109,7 @@ _FIELD_LABELS = {
 _REMINDER_KINDS = {
     "before_hours": "в день срока",
     "deadline_passed": "срок истёк",
-    "overdue_manager": "руководителю о просрочке",
+    "overdue_manager": "начальнику о просрочке",
 }
 
 
@@ -311,11 +314,11 @@ def _people_lines(task: Task, show_assignee: bool) -> list[str]:
     if task.source == TaskSource.EMPLOYEE:
         lines.append("✋ Внесена сотрудником (устное поручение)")
         if task.manager is not None:
-            lines.append(f"🧑‍💼 Ответственный руководитель: {_name(task.manager)}")
+            lines.append(f"🧑‍💼 Ответственный начальник: {_name(task.manager)}")
         return lines
     lines.append(f"🧑‍💼 Постановщик: {_name(task.created_by)}")
     if task.manager is not None and task.manager_id != task.created_by_id:
-        lines.append(f"🧑‍💼 Ответственный руководитель: {_name(task.manager)}")
+        lines.append(f"🧑‍💼 Ответственный начальник: {_name(task.manager)}")
     return lines
 
 
@@ -355,7 +358,7 @@ def _rules_head(rationale: str) -> tuple[str, str]:
 def _ai_lines(sub: Submission, *, with_rationale: bool, scale: float = 1.0, task: Task | None = None) -> list[str]:
     if sub.ai_score is None:
         if task is not None and task.status == TaskStatus.SUBMITTED and sub.decision is None:
-            # AI ещё думает (до ~2,5 мин): результат с оценкой придёт руководителю отдельным сообщением.
+            # AI ещё думает (до ~2,5 мин): результат с оценкой придёт начальнику отдельным сообщением.
             return ["⏳ Предварительная оценка ещё не рассчитана — пришлю её отдельным сообщением"]
         return ["⏳ Предварительная оценка ещё не рассчитана"]
     rationale = sub.ai_rationale or ""
@@ -375,12 +378,17 @@ def _decision_lines(sub: Submission, scale: float = 1.0) -> list[str]:
     if sub.decision == ReviewDecision.REWORK:
         lines = ["↩️ Возвращено на доработку"]
     else:
-        how = "подтверждена" if sub.decision == ReviewDecision.APPROVED else "изменена руководителем"
+        if sub.auto_confirmed:
+            how = "подтверждена автоматически"
+        elif sub.decision == ReviewDecision.APPROVED:
+            how = "подтверждена"
+        else:
+            how = "изменена начальником"
         lines = [f"🏁 Итоговая оценка: <b>{fmt_pct(sub.final_score)}</b> — {how}"]
     if sub.reviewer is not None and sub.reviewed_at is not None:
         lines.append(f"🧑‍💼 Проверка: {_name(sub.reviewer)}, {_dm_hm(sub.reviewed_at)}")
     if sub.review_comment:
-        lines.append(f"💬 Комментарий руководителя: {_clip_long(sub.review_comment, _scaled(800, scale))}")
+        lines.append(f"💬 Комментарий начальника: {_clip_long(sub.review_comment, _scaled(800, scale))}")
     return lines
 
 
@@ -408,7 +416,7 @@ def _submission_lines(task: Task, sub: Submission, *, show_ai: bool, scale: floa
         lines.append(fact_line)
     if sub.attachments:
         lines.append(f"📎 Файлов: {len(sub.attachments)}")
-    # Исполнитель видит предложение AI только после решения руководителя.
+    # Исполнитель видит предложение AI только после решения начальника.
     ai_visible = show_ai or sub.decision is not None
     if ai_visible and (sub.ai_score is not None or sub.decision is None):
         lines += _ai_lines(sub, with_rationale=False, task=task)
@@ -419,7 +427,7 @@ def task_card(task: Task, now: datetime | None = None, *, show_assignee: bool = 
     """Карточка задачи.
 
     show_assignee=False — вид для исполнителя: без строки «Исполнитель» и без предварительной
-    оценки AI, пока руководитель не принял решение.
+    оценки AI, пока начальник не принял решение.
     """
     now = _now(now)
     return _fit(lambda scale: _task_card_lines(task, now, show_assignee, scale))
@@ -434,7 +442,14 @@ def _task_card_lines(task: Task, now: datetime, show_assignee: bool, scale: floa
     lines += ["", f"📅 Срок: {deadline_label(task, now)}"]
     if task.status == TaskStatus.PROPOSED:
         # В БД у предложения временные вес и приоритет — не выдавать их за выбор сотрудника.
-        lines.append("⚖️ Вес и приоритет: назначит руководитель при подтверждении")
+        lines.append("⚖️ Вес и приоритет: назначит начальник при подтверждении")
+        if show_assignee:  # вид начальника: чем закончится, если он не ответит
+            lines.append(f"💡 Предлагаемый вес: {task.weight} %")
+            if (plan := auto.proposal_due(task)) is not None and task.deadline > plan.due:
+                lines.append(
+                    f"⏱ Без вашего решения поручение будет принято автоматически {auto_when(plan.due)} "
+                    "с этим весом и средним приоритетом."
+                )
     else:
         lines += [
             f"⚡ Приоритет: {PRIORITY_LABELS.get(task.priority, str(task.priority))}",
@@ -526,8 +541,29 @@ def task_summary_draft(data: dict[str, Any]) -> str:
 # --- Сдача и проверка ------------------------------------------------------------------------------
 
 
+def auto_when(moment: datetime) -> str:
+    """«03.10 в 12:00» — местное время, когда сработает (или закончится) автоматическое действие."""
+    return f"{to_local(moment):%d.%m в %H:%M}"
+
+
+def _auto_note(task: Task, sub: Submission) -> str | None:
+    """Строка для начальника: когда оценка подтвердится сама или почему не подтвердится (bot.services.auto)."""
+    if not auto.enabled() or task.status != TaskStatus.SUBMITTED or sub.decision is not None:
+        return None
+    block = auto.score_block(sub)
+    if block == auto.BLOCK_RULES:
+        return "⚠️ Сама эта оценка не подтвердится: она рассчитана без AI — нужно ваше решение."
+    if block == auto.BLOCK_HIGH:
+        limit = get_settings().auto_confirm_max_score
+        return f"⚠️ Сама эта оценка не подтвердится: она выше {limit} % — нужно ваше решение."
+    plan = auto.score_due(task, sub)
+    if plan is None:
+        return None
+    return f"⏱ Без вашего решения оценка подтвердится автоматически {auto_when(plan.due)}."
+
+
 def submission_text(task: Task, sub: Submission) -> str:
-    """Для руководителя: План ↔ Факт, когда сдано, файлы, предложение AI с обоснованием."""
+    """Для начальника: План ↔ Факт, когда сдано, файлы, предложение AI с обоснованием."""
     return _fit(lambda scale: _submission_text_lines(task, sub, scale))
 
 
@@ -553,16 +589,18 @@ def _submission_text_lines(task: Task, sub: Submission, scale: float) -> list[st
         *_ai_lines(sub, with_rationale=True, scale=scale, task=task),
     ]
     if sub.decision is None:
-        lines.append("Окончательное решение — за руководителем.")
+        lines.append("Окончательное решение — за начальником.")
+        if (note := _auto_note(task, sub)) is not None:
+            lines.append(note)
     else:
         lines += ["", *_decision_lines(sub, scale)]
     return lines
 
 
 def review_result_text(task: Task, sub: Submission) -> str:
-    """Для сотрудника: итог проверки — оценка, решение, комментарий руководителя."""
+    """Для сотрудника: итог проверки — оценка, решение, комментарий начальника."""
     title = f"<b>{_clip(task.title, 255)}</b>"
-    comment = [f"💬 Комментарий руководителя: {_clip_long(sub.review_comment, 1500)}"] if sub.review_comment else []
+    comment = [f"💬 Комментарий начальника: {_clip_long(sub.review_comment, 1500)}"] if sub.review_comment else []
     if sub.decision == ReviewDecision.REWORK:
         return _finish([
             f"↩️ <b>Задача #{task.id} возвращена на доработку</b>",
@@ -575,11 +613,13 @@ def review_result_text(task: Task, sub: Submission) -> str:
     if sub.decision is None:
         return _finish([f"⏳ <b>Результат по задаче #{task.id} на проверке</b>", title])
     score = sub.final_score if sub.final_score is not None else task.final_score
-    verdict = (
-        "✅ Руководитель подтвердил предварительную оценку."
-        if sub.decision == ReviewDecision.APPROVED
-        else "✏️ Оценку выставил руководитель."
-    )
+    if sub.auto_confirmed:
+        waited = plural(get_settings().auto_confirm_hours, "час", "часа", "часов")
+        verdict = f"✅ Предварительная оценка подтверждена автоматически: начальник не изменил её за {waited}."
+    elif sub.decision == ReviewDecision.APPROVED:
+        verdict = "✅ Начальник подтвердил предварительную оценку."
+    else:
+        verdict = "✏️ Оценку выставил начальник."
     return _finish([
         f"🏁 <b>Результат по задаче #{task.id} оценён</b>",
         title,
@@ -682,7 +722,9 @@ def _reminder_phrase(data: dict[str, Any]) -> str:
     elif kind.startswith("overdue_"):
         detail = _REMINDER_KINDS.get(kind, "о просрочке")
     elif kind.startswith("review_"):
-        detail = "руководителю о непроверенном результате"
+        detail = "начальнику о непроверенном результате"
+    elif kind.startswith("auto_"):
+        detail = "начальнику: скоро автоподтверждение"
     else:
         detail = _REMINDER_KINDS.get(kind, "")
     return f"напоминание ({detail})" if detail else "напоминание"
@@ -696,7 +738,8 @@ def _event_phrase(event: TaskEvent) -> str:
         case EventType.PROPOSED:
             return "поручение внесено сотрудником" + _details(data, "deadline")
         case EventType.APPROVED:
-            return "поручение подтверждено" + _details(data, "weight", "priority")
+            head = "поручение принято автоматически" if data.get("auto") else "поручение подтверждено"
+            return head + _details(data, "weight", "priority")
         case EventType.REJECTED:
             return "поручение отклонено" + _reason(data, "reason", "comment")
         case EventType.ACCEPTED:
@@ -708,8 +751,17 @@ def _event_phrase(event: TaskEvent) -> str:
         case EventType.AI_EVALUATED:
             return _ai_phrase(data)
         case EventType.SCORE_CONFIRMED:
-            return f"оценка подтверждена: {_fmt_value('score', data.get('score', data.get('final_score')))}"
+            head = "оценка подтверждена автоматически" if data.get("auto") else "оценка подтверждена"
+            return f"{head}: {_fmt_value('score', data.get('score', data.get('final_score')))}"
+        case EventType.WEIGHT_SUGGESTED:
+            by = "AI" if data.get("source") == "ai" else "по умолчанию"
+            return f"предложен вес поручения: {_fmt_value('weight', data.get('weight'))} ({by})"
         case EventType.SCORE_CHANGED:
+            if data.get("after_auto"):
+                before = _fmt_value("score", data.get("previous"))
+                after = _fmt_value("score", data.get("score"))
+                note = f" · комментарий: {_clip(data['comment'], 200)}" if data.get("comment") else ""
+                return f"оценка изменена после автоподтверждения: {before} → {after}{note}"
             old = _fmt_value("ai_score", data.get("ai_score"))
             new = _fmt_value("score", data.get("score", data.get("final_score")))
             comment = f" · комментарий: {_clip(data['comment'], 200)}" if data.get("comment") else ""
@@ -840,7 +892,7 @@ def team_dashboard(period: Period, rows: list[tuple[User, KpiResult]], team_valu
 
 
 def history_text(user: User, tasks: list[Task], page: int, total: int) -> str:
-    """История оценок сотрудника: оценка AI → итоговая оценка руководителя, решение."""
+    """История оценок сотрудника: оценка AI → итоговая оценка начальника, решение."""
     lines = [f"📜 <b>История оценок · {_name(user)}</b>"]
     if not tasks or not total:
         return _finish([*lines, "", "Оценённых задач пока нет."])
@@ -856,7 +908,9 @@ def history_text(user: User, tasks: list[Task], page: int, total: int) -> str:
         if task.rework_count:
             meta.append(f"↩️ доработок: {task.rework_count}")
         verdict = ""
-        if sub is not None and sub.decision == ReviewDecision.APPROVED:
+        if sub is not None and sub.auto_confirmed:
+            verdict = " ⏱ подтверждена автоматически"
+        elif sub is not None and sub.decision == ReviewDecision.APPROVED:
             verdict = " ✅ подтверждена"
         elif sub is not None and sub.decision == ReviewDecision.CHANGED:
             verdict = " ✏️ изменена"
@@ -876,7 +930,7 @@ def user_line(user: User) -> str:
     """«🟢 Иванов Иван Иванович · сотрудник · Специалист · @ivanov»."""
     parts = [
         f"{_USER_STATUS_ICONS.get(user.status, '•')} <b>{_clip(user.full_name or '—', 120)}</b>",
-        _ROLE_LABELS.get(user.role, esc(user.role)),
+        _ADMIN_LABEL if user.is_admin and user.role == Role.MANAGER else _ROLE_LABELS.get(user.role, esc(user.role)),
     ]
     if user.position:
         parts.append(_clip(user.position, 80))
@@ -905,6 +959,36 @@ def _kpi_help() -> list[str]:
     return lines
 
 
+def _auto_help_manager() -> list[str]:
+    """Как работает автоподтверждение (bot.services.auto) — для справки начальника."""
+    settings = get_settings()
+    if settings.auto_confirm_hours <= 0:
+        return ["🤖 AI только предлагает оценку — окончательное решение всегда за вами."]
+    waited = plural(settings.auto_confirm_hours, "час", "часа", "часов")
+    lines = [
+        "🤖 AI только предлагает оценку — окончательное решение за вами.",
+        f"⏱ Если вы не ответили за {waited}, оценка AI (не выше {settings.auto_confirm_max_score} %) "
+        "подтверждается автоматически, а поручение сотрудника принимается с предложенным весом и средним "
+        "приоритетом. Перед этим придёт напоминание.",
+        f"Оценку выше {settings.auto_confirm_max_score} % и оценку, рассчитанную без AI, всегда подтверждаете вы.",
+    ]
+    if settings.auto_revise_days > 0:
+        days = plural(settings.auto_revise_days, "дня", "дней", "дней")
+        lines.append(f"Оценку, подтверждённую автоматически, можно изменить в течение {days}.")
+    return lines
+
+
+def _auto_help_employee() -> list[str]:
+    settings = get_settings()
+    if settings.auto_confirm_hours <= 0:
+        return []
+    waited = plural(settings.auto_confirm_hours, "час", "часа", "часов")
+    return [
+        f"⏱ Если начальник не ответил за {waited}, оценка AI подтверждается автоматически, а внесённое вами "
+        "поручение принимается в работу."
+    ]
+
+
 def _manager_help() -> list[str]:
     return [
         "<b>Ваши кнопки</b>",
@@ -918,7 +1002,7 @@ def _manager_help() -> list[str]:
         f"{texts.BTN_STAFF} — заявки на доступ, роли, блокировка.",
         f"{texts.BTN_EXPORT} — отчёт в Excel за неделю, месяц, квартал или год.",
         "",
-        "🤖 AI только предлагает оценку — окончательное решение всегда за вами.",
+        *_auto_help_manager(),
     ]
 
 
@@ -926,12 +1010,13 @@ def _employee_help() -> list[str]:
     return [
         "<b>Ваши кнопки</b>",
         f"{texts.BTN_MY_TASKS} — ваши задачи, сроки и статусы. Подтвердите получение новой задачи.",
-        f"{texts.BTN_PROPOSE} — внести поручение, полученное устно: руководитель подтвердит его.",
+        f"{texts.BTN_PROPOSE} — внести поручение, полученное устно: начальник подтвердит его.",
         f"{texts.BTN_SUBMIT} — что фактически сделано, какой получен результат, файлы-подтверждения.",
         f"{texts.BTN_MY_KPI} — ваш коэффициент за неделю, месяц, квартал и год.",
         "",
         "⏰ Бот напомнит о приближении срока, а после срока попросит сдать результат.",
-        "Оценку ставит руководитель; AI лишь помогает сравнить план и факт.",
+        "Оценку ставит начальник; AI лишь помогает сравнить план и факт.",
+        *_auto_help_employee(),
     ]
 
 
@@ -948,12 +1033,12 @@ def help_text(user: User | None) -> str:
     ]
     if user is None or not user.is_active:
         if user is not None and user.status == UserStatus.BLOCKED:
-            access = "⛔ Доступ закрыт руководителем — по вопросам обратитесь к нему."
+            access = "⛔ Доступ закрыт начальником — по вопросам обратитесь к нему."
         elif user is not None and user.full_name:
             # Заявка уже отправлена: не предлагать «отправить заявку» ещё раз.
-            access = "⏳ Заявка на рассмотрении у руководителя — после подтверждения здесь появится меню."
+            access = "⏳ Заявка на рассмотрении у начальника — после подтверждения здесь появится меню."
         else:
-            access = "Чтобы начать, нажмите /start и отправьте заявку — доступ откроет руководитель."
+            access = "Чтобы начать, нажмите /start и отправьте заявку — доступ откроет начальник."
         lines += [access, "", *_kpi_help()]
         return _finish(lines)
     lines += _manager_help() if user.role == Role.MANAGER else _employee_help()

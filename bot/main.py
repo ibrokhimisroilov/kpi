@@ -320,7 +320,7 @@ def _log_startup_hints(settings: Settings) -> None:
     """Подсказки о настройках, без которых бот работает, но не полностью."""
     if not settings.admin_ids:
         log.warning(
-            "ADMIN_IDS не задан: никто не станет руководителем автоматически и заявки некому подтвердить. "
+            "ADMIN_IDS не задан: никто не станет начальником автоматически и заявки некому подтвердить. "
             "Впишите свой Telegram ID в .env (ADMIN_IDS=...)."
         )
     _log_ai_chain(settings)

@@ -26,6 +26,7 @@ from typing import Any
 from sqlalchemy import (
     JSON,
     BigInteger,
+    Boolean,
     DateTime,
     Enum,
     Float,
@@ -35,6 +36,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    false,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -46,23 +48,23 @@ def utcnow() -> datetime:
 
 
 class Role(enum.StrEnum):
-    MANAGER = "manager"    # руководитель
+    MANAGER = "manager"    # начальник
     EMPLOYEE = "employee"  # сотрудник
 
 
 class UserStatus(enum.StrEnum):
-    PENDING = "pending"  # ждёт подтверждения руководителем
+    PENDING = "pending"  # ждёт подтверждения начальником
     ACTIVE = "active"
     BLOCKED = "blocked"
 
 
 class TaskStatus(enum.StrEnum):
-    PROPOSED = "proposed"    # внесена сотрудником, ждёт подтверждения руководителя
+    PROPOSED = "proposed"    # внесена сотрудником, ждёт подтверждения начальника
     ACTIVE = "active"        # в работе
-    SUBMITTED = "submitted"  # результат сдан, ждёт проверки руководителем
+    SUBMITTED = "submitted"  # результат сдан, ждёт проверки начальником
     REWORK = "rework"        # возвращена на доработку (ведёт себя как «в работе»)
-    DONE = "done"            # оценена руководителем, оценка окончательная
-    CANCELLED = "cancelled"  # отменена руководителем
+    DONE = "done"            # оценена начальником, оценка окончательная
+    CANCELLED = "cancelled"  # отменена начальником
     REJECTED = "rejected"    # предложение сотрудника отклонено
 
 
@@ -78,13 +80,13 @@ class Priority(enum.StrEnum):
 
 
 class TaskSource(enum.StrEnum):
-    MANAGER = "manager"    # поставлена руководителем
+    MANAGER = "manager"    # поставлена начальником
     EMPLOYEE = "employee"  # внесена сотрудником (устное поручение)
 
 
 class ReviewDecision(enum.StrEnum):
-    APPROVED = "approved"  # руководитель подтвердил оценку AI
-    CHANGED = "changed"    # руководитель изменил оценку
+    APPROVED = "approved"  # оценка AI подтверждена: начальником или автоматически (reviewer_id пуст)
+    CHANGED = "changed"    # начальник изменил оценку
     REWORK = "rework"      # возвращено на доработку
 
 
@@ -96,19 +98,20 @@ class AttachmentKind(enum.StrEnum):
 
 
 class EventType(enum.StrEnum):
-    CREATED = "created"              # руководитель поставил задачу
+    CREATED = "created"              # начальник поставил задачу
     PROPOSED = "proposed"            # сотрудник внёс поручение
-    APPROVED = "approved"            # руководитель подтвердил предложение
-    REJECTED = "rejected"            # руководитель отклонил предложение
+    APPROVED = "approved"            # начальник подтвердил предложение
+    REJECTED = "rejected"            # начальник отклонил предложение
     ACCEPTED = "accepted"            # сотрудник принял задачу в работу
     EDITED = "edited"                # изменены поля задачи (data = {"changes": {field: [old, new]}})
     SUBMITTED = "submitted"          # сотрудник сдал результат
     AI_EVALUATED = "ai_evaluated"    # AI/правила предложили оценку
-    SCORE_CONFIRMED = "score_confirmed"  # руководитель подтвердил оценку
-    SCORE_CHANGED = "score_changed"      # руководитель изменил оценку
+    SCORE_CONFIRMED = "score_confirmed"  # начальник подтвердил оценку
+    SCORE_CHANGED = "score_changed"      # начальник изменил оценку
     REWORK = "rework"                # возвращено на доработку
     CANCELLED = "cancelled"          # задача отменена
     REMINDER = "reminder"            # отправлено напоминание (data = {"kind": ...})
+    WEIGHT_SUGGESTED = "weight_suggested"  # вес поручения предложен AI/по умолчанию (data = {"weight", "source", "note"})
 
 
 def _enum(enum_cls: type[enum.Enum]) -> Enum:
@@ -132,6 +135,9 @@ class User(Base):
     role: Mapped[Role] = mapped_column(_enum(Role), default=Role.EMPLOYEE)
     status: Mapped[UserStatus] = mapped_column(_enum(UserStatus), default=UserStatus.PENDING)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    # Админ бота: начальник со всеми правами, которого нельзя понизить или заблокировать. Назначается
+    # командой ``python -m bot.tools.admin`` (bot.services.users.grant_admin), а не настройкой хостинга.
+    is_admin: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())
 
     @property
     def is_manager(self) -> bool:
@@ -174,7 +180,7 @@ class Task(Base):
 
     assignee_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
     created_by_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
-    # Ответственный руководитель: кто поставил или подтвердил задачу. Ему уходят результаты.
+    # Ответственный начальник: кто поставил или подтвердил задачу. Ему уходят результаты.
     manager_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"))
 
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
@@ -185,7 +191,7 @@ class Task(Base):
     completed_at: Mapped[datetime | None] = mapped_column(DateTime)  # окончательная оценка
 
     ai_score: Mapped[float | None] = mapped_column(Float)     # последняя предложенная оценка
-    final_score: Mapped[float | None] = mapped_column(Float)  # окончательная оценка руководителя
+    final_score: Mapped[float | None] = mapped_column(Float)  # окончательная оценка начальника
     rework_count: Mapped[int] = mapped_column(Integer, default=0)
 
     assignee: Mapped[User] = relationship(foreign_keys=[assignee_id], lazy="joined")
@@ -248,6 +254,11 @@ class Submission(Base):
         lazy="selectin",
         cascade="all, delete-orphan",
     )
+
+    @property
+    def auto_confirmed(self) -> bool:
+        """Оценку AI подтвердил бот (начальник не ответил вовремя — bot.services.auto), а не человек."""
+        return self.decision == ReviewDecision.APPROVED and self.reviewer_id is None and self.reviewed_at is not None
 
 
 class Attachment(Base):

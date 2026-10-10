@@ -1,12 +1,12 @@
-"""Уведомления пользователям: задачи, решения руководителя, сданные результаты, заявки на доступ.
+"""Уведомления пользователям: задачи, решения начальника, сданные результаты, заявки на доступ.
 
 Функции notify_* и send_attachments никогда не бросают исключений: действие пользователя к этому
 моменту уже сохранено, поэтому ошибка доставки только пишется в лог. Тексты — HTML
 (parse_mode по умолчанию у Bot), пользовательский текст экранируется.
 
 Уведомления одному человеку возвращают, доставлено ли сообщение (True/False; None — если упали
-с ошибкой): руководителю нельзя писать «исполнитель получил уведомление», если тот заблокировал
-бота или у него больше нет доступа. notify_proposal возвращает число уведомлённых руководителей.
+с ошибкой): начальнику нельзя писать «исполнитель получил уведомление», если тот заблокировал
+бота или у него больше нет доступа. notify_proposal возвращает число уведомлённых начальников.
 """
 
 from __future__ import annotations
@@ -42,11 +42,13 @@ from bot.db.models import (
     User,
     UserStatus,
 )
+from bot.config import get_settings
+from bot.services import auto
 from bot.services import users as users_svc
 from bot.ui import keyboards, render
 from bot.ui.callbacks import TaskCB
 from bot.utils.dates import fmt_deadline
-from bot.utils.text import esc, fmt_num, truncate
+from bot.utils.text import esc, fmt_num, fmt_pct, truncate
 
 __all__ = [
     "Delivery",
@@ -58,6 +60,8 @@ __all__ = [
     "notify_new_task",
     "notify_proposal",
     "notify_proposal_decision",
+    "notify_proposal_auto_approved",
+    "notify_auto_confirmed",
     "notify_task_changed",
     "notify_task_cancelled",
     "notify_submission",
@@ -219,7 +223,7 @@ def _reachable(user: User | None) -> bool:
 
 
 def responsible_managers(task: Task, managers: Sequence[User]) -> list[User]:
-    """Ответственный руководитель задачи, если он среди активных; иначе — все активные руководители."""
+    """Ответственный начальник задачи, если он среди активных; иначе — все активные начальники."""
     own = [manager for manager in managers if manager.id == task.manager_id]
     return own or list(managers)
 
@@ -244,6 +248,16 @@ def _compose(*blocks: str) -> str:
 
 def _title(task: Task) -> str:
     return f"📌 <b>#{task.id}</b> «{esc(task.title)}»"
+
+
+def _with_assignee(task: Task) -> str:
+    """«📌 #12 «Название» — Иванов И. И.» — строка задачи для начальника."""
+    return f"{_title(task)} — {esc(task.assignee.short_name)}"
+
+
+def _auto_hours() -> str:
+    """«24 ч» — сколько бот ждал решения начальника (AUTO_CONFIRM_HOURS)."""
+    return f"{get_settings().auto_confirm_hours} ч"
 
 
 def _clip(value: object, limit: int = _VALUE_LIMIT) -> str:
@@ -311,14 +325,18 @@ async def notify_new_task(bot: Bot, task: Task) -> bool:
 
 
 @_never_raise
-async def notify_proposal(bot: Bot, session: AsyncSession, task: Task) -> int:
-    """Всем активным руководителям: поручение сотрудника + [✅ Подтвердить] [✏️ Изменить] [❌ Отклонить].
+async def notify_proposal(bot: Bot, session: AsyncSession, task: Task, suggestion: Any = None) -> int:
+    """Всем активным начальникам: поручение сотрудника + [✅ Подтвердить] [✏️ Изменить] [❌ Отклонить].
 
-    -> сколько руководителей получили уведомление.
+    suggestion — подсказка веса (bot.ai.weigh.WeightSuggestion): пояснение AI к весу добавляется в текст
+    (сам предлагаемый вес и время автоматического принятия показывает карточка).
+    -> сколько начальников получили уведомление.
     """
+    note = getattr(suggestion, "note", None) if getattr(suggestion, "source", None) == "ai" else None
     text = _compose(
         "📥 <b>Сотрудник внёс поручение — нужно ваше решение</b>",
         render.task_card(task),
+        f"🤖 AI о весе: {_clip(note, 300)}" if note else "",
         "Подтвердите, измените или отклоните поручение.",
     )
     delivered = 0
@@ -329,18 +347,22 @@ async def notify_proposal(bot: Bot, session: AsyncSession, task: Task) -> int:
 
 
 @_never_raise
-async def notify_proposal_decision(bot: Bot, task: Task, approved: bool, reason: str | None = None) -> bool:
-    """Сотруднику: поручение подтверждено (карточка) или отклонено (с причиной). -> доставлено ли."""
+async def notify_proposal_decision(
+    bot: Bot, task: Task, approved: bool, reason: str | None = None, *, auto_approved: bool = False
+) -> bool:
+    """Сотруднику: поручение подтверждено (карточка) или отклонено (с причиной). -> доставлено ли.
+    auto_approved — поручение принято автоматически (начальник не ответил вовремя)."""
     if not _reachable(task.assignee):
         return False
     if approved:
         text = _compose(
-            "✅ <b>Руководитель подтвердил ваше поручение</b>",
+            "✅ <b>Ваше поручение принято автоматически</b>" if auto_approved
+            else "✅ <b>Начальник подтвердил ваше поручение</b>",
             render.task_card(task, show_assignee=False),
         )
         markup: InlineKeyboardMarkup | None = _open_kb(task)
     else:
-        lines = ["❌ <b>Руководитель отклонил ваше поручение</b>", _title(task)]
+        lines = ["❌ <b>Начальник отклонил ваше поручение</b>", _title(task)]
         if reason:
             lines.append(f"💬 Причина: {_clip(reason, 1000)}")
         text, markup = _compose("\n".join(lines)), None
@@ -349,13 +371,13 @@ async def notify_proposal_decision(bot: Bot, task: Task, approved: bool, reason:
 
 @_never_raise
 async def notify_task_changed(bot: Bot, task: Task, changes: dict[str, tuple]) -> bool:
-    """Исполнителю: какие поля задачи изменил руководитель (было → стало). -> доставлено ли."""
+    """Исполнителю: какие поля задачи изменил начальник (было → стало). -> доставлено ли."""
     if not changes or not _reachable(task.assignee):
         return False
     if task.status == TaskStatus.PROPOSED:
-        header = "✏️ <b>Руководитель скорректировал ваше поручение</b>"
+        header = "✏️ <b>Начальник скорректировал ваше поручение</b>"
     else:
-        header = "✏️ <b>Руководитель изменил задачу</b>"
+        header = "✏️ <b>Начальник изменил задачу</b>"
     text = _compose(f"{header}\n{_title(task)}", "\n".join(_change_lines(changes, task.plan_unit)))
     return await safe_send(bot, task.assignee.tg_id, text, reply_markup=_open_kb(task)) is not None
 
@@ -365,11 +387,29 @@ async def notify_task_cancelled(bot: Bot, task: Task, reason: str | None = None)
     """Исполнителю: задача отменена, сдавать результат не нужно. -> доставлено ли."""
     if not _reachable(task.assignee):
         return False
-    lines = ["🚫 <b>Задача отменена руководителем</b>", _title(task)]
+    lines = ["🚫 <b>Задача отменена начальником</b>", _title(task)]
     if reason:
         lines.append(f"💬 Причина: {_clip(reason, 1000)}")
     lines.append("Сдавать результат по ней не нужно.")
     return await safe_send(bot, task.assignee.tg_id, _compose("\n".join(lines))) is not None
+
+
+@_never_raise
+async def notify_proposal_auto_approved(bot: Bot, session: AsyncSession, task: Task, source: str) -> None:
+    """Поручение принято автоматически: сотруднику — карточка задачи, всем активным начальникам — что
+    произошло и с каким весом (source: "ai" — вес предложил AI) + [📋 Открыть]."""
+    await notify_proposal_decision(bot, task, True, auto_approved=True)
+    by = " (предложил AI)" if source == "ai" else ""
+    text = _compose(
+        "\n".join([
+            "⏱ <b>Поручение принято автоматически</b>",
+            _with_assignee(task),
+            f"⚖️ Вес: <b>{task.weight} %</b>{by} · приоритет: {render.PRIORITY_LABELS.get(task.priority, task.priority)}",
+            f"Решения не было {_auto_hours()}. Вес, приоритет и срок можно поправить: «📋 Открыть» → «✏️ Изменить».",
+        ])
+    )
+    for manager in await users_svc.list_managers(session):
+        await safe_send(bot, manager.tg_id, text, reply_markup=task_button_kb(task, "📋 Открыть", "open"))
 
 
 # --- Сдача и проверка результата ---------------------------------------------------------------
@@ -377,10 +417,10 @@ async def notify_task_cancelled(bot: Bot, task: Task, reason: str | None = None)
 
 @_never_raise
 async def notify_submission(bot: Bot, session: AsyncSession, task: Task, sub: Submission) -> None:
-    """Руководителю задачи (или всем активным руководителям): план ↔ факт + кнопки проверки, затем файлы."""
+    """Начальнику задачи (или всем активным начальникам): план ↔ факт + кнопки проверки, затем файлы."""
     recipients = responsible_managers(task, await users_svc.list_managers(session))
     if not recipients:
-        log.warning("Некому проверить результат по задаче #%s: нет активных руководителей", task.id)
+        log.warning("Некому проверить результат по задаче #%s: нет активных начальников", task.id)
         return
     text = render.submission_text(task, sub)
     markup = keyboards.review_kb(sub)
@@ -392,11 +432,30 @@ async def notify_submission(bot: Bot, session: AsyncSession, task: Task, sub: Su
 
 @_never_raise
 async def notify_review_result(bot: Bot, task: Task, sub: Submission) -> bool:
-    """Исполнителю: итоговая оценка, решение и комментарий руководителя. -> доставлено ли."""
+    """Исполнителю: итоговая оценка, решение и комментарий начальника. -> доставлено ли."""
     if not _reachable(task.assignee):
         return False
     text = render.review_result_text(task, sub)
     return await safe_send(bot, task.assignee.tg_id, text, reply_markup=_open_kb(task)) is not None
+
+
+@_never_raise
+async def notify_auto_confirmed(bot: Bot, session: AsyncSession, task: Task, sub: Submission) -> None:
+    """Оценка подтверждена автоматически: исполнителю — итог, начальнику задачи (или всем активным) — что
+    произошло и до какого времени оценку можно изменить + [✏️ Изменить оценку] [📋 Открыть]."""
+    if _reachable(task.assignee):
+        await safe_send(bot, task.assignee.tg_id, render.review_result_text(task, sub), reply_markup=_open_kb(task))
+    lines = [
+        f"⏱ <b>Оценка подтверждена автоматически: {fmt_pct(sub.final_score)}</b>",
+        _with_assignee(task),
+        f"Решения не было {_auto_hours()} — оценка AI стала итоговой.",
+    ]
+    until = auto.revise_until(sub)
+    if until is not None:
+        lines.append(f"Изменить её можно до {render.auto_when(until)} — кнопкой ниже.")
+    text = _compose("\n".join(lines))
+    for manager in responsible_managers(task, await users_svc.list_managers(session)):
+        await safe_send(bot, manager.tg_id, text, reply_markup=keyboards.auto_confirmed_kb(task, sub))
 
 
 @_never_raise
@@ -416,7 +475,7 @@ async def notify_rework(bot: Bot, task: Task, sub: Submission) -> bool:
 
 @_never_raise
 async def notify_registration(bot: Bot, session: AsyncSession, user: User) -> None:
-    """Всем активным руководителям: новая заявка на доступ + [✅ Подтвердить] [❌ Отклонить]."""
+    """Всем активным начальникам: новая заявка на доступ + [✅ Подтвердить] [❌ Отклонить]."""
     lines = [
         "👤 <b>Новая заявка на доступ к боту</b>",
         "",
@@ -434,18 +493,18 @@ async def notify_registration(bot: Bot, session: AsyncSession, user: User) -> No
 async def notify_user_decision(bot: Bot, user: User, approved: bool) -> bool:
     """Пользователю: доступ открыт (+ главное меню) или заявка отклонена (меню убирается).
 
-    Возвращает True, если сообщение доставлено: руководителю не стоит писать «пользователю отправлено
+    Возвращает True, если сообщение доставлено: начальнику не стоит писать «пользователю отправлено
     уведомление», если тот заблокировал бота. Исключений не бросает.
     """
     if approved:
-        role = "руководитель" if user.role == Role.MANAGER else "сотрудник"
+        role = "начальник" if user.role == Role.MANAGER else "сотрудник"
         text = (
             "✅ <b>Доступ к боту открыт!</b>\n"
             f"Ваша роль: {role}.\n\n"
             "Воспользуйтесь меню внизу 👇 Как всё устроено — /help."
         )
     else:
-        text = "❌ Заявка на доступ отклонена руководителем.\nЕсли это ошибка — обратитесь к руководителю."
+        text = "❌ Заявка на доступ отклонена начальником.\nЕсли это ошибка — обратитесь к начальнику."
     try:
         return await safe_send(bot, user.tg_id, text, reply_markup=keyboards.main_menu(user)) is not None
     except Exception:

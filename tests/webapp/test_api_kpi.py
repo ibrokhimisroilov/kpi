@@ -123,7 +123,7 @@ async def test_user_kpi_access_and_history(ma: MiniApp, frozen: Any) -> None:
         user = await session.get(type(emp3), emp3.id)
         user.status = "blocked"
         await session.commit()
-    # Руководитель — любой, в т.ч. заблокированный; сотрудник — только себя.
+    # Начальник — любой, в т.ч. заблокированный; сотрудник — только себя.
     resp = await ma.get(f"/api/users/{emp3.id}/kpi", as_=MGR)
     assert resp.status == 200 and resp["scope"] == "user" and resp["user"]["status"] == "blocked"
     assert (await ma.get(f"/api/users/{emp2.id}/kpi", as_=EMP)).status == 403

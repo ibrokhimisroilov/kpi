@@ -9,8 +9,9 @@ from __future__ import annotations
 
 import logging
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+from typing import Any
 
 from sqlalchemy import and_, delete, or_, select
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
@@ -37,8 +38,10 @@ KIND_OVERDUE_MANAGER = "overdue_manager"
 class Reminder:
     """Напоминание к отправке.
 
-    reason: before_days | before_hours | deadline_passed | overdue_daily | overdue_manager | review_pending.
+    reason: before_days | before_hours | deadline_passed | overdue_daily | overdue_manager | review_pending |
+            auto_score | auto_proposal (скоро автоподтверждение — их собирает bot.scheduler.jobs).
     days_left: дней до срока (отрицательное — просрочка); для review_pending — None.
+    data: дополнительные сведения для текста (auto_*: due — когда сработает, source — чей вес).
     """
 
     task: Task
@@ -46,6 +49,7 @@ class Reminder:
     recipient: str   # "employee" | "manager"
     reason: str
     days_left: float | None = None
+    data: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -79,7 +83,7 @@ async def due_reminders(session: AsyncSession, now: datetime | None = None) -> l
     now = naive_utc(now or utcnow())  # колонки — naive UTC; aware-дату PostgreSQL не примет
     thresholds = _before_thresholds()
     open_tasks, review_tasks = await _candidate_tasks(session, now, thresholds)
-    sent = await _sent_kinds(session, [t.id for t in (*open_tasks, *review_tasks)])
+    sent = await sent_kinds(session, [t.id for t in (*open_tasks, *review_tasks)])
 
     reminders: list[Reminder] = []
     skipped_all: list[tuple[int, str]] = []
@@ -127,7 +131,7 @@ async def _candidate_tasks(
     return open_tasks, review_tasks
 
 
-async def _sent_kinds(session: AsyncSession, task_ids: list[int]) -> defaultdict[int, set[str]]:
+async def sent_kinds(session: AsyncSession, task_ids: list[int]) -> defaultdict[int, set[str]]:
     """{task_id: {kind, ...}} — уже отправленные напоминания."""
     sent: defaultdict[int, set[str]] = defaultdict(set)
     if task_ids:
@@ -153,7 +157,7 @@ def _before_deadline(
 
 
 def _overdue_reminders(task: Task, now: datetime, sent: set[str]) -> tuple[list[Reminder], list[str]]:
-    """«Срок истёк» сотруднику, «просрочена» руководителю и ежедневное напоминание о просрочке.
+    """«Срок истёк» сотруднику, «просрочена» начальнику и ежедневное напоминание о просрочке.
 
     Ежедневное не шлётся в тот местный день, когда ушло «срок истёк»: его ключ за этот день
     помечается отправленным вместе с «срок истёк».

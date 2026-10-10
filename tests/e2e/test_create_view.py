@@ -1,6 +1,6 @@
-"""Сценарии «руководитель ставит задачу» и «задачи: списки, карточка, правка, отмена» (SPEC 7.3, 7.5).
+"""Сценарии «начальник ставит задачу» и «задачи: списки, карточка, правка, отмена» (SPEC 7.3, 7.5).
 
-Пример из ТЗ: руководитель выбирает сотрудника и указывает
+Пример из ТЗ: начальник выбирает сотрудника и указывает
 «Задача: провести анализ договоров → Ожидаемый результат: проверить 100 договоров и представить
 отчёт → Срок: 5 октября → Вес: 20 %». Бот помогает сделать результат измеримым (AI или правила),
 сотрудник получает уведомление и нажимает «✅ Принял в работу».
@@ -36,7 +36,7 @@ pytestmark = pytest.mark.asyncio
 MGR = MANAGER_TG_ID
 EMP = 2001   # Иванов Иван Иванович
 EMP2 = 2002  # Сидоров Пётр Ильич
-MGR2 = 1002  # второй руководитель (заведён в БД напрямую)
+MGR2 = 1002  # второй начальник (заведён в БД напрямую)
 
 NO_RIGHTS = "⛔ Недостаточно прав для этого действия."
 STALE = "Эта кнопка уже неактуальна"
@@ -81,7 +81,7 @@ def ai_answer(expected: str, plan_value: float | None = None, plan_unit: str | N
 
 
 async def team(h: BotHarness) -> tuple[User, User, User]:
-    """Руководитель (уже нажал /start, меню показано) и два активных сотрудника."""
+    """Начальник (уже нажал /start, меню показано) и два активных сотрудника."""
     mgr = await h.seed_user(MGR, "Петрова Анна Сергеевна", role="manager")
     emp = await h.seed_user(EMP, "Иванов Иван Иванович", position="Юрист")
     emp2 = await h.seed_user(EMP2, "Сидоров Пётр Ильич")
@@ -160,7 +160,7 @@ async def seed_task(
     plan_value: float | None = None,
     plan_unit: str | None = None,
 ) -> int:
-    """Задача, поставленная руководителем MGR, — через сервисы (как если бы её поставили раньше)."""
+    """Задача, поставленная начальником MGR, — через сервисы (как если бы её поставили раньше)."""
     async with h.db() as s:
         mgr = await s.scalar(select(User).where(User.tg_id == MGR))
         emp = await s.scalar(select(User).where(User.tg_id == assignee_tg))
@@ -196,7 +196,7 @@ async def seed_task(
 
 
 async def test_manager_sets_tz_example_task_with_ai_and_employee_accepts(app, monkeypatch):
-    """Руководитель ставит задачу из ТЗ: AI делает результат измеримым, сотрудник принимает задачу.
+    """Начальник ставит задачу из ТЗ: AI делает результат измеримым, сотрудник принимает задачу.
 
     «Провести анализ договоров» → «проверить 100 договоров и представить отчёт» → AI предлагает
     формулировку с планом «100 договоров» → «✅ Принять» → срок «5 октября» → 🔴 Высокий → вес 20 %
@@ -227,7 +227,7 @@ async def test_manager_sets_tz_example_task_with_ai_and_employee_accepts(app, mo
     assert f"Вы написали: {TZ_RESULT}" in shown
     assert h.buttons(MGR) == ["✅ Принять", "🔁 Другой вариант", "✏️ Свой вариант",
                               "📝 Оставить как написал", "✖️ Отмена"]
-    # В запросе к AI — название и слова руководителя.
+    # В запросе к AI — название и слова начальника.
     assert len(ai.prompts) == 1 and TZ_TITLE in ai.prompts[0] and TZ_RESULT in ai.prompts[0]
 
     # План известен из подсказки — шаг «плановое число» пропускается.
@@ -275,7 +275,7 @@ async def test_manager_sets_tz_example_task_with_ai_and_employee_accepts(app, mo
     [task] = await all_tasks(h)
     assert task.title == TZ_TITLE
     assert task.expected_result == AI_RESULT
-    assert task.description == TZ_RESULT  # исходные слова руководителя сохранены
+    assert task.description == TZ_RESULT  # исходные слова начальника сохранены
     assert (task.plan_value, task.plan_unit) == (100, "договоров")
     assert task.deadline == expected_deadline
     assert (task.priority, task.weight) == (Priority.HIGH, 20)
@@ -337,7 +337,7 @@ async def test_ai_other_variant_is_shown_escaped_and_accepted(app, monkeypatch):
 
 async def test_ai_unavailable_on_retry_falls_back_to_manager_words(app, monkeypatch):
     """Бесплатный лимит Gemini кончился на «Другом варианте» — бот честно говорит, что AI недоступен,
-    и показывает подсказку по правилам из слов руководителя (без служебного «Предыдущий вариант»)."""
+    и показывает подсказку по правилам из слов начальника (без служебного «Предыдущий вариант»)."""
     h = app
     FakeGemini(monkeypatch, ai_answer(AI_RESULT, 100, "договоров"), AIUnavailable("429 quota"))
     await team(h)
@@ -420,7 +420,7 @@ async def test_keep_own_words_without_number_asks_plan_number(app, monkeypatch):
     await h.press_button(MGR, "Создать")
     [task] = await all_tasks(h)
     assert task.expected_result == raw
-    assert task.description is None  # формулировка совпадает со словами руководителя
+    assert task.description is None  # формулировка совпадает со словами начальника
     assert (task.plan_value, task.plan_unit) == (12, "отчётов")
     assert task.priority == Priority.LOW
 
@@ -739,7 +739,7 @@ async def test_employee_cannot_set_tasks(app):
 
 
 async def test_manager_demoted_mid_dialog_loses_access(app):
-    """Руководителя понизили до сотрудника посреди диалога — следующий ввод отклоняется, диалог закрыт."""
+    """Начальника понизили до сотрудника посреди диалога — следующий ввод отклоняется, диалог закрыт."""
     h = app
     await team(h)
     await reach_result_step(h)
@@ -844,7 +844,7 @@ async def test_buttons_of_old_steps_do_not_change_draft(app):
 
 
 async def test_assignee_blocked_before_create(app):
-    """Сотрудника заблокировали, пока руководитель заполнял черновик: создать нельзя, бот объясняет;
+    """Сотрудника заблокировали, пока начальник заполнял черновик: создать нельзя, бот объясняет;
     после смены исполнителя задача создаётся. Недоступного сотрудника нельзя выбрать и кнопкой."""
     h = app
     _, emp, emp2 = await team(h)
@@ -887,7 +887,7 @@ async def test_double_press_create_makes_one_task(app):
 
 
 async def test_employee_who_blocked_bot_still_gets_task(app):
-    """Сотрудник заблокировал бота — задача всё равно создаётся, руководитель видит подтверждение."""
+    """Сотрудник заблокировал бота — задача всё равно создаётся, начальник видит подтверждение."""
     h = app
     await team(h)
     h.api.blocked_chats.add(EMP)
@@ -957,7 +957,7 @@ async def test_employee_sees_only_own_tasks_by_tabs(app):
 
 
 async def test_manager_sees_all_tasks_with_assignee_and_pages(app):
-    """«📋 Задачи» у руководителя: все задачи с исполнителем, по 8 на страницу с листанием;
+    """«📋 Задачи» у начальника: все задачи с исполнителем, по 8 на страницу с листанием;
     во вкладке «Все» видны и отменённые."""
     h = app
     await team(h)
@@ -1016,7 +1016,7 @@ async def test_manager_opens_one_employee_tasks(app):
 
 
 async def test_task_card_differs_by_role_and_back_returns_to_tab(app):
-    """Карточка задачи: руководитель видит исполнителя и кнопки «Изменить/Отменить», исполнитель —
+    """Карточка задачи: начальник видит исполнителя и кнопки «Изменить/Отменить», исполнитель —
     «Принял в работу/Сдать результат». «◀ К списку задач» возвращает на ту же вкладку."""
     h = app
     await team(h)
@@ -1108,7 +1108,7 @@ async def test_task_history_shows_lifecycle(app):
 
 
 # =============================================================================================
-# 3. Правка и отмена задачи руководителем
+# 3. Правка и отмена задачи начальником
 # =============================================================================================
 
 
@@ -1120,7 +1120,7 @@ async def open_edit(h: BotHarness, task_id: int, field: str) -> str:
 
 
 async def test_manager_moves_deadline_and_employee_is_notified(app):
-    """Руководитель переносит срок (текстом, затем кнопкой): непонятный срок — переспрос,
+    """Начальник переносит срок (текстом, затем кнопкой): непонятный срок — переспрос,
     исполнитель получает «было → стало», изменение записано в журнал."""
     h = app
     await team(h)
@@ -1145,7 +1145,7 @@ async def test_manager_moves_deadline_and_employee_is_notified(app):
     assert card.startswith("✅ Изменено: срок. Исполнитель получил уведомление.")
     assert f"📅 Срок: {fmt_deadline(new)}" in card
     changed = log.to(EMP).text
-    assert "✏️ Руководитель изменил задачу" in changed
+    assert "✏️ Начальник изменил задачу" in changed
     assert f"• Срок: {fmt_deadline(old)} → {fmt_deadline(new)}" in changed
     assert h.buttons(EMP) == ["📤 Сдать результат", "📋 Открыть"]
     assert (await h.get_task(task_id)).deadline == new
@@ -1241,7 +1241,7 @@ async def test_manager_rewrites_result_and_plan(app):
 
 async def test_finished_task_cannot_be_edited(app):
     """Задачу на проверке изменить нельзя: в карточке нет «Изменить», подделанная кнопка — отказ;
-    если исполнитель сдал результат, пока руководитель правил, правка не применяется."""
+    если исполнитель сдал результат, пока начальник правил, правка не применяется."""
     h = app
     _, emp, _ = await team(h)
     submitted = await seed_task(h, EMP, "Отчёт за месяц", status=TaskStatus.SUBMITTED)
@@ -1293,7 +1293,7 @@ async def test_manager_cancels_task_with_reason(app):
     assert h.buttons(MGR) == ["📜 История", "◀ К списку задач"]
     assert log.alert is None  # ответ текстом, не нажатием
     emp_text = log.to(EMP).text
-    assert "🚫 Задача отменена руководителем" in emp_text
+    assert "🚫 Задача отменена начальником" in emp_text
     assert f"💬 Причина: {reason}" in emp_text
     assert "Сдавать результат по ней не нужно." in emp_text
 
@@ -1329,19 +1329,19 @@ async def test_cancel_can_be_declined_or_done_without_reason(app):
     await h.press(MGR, yes, confirm_id)
     log = await h.press_button(MGR, "Без причины")
     assert log.alert == "Задача отменена 🚫"
-    assert "Причина" not in log.to(EMP).text and "🚫 Задача отменена руководителем" in log.to(EMP).text
+    assert "Причина" not in log.to(EMP).text and "🚫 Задача отменена начальником" in log.to(EMP).text
     assert (await h.get_task(task_id)).status == TaskStatus.CANCELLED
 
     log = await h.press(MGR, yes, confirm_id)
     assert log.answers and log.alert
     log = await h.press(MGR, TaskCB(action="cancel", task_id=task_id))
     assert log.alert == "Задачу уже нельзя отменить — она завершена или отменена."
-    assert sum("отменена руководителем" in text for text in h.sent_to(EMP)) == 1
+    assert sum("отменена начальником" in text for text in h.sent_to(EMP)) == 1
 
 
 async def test_employee_history_hides_ai_score_until_review(app):
-    """Пока руководитель не проверил результат, исполнитель не видит предварительную оценку AI —
-    ни в карточке, ни в истории задачи. Руководитель видит её в истории сразу."""
+    """Пока начальник не проверил результат, исполнитель не видит предварительную оценку AI —
+    ни в карточке, ни в истории задачи. Начальник видит её в истории сразу."""
     h = app
     await team(h)
     task_id = await seed_task(h, EMP, "Анализ договоров", status=TaskStatus.SUBMITTED, score=87)
@@ -1386,7 +1386,7 @@ async def test_edit_by_text_priority_percent_plan_and_long_title(app):
 
 
 async def test_second_manager_cancelled_task_meanwhile(app):
-    """Два руководителя: второй начал отменять задачу, а первый уже отменил её — второй получает
+    """Два начальника: второй начал отменять задачу, а первый уже отменил её — второй получает
     понятный отказ, исполнитель получает одно уведомление, изменить отменённую задачу нельзя."""
     h = app
     await team(h)
@@ -1406,7 +1406,7 @@ async def test_second_manager_cancelled_task_meanwhile(app):
     assert log.alert == "Задачу уже нельзя отменить — она завершена или отменена."
     assert h.buttons(MGR2) == []
     assert await h.get_state(MGR2) is None
-    assert sum("отменена руководителем" in text for text in h.sent_to(EMP)) == 1
+    assert sum("отменена начальником" in text for text in h.sent_to(EMP)) == 1
 
     await h.press(MGR2, TaskCB(action="open", task_id=task_id))
     assert "🚫 Отменена" in h.last_text(MGR2)
@@ -1485,7 +1485,7 @@ class HangingGemini:
 
 
 async def stop_bot_mid_ai(h: BotHarness, monkeypatch: pytest.MonkeyPatch, text: str) -> None:
-    """Руководитель отправил свои слова, AI думает — и бот останавливается: обработка апдейта
+    """Начальник отправил свои слова, AI думает — и бот останавливается: обработка апдейта
     прерывается (так делает web._drain при остановке на хостинге). Состояние диалога — в БД."""
     ai = HangingGemini(monkeypatch)
     pending = asyncio.create_task(h.send_text(MGR, text))
@@ -1498,7 +1498,7 @@ async def stop_bot_mid_ai(h: BotHarness, monkeypatch: pytest.MonkeyPatch, text: 
 
 async def test_bot_stopped_while_ai_formulates_result_draft_is_not_frozen(app, monkeypatch):
     """Мягкая остановка посреди запроса к AI: черновик не «замерзает» на «⏳ Подождите…» —
-    следующее сообщение руководителя показывает вариант по его словам с кнопками, мастер продолжается."""
+    следующее сообщение начальника показывает вариант по его словам с кнопками, мастер продолжается."""
     h = app
     await team(h)
     await reach_result_step(h)

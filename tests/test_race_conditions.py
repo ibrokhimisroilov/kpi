@@ -1,4 +1,4 @@
-"""Гонки: два руководителя (или руководитель и сотрудник) действуют над одной задачей одновременно.
+"""Гонки: два начальника (или начальник и сотрудник) действуют над одной задачей одновременно.
 
 Бот обрабатывает апдейты разных пользователей параллельно, каждый — в своей сессии БД. Тесты
 воспроизводят это двумя сессиями к одной файловой SQLite (как в проде: WAL, отдельные соединения):
@@ -58,14 +58,14 @@ DECISION_EVENTS = {
 }
 
 
-# --- Офис: файловая БД, два руководителя и сотрудник ----------------------------------------------
+# --- Офис: файловая БД, два начальника и сотрудник ----------------------------------------------
 
 
 @dataclass
 class Office:
     sm: async_sessionmaker[AsyncSession]
     boss_id: int      # Петров — поставил задачу (ADMIN_IDS)
-    deputy_id: int    # Смирнова — второй руководитель
+    deputy_id: int    # Смирнова — второй начальник
     employee_id: int  # Иванов — исполнитель
 
 
@@ -393,7 +393,7 @@ async def test_proposal_rejected_after_other_manager_approved(office: Office, cl
     [("approve", "approve"), ("approve", "reject"), ("reject", "reject"), ("approve", "cancel")],
 )
 async def test_two_managers_decide_proposal_simultaneously(office: Office, clock, first: str, second: str) -> None:
-    """Оба руководителя одновременно решают по одному поручению: срабатывает одно решение."""
+    """Оба начальника одновременно решают по одному поручению: срабатывает одно решение."""
     task_id = await proposed_task(office, clock)
     moves = proposal_moves(task_id)
     results = await at_once(
@@ -420,7 +420,7 @@ async def test_two_managers_decide_proposal_simultaneously(office: Office, clock
 
 
 async def test_two_managers_cancel_same_task(office: Office, clock) -> None:
-    """Оба руководителя одновременно отменяют одну задачу: отмена одна, второй — «уже нельзя отменить»."""
+    """Оба начальника одновременно отменяют одну задачу: отмена одна, второй — «уже нельзя отменить»."""
     task_id = await active_task(office, clock)
     action: Action = lambda s, m: svc.cancel_task(s, task_id, m, "Неактуально")  # noqa: E731
     results = await at_once(office, task_screen(task_id), (office.boss_id, action), (office.deputy_id, action))
@@ -467,7 +467,7 @@ async def test_cancel_confirmed_after_employee_submitted(office: Office, clock) 
 
 
 async def test_submission_uses_deadline_changed_meanwhile(office: Office, clock) -> None:
-    """Иванов открыл сдачу, руководитель тем временем перенёс срок на неделю вперёд. Сдача после
+    """Иванов открыл сдачу, начальник тем временем перенёс срок на неделю вперёд. Сдача после
     старого срока, но до нового — не считается просроченной."""
     task_id = await active_task(office, clock)
     async with screen(office, office.employee_id, task_id) as employee:
@@ -489,7 +489,7 @@ async def test_submission_uses_deadline_changed_meanwhile(office: Office, clock)
 
 @pytest.mark.parametrize(("first", "second"), [("approve", "reject"), ("approve", "approve"), ("reject", "reject")])
 async def test_two_managers_decide_registration_simultaneously(office: Office, first: str, second: str) -> None:
-    """Заявка Кузнецовой пришла обоим руководителям, оба одновременно нажали кнопки в уведомлении.
+    """Заявка Кузнецовой пришла обоим начальникам, оба одновременно нажали кнопки в уведомлении.
     Срабатывает одно решение; второй получает «Заявка уже обработана» — сотрудница не может оказаться
     заблокированной сразу после сообщения «Доступ открыт»."""
     async with office.sm() as s:
@@ -515,7 +515,7 @@ async def test_two_managers_decide_registration_simultaneously(office: Office, f
 
 
 async def test_two_managers_block_same_employee(office: Office) -> None:
-    """Оба руководителя одновременно блокируют Иванова: блокировка одна, второй — «Пользователь уже заблокирован»."""
+    """Оба начальника одновременно блокируют Иванова: блокировка одна, второй — «Пользователь уже заблокирован»."""
     action: Action = lambda s, m: users.block_user(s, office.employee_id, m)  # noqa: E731
     results = await at_once(
         office, lambda s: users.get_user(s, office.employee_id), (office.boss_id, action), (office.deputy_id, action)
@@ -525,7 +525,7 @@ async def test_two_managers_block_same_employee(office: Office) -> None:
 
 
 # =====================================================================================================
-# Целиком через бота: два руководителя одновременно жмут «✅ Подтвердить»
+# Целиком через бота: два начальника одновременно жмут «✅ Подтвердить»
 # =====================================================================================================
 
 BOSS, DEPUTY, EMP = 1001, 1002, 2001

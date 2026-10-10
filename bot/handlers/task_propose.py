@@ -1,10 +1,10 @@
-"""Поручения, внесённые сотрудником, и их подтверждение руководителем (SPEC 7.4).
+"""Поручения, внесённые сотрудником, и их подтверждение начальником (SPEC 7.4).
 
 Сотрудник («➕ Добавить поручение», /propose) вносит устное поручение:
 название -> ожидаемый результат (AI-подсказка, как при постановке задачи) -> план (если нужно) ->
-срок -> сводка -> propose_task -> commit -> notify_proposal руководителям.
+срок -> сводка -> propose_task -> commit -> notify_proposal начальникам.
 
-Руководитель («📥 Предложения», /proposals, ListCB("proposals"), кнопки proposal_kb / task_actions_kb):
+Начальник («📥 Предложения», /proposals, ListCB("proposals"), кнопки proposal_kb / task_actions_kb):
 * TaskCB("approve") -> вес -> приоритет -> approve_proposal -> commit -> notify_proposal_decision(True);
 * TaskCB("reject")  -> причина (или «Пропустить») -> reject_proposal -> commit -> notify_proposal_decision(False);
 * TaskCB("pedit")   -> поле -> значение -> update_task -> commit -> notify_task_changed -> карточка + proposal_kb.
@@ -37,6 +37,7 @@ from bot.ai.provider import ai_available
 from bot.db.models import Priority, Role, Task, TaskStatus, User, UserStatus
 from bot.filters import IsEmployee, IsManager, TextInput
 from bot.handlers import common
+from bot.services import proposal_flow
 from bot.services import tasks as tasks_svc
 from bot.services.errors import DomainError
 from bot.ui import keyboards, render
@@ -81,7 +82,7 @@ DEADLINE_EXAMPLES = (
 )
 PLAN_EXAMPLE = "<i>100 договоров</i>, <i>15 встреч</i>, <i>95 %</i>"
 
-# Поля, которые можно изменить в черновике (сотрудник) и в предложении (руководитель).
+# Поля, которые можно изменить в черновике (сотрудник) и в предложении (начальник).
 EDIT_FIELDS: list[tuple[str, str]] = [
     ("title", "Название"),
     ("result", "Ожидаемый результат"),
@@ -105,9 +106,9 @@ _PLAN_UNIT_RE = re.compile(
     r"(?P<unit>%|[^\W\d_]+(?:-[^\W\d_]+)*)?"
 )
 
-# Апдейты разных руководителей обрабатываются параллельно, и двое могут решать по одному
+# Апдейты разных начальников обрабатываются параллельно, и двое могут решать по одному
 # предложению одновременно. Свежая проверка статуса, запись решения и commit идут под этим
-# замком: второй руководитель дождётся коммита первого и получит «Предложение уже обработано».
+# замком: второй начальник дождётся коммита первого и получит «Предложение уже обработано».
 # Внутри — только короткая работа с БД, без сообщений в Telegram.
 _decision_lock = asyncio.Lock()
 
@@ -126,7 +127,7 @@ class ProposeTaskSG(StatesGroup):
 
 
 class DecideProposalSG(StatesGroup):
-    """Руководитель решает по предложению сотрудника."""
+    """Начальник решает по предложению сотрудника."""
 
     weight = State()
     priority = State()
@@ -279,7 +280,7 @@ def _task_head(task: Task) -> str:
 
 STEP_TITLE = (
     "➕ <b>Новое поручение</b>\n\n"
-    "Если поручение было дано устно или лично — внесите его, руководитель подтвердит.\n"
+    "Если поручение было дано устно или лично — внесите его, начальник подтвердит.\n"
     "Так все поручения фиксируются в одной системе и войдут в вашу оценку эффективности.\n\n"
     "<b>Шаг 1/3.</b> Как называется задача? Коротко, до 255 символов.\n"
     "Например: <i>Анализ договоров поставщиков</i>"
@@ -294,7 +295,7 @@ async def propose_start(message: Message, state: FSMContext) -> None:
     await _show(message, state, STEP_TITLE, keyboards.cancel_kb())
 
 
-# Роль сменили посреди черновика (повысили до руководителя) или черновик остался от прошлой роли:
+# Роль сменили посреди черновика (повысили до начальника) или черновик остался от прошлой роли:
 # шаги ниже роль не проверяют, поэтому сначала — этот перехватчик. Блокировку ловит start.py,
 # а users_admin при смене роли сам сбрасывает диалог; здесь — страховка на случай, если не удалось.
 
@@ -713,7 +714,7 @@ def _draft_text(data: dict[str, Any]) -> str:
         f"⏰ <b>Срок:</b> {fmt_deadline(deadline) if deadline else '—'}",
         "👤 <b>Исполнитель:</b> вы",
         "",
-        "Руководитель подтвердит поручение (укажет вес и приоритет) или скорректирует его.",
+        "Начальник подтвердит поручение (укажет вес и приоритет) или скорректирует его.",
     ]
     return "\n".join(lines)
 
@@ -722,7 +723,7 @@ async def _show_summary(event: Message | CallbackQuery, state: FSMContext) -> No
     await state.set_state(ProposeTaskSG.confirm)
     await state.update_data(editing=False)
     data = await state.get_data()
-    await _show(event, state, _draft_text(data), keyboards.confirm_kb("📤 Отправить руководителю"))
+    await _show(event, state, _draft_text(data), keyboards.confirm_kb("📤 Отправить начальнику"))
 
 
 @router.callback_query(ProposeTaskSG.confirm, PickCB.filter(F.field == "confirm"))
@@ -785,18 +786,20 @@ async def propose_confirm(
 
     await session.commit()
     await callback.answer("📤 Отправлено")
-    notified = await _safe_notify(notify.notify_proposal(bot, session, task))
+    # Вес поручения подбирает AI (несколько секунд) — затем уведомление начальникам с этой подсказкой.
+    async with progress.typing(bot, _chat_id(callback)):
+        notified = await proposal_flow.run_after_propose(bot, session, task)
     if notified:
         head = (
-            f"📤 <b>Поручение #{task.id} отправлено руководителю на подтверждение.</b>\n"
-            "Когда руководитель подтвердит или скорректирует его, я пришлю уведомление."
+            f"📤 <b>Поручение #{task.id} отправлено начальнику на подтверждение.</b>\n"
+            "Когда начальник подтвердит или скорректирует его, я пришлю уведомление."
         )
     else:
-        # Руководителей в боте нет (или ни до кого не дошло): не обещать, что поручение уже у руководителя.
+        # Начальников в боте нет (или ни до кого не дошло): не обещать, что поручение уже у начальника.
         head = (
-            f"📥 <b>Поручение #{task.id} сохранено</b>, но уведомить руководителя сейчас не удалось — "
-            "в боте нет активного руководителя.\n"
-            "Поручение ждёт в «📥 Предложения»; сообщите руководителю о нём лично."
+            f"📥 <b>Поручение #{task.id} сохранено</b>, но уведомить начальника сейчас не удалось — "
+            "в боте нет активного начальника.\n"
+            "Поручение ждёт в «📥 Предложения»; сообщите начальнику о нём лично."
         )
     await common.edit_or_answer(
         callback,
@@ -845,7 +848,7 @@ async def propose_edit_back(callback: CallbackQuery, state: FSMContext) -> None:
 
 
 # =============================================================================================
-#  Руководитель: «📥 Предложения»
+#  Начальник: «📥 Предложения»
 # =============================================================================================
 
 
@@ -936,7 +939,7 @@ async def _load_proposal(
 async def _decision_task(
     event: Message | CallbackQuery, state: FSMContext, session: AsyncSession, user: User | None
 ) -> Task | None:
-    """Задача из FSM руководителя; если прав нет или предложение уже обработано — сообщить и сбросить диалог."""
+    """Задача из FSM начальника; если прав нет или предложение уже обработано — сообщить и сбросить диалог."""
     data = await state.get_data()
     task = await tasks_svc.get_task(session, int(data.get("task_id") or 0))
     problem: str | None = None
@@ -977,7 +980,7 @@ async def proposal_approve(
         return
     # Те же проверки, что сделает approve_proposal, — но сразу, а не после выбора веса и приоритета.
     if not _is_active_employee(task.assignee):
-        # Своё поручение видит руководитель, которого повысили из сотрудников.
+        # Своё поручение видит начальник, которого повысили из сотрудников.
         await callback.answer(OWN_PROPOSAL if task.assignee_id == user.id else ASSIGNEE_INACTIVE, show_alert=True)
         return
     if task.deadline <= utcnow():
@@ -1005,7 +1008,9 @@ async def _ask_weight(
         f"Сейчас у сотрудника на неделе срока: <b>{load} %</b>. "
         "Рекомендуется, чтобы сумма весов за неделю была ≈100 %.",
     ]
-    await _show(event, state, "\n".join(lines), keyboards.weight_kb(load))
+    # Вес у поручения пока временный — это подсказка (AI или по умолчанию), она отмечена «💡».
+    lines.append(f"💡 Предлагаемый вес: <b>{task.weight} %</b>.")
+    await _show(event, state, "\n".join(lines), keyboards.weight_kb(load, suggested=task.weight))
 
 
 async def _set_weight(event: Message | CallbackQuery, state: FSMContext, task: Task, weight: int) -> None:
@@ -1322,7 +1327,7 @@ async def _apply_edit(
     """update_task -> commit -> notify_task_changed -> карточка с proposal_kb. Ошибка — переспросить."""
     try:
         async with _decision_lock:
-            # Свежий статус: другой руководитель мог только что подтвердить или отклонить предложение
+            # Свежий статус: другой начальник мог только что подтвердить или отклонить предложение
             # (update_task сам пропустил бы и ACTIVE-задачу).
             await session.refresh(task)
             if task.status != TaskStatus.PROPOSED:

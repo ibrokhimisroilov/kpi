@@ -295,8 +295,8 @@ def _release_bot_routers() -> None:
 
 
 async def test_real_bot_answers_start_via_webhook(sessionmaker: async_sessionmaker[AsyncSession]) -> None:
-    """Настоящий Dispatcher бота (build_dispatcher) за webhook: руководитель из ADMIN_IDS пишет /start —
-    бот регистрирует его руководителем и показывает меню."""
+    """Настоящий Dispatcher бота (build_dispatcher) за webhook: начальник из ADMIN_IDS пишет /start —
+    бот регистрирует его начальником и показывает меню."""
     _release_bot_routers()
     try:
         dp = bot_main.build_dispatcher(sessionmaker)

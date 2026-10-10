@@ -224,7 +224,7 @@ async def test_index_lists_users_escaped(engine: AsyncEngine) -> None:
         page = await (await client.get("/dev/")).text()
     assert "<b>Иванов</b>" not in page and "&lt;b&gt;Иванов&lt;/b&gt;" in page
     assert "Юрист &amp; ко" in page
-    assert page.index("Петрова") < page.index("Иванов") < page.index("Смирнов")  # руководитель, активные, заявки
+    assert page.index("Петрова") < page.index("Иванов") < page.index("Смирнов")  # начальник, активные, заявки
     assert 'href="/dev/login?tg_id=1001&amp;to=/team"' in page  # быстрые ссылки на вкладки роли
     assert "to=/my" in page
     assert f"tg_id={dev.GUEST_TG_ID}" in page

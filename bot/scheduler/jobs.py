@@ -1,6 +1,7 @@
 """Планировщик: напоминания о сроках, просрочках и непроверенных результатах, еженедельная сводка,
-ежедневная резервная копия базы руководителям (bot.scheduler.backup), сдачи, оценку которых прервала
-остановка бота (recover_stalled_evaluations).
+ежедневная резервная копия базы начальникам (bot.scheduler.backup), сдачи, оценку которых прервала
+остановка бота (recover_stalled_evaluations), автоподтверждение оценок и поручений, по которым
+начальник не ответил вовремя (run_auto_decisions, правила — bot.services.auto).
 
 Что и когда напоминать, решает bot.services.reminders; здесь — тексты, получатели, отправка,
 пометка «отправлено» (ReminderLog) и запись в журнал задачи.
@@ -26,6 +27,7 @@ from __future__ import annotations
 
 import logging
 import math
+import weakref
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta
 
@@ -34,7 +36,7 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
-from sqlalchemy import delete, select
+from sqlalchemy import and_, delete, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -44,18 +46,20 @@ from bot.config import get_settings
 from bot.db.base import Base
 from bot.db.models import DigestLog, EventType, JobLog, ReminderLog, Submission, Task, TaskStatus, User
 from bot.scheduler import backup
-from bot.services import kpi, periods, reminders, tasks, users
+from bot.services import auto, kpi, periods, proposal_flow, reminders, tasks, users
+from bot.services.errors import DomainError
 from bot.services.reminders import Reminder
 from bot.ui import keyboards, render
 from bot.ui.callbacks import ListCB
 from bot.utils.dates import days_between, fmt_deadline, to_local, utcnow
-from bot.utils.text import esc, fmt_num, plural, truncate
+from bot.utils.text import esc, fmt_num, fmt_pct, plural, truncate
 
 __all__ = [
     "setup_scheduler",
     "run_reminders",
     "weekly_digest",
     "recover_stalled_evaluations",
+    "run_auto_decisions",
     "run_due_jobs",
     "tick_schedule_summary",
 ]
@@ -76,11 +80,16 @@ _RESULT_LIMIT = 500                # сколько символов ожида�
 # Ключи JobLog для заданий режима webhook (run_due_jobs).
 JOB_BACKUP = "backup"
 JOB_DIGEST = "digest"
-JOB_EVALUATION = "eval"            # сдача с прерванной оценкой передана руководителю (key — id сдачи)
+JOB_EVALUATION = "eval"            # сдача с прерванной оценкой передана начальнику (key — id сдачи)
+JOB_AUTO = "auto"                  # автоподтверждение: key «start» — когда оно впервые заработало в этой базе
+_AUTO_START_KEY = "start"
+# Время первого запуска автоподтверждения по базам (движкам): оно не меняется, а задание идёт каждые 5 минут —
+# читать его из базы каждый раз незачем (обмен с облачной базой — 130–190 мс).
+_auto_starts: weakref.WeakKeyDictionary[object, datetime] = weakref.WeakKeyDictionary()
 
 # Сдача без оценки дольше бюджета AI (evaluation_budget_sec) + этот запас — оценка прервана остановкой бота.
 _EVAL_STALL_MARGIN_SEC = 5 * 60
-# Старше — не трогаем: о таких сдачах руководителю напомнит review_pending (через REVIEW_REMINDER_DAYS).
+# Старше — не трогаем: о таких сдачах начальнику напомнит review_pending (через REVIEW_REMINDER_DAYS).
 _EVAL_RECOVERY_WINDOW = timedelta(days=1)
 
 
@@ -145,7 +154,7 @@ def _digest_due(now_utc: datetime, weekday: int, hour: int) -> bool:
 
 def setup_scheduler(bot: Bot, sessionmaker: Sessionmaker) -> AsyncIOScheduler:
     """Планировщик (ещё не запущен): напоминания и поиск сдач с прерванной оценкой каждые N минут,
-    еженедельная сводка руководителям и (BACKUP_ENABLED) ежедневная резервная копия базы в BACKUP_HOUR
+    еженедельная сводка начальникам и (BACKUP_ENABLED) ежедневная резервная копия базы в BACKUP_HOUR
     по местному времени."""
     settings = get_settings()
     scheduler = AsyncIOScheduler(timezone=settings.tz)
@@ -167,6 +176,17 @@ def setup_scheduler(bot: Bot, sessionmaker: Sessionmaker) -> AsyncIOScheduler:
         args=(bot, sessionmaker),
         id="stalled_evaluations",
         name="Сдачи с прерванной оценкой",
+        coalesce=True,
+        max_instances=1,
+        misfire_grace_time=interval_min * 60,
+        next_run_time=datetime.now(settings.tz) + timedelta(seconds=_FIRST_RUN_DELAY_SEC),
+    )
+    scheduler.add_job(
+        run_auto_decisions,
+        IntervalTrigger(minutes=interval_min, timezone=settings.tz),
+        args=(bot, sessionmaker),
+        id="auto_decisions",
+        name="Автоподтверждение оценок и поручений",
         coalesce=True,
         max_instances=1,
         misfire_grace_time=interval_min * 60,
@@ -297,6 +317,31 @@ def _review_pending(reminder: Reminder, now: datetime) -> tuple[str, InlineKeybo
     return text, notify.task_button_kb(task, "🔍 Проверить", "review")
 
 
+def _auto_score_soon(reminder: Reminder, now: datetime) -> tuple[str, InlineKeyboardMarkup]:
+    task = reminder.task
+    sub = task.last_submission
+    score = fmt_pct(sub.ai_score) if sub is not None and sub.ai_score is not None else "—"
+    text = (
+        f"⏰ <b>Оценка подтвердится автоматически {render.auto_when(reminder.data['due'])}</b>\n"
+        f"📝 Задача #{task.id} {_task_ref(reminder)} ({esc(task.assignee.short_name)})\n"
+        f"🤖 AI предлагает: <b>{score}</b>\n"
+        "Если вы не согласны с оценкой — проверьте результат до этого времени."
+    )
+    return text, notify.task_button_kb(task, "🔍 Проверить", "review")
+
+
+def _auto_proposal_soon(reminder: Reminder, now: datetime) -> tuple[str, InlineKeyboardMarkup]:
+    task = reminder.task
+    by = " (предложил AI)" if reminder.data.get("source") == "ai" else ""
+    text = (
+        f"⏰ <b>Поручение будет принято автоматически {render.auto_when(reminder.data['due'])}</b>\n"
+        f"📥 #{task.id} {_task_ref(reminder)} ({esc(task.assignee.short_name)})\n"
+        f"⚖️ Вес: <b>{task.weight} %</b>{by} · приоритет средний\n"
+        "Подтвердите, измените или отклоните поручение до этого времени."
+    )
+    return text, keyboards.proposal_kb(task)
+
+
 _Builder = Callable[[Reminder, datetime], tuple[str, InlineKeyboardMarkup]]
 
 _BUILDERS: dict[str, _Builder] = {
@@ -306,6 +351,8 @@ _BUILDERS: dict[str, _Builder] = {
     "overdue_daily": _overdue_daily,
     "overdue_manager": _overdue_manager,
     "review_pending": _review_pending,
+    "auto_score": _auto_score_soon,
+    "auto_proposal": _auto_proposal_soon,
 }
 
 
@@ -313,7 +360,7 @@ _BUILDERS: dict[str, _Builder] = {
 
 
 def _recipients(reminder: Reminder, managers: list[User]) -> list[User]:
-    """Руководителю — ответственный (или все активные руководители); сотруднику — если он активен."""
+    """Начальнику — ответственный (или все активные начальники); сотруднику — если он активен."""
     if reminder.recipient == reminders.MANAGER:
         return notify.responsible_managers(reminder.task, managers)
     assignee = reminder.task.assignee
@@ -423,7 +470,7 @@ def _digest_text(
 def _digest_kb(
     rows: list[tuple[User, kpi.KpiResult]], period: periods.Period, on_review: int, proposals: int
 ) -> InlineKeyboardMarkup:
-    """Кнопки дашборда (периоды, сотрудники) + переход к тому, что ждёт решения руководителя."""
+    """Кнопки дашборда (периоды, сотрудники) + переход к тому, что ждёт решения начальника."""
     waiting: list[InlineKeyboardButton] = []
     if on_review:
         waiting.append(InlineKeyboardButton(
@@ -457,15 +504,15 @@ async def _mark_digest_sent(sessionmaker: Sessionmaker, period: periods.Period) 
 async def _send_digest(
     bot: Bot, sessionmaker: Sessionmaker, period: periods.Period, now: datetime
 ) -> int | None:
-    """Разослать сводку за period. None — некому или не о ком (нет активных руководителей или
-    сотрудников), иначе — скольким руководителям она дошла."""
+    """Разослать сводку за period. None — некому или не о ком (нет активных начальников или
+    сотрудников), иначе — скольким начальникам она дошла."""
     async with sessionmaker() as session:
         rows = await kpi.kpi_for_team(session, period, now)
         managers = await users.list_managers(session)
         on_review = await tasks.count_tasks(session, statuses=[TaskStatus.SUBMITTED])
         proposals = await tasks.count_tasks(session, statuses=[TaskStatus.PROPOSED])
     if not rows or not managers:
-        log.info("Еженедельная сводка не отправлена: нет активных сотрудников или руководителей")
+        log.info("Еженедельная сводка не отправлена: нет активных сотрудников или начальников")
         return None
     text = _digest_text(period, rows, on_review, proposals)
     markup = _digest_kb(rows, period, on_review, proposals)
@@ -473,14 +520,14 @@ async def _send_digest(
     for manager in managers:
         if await notify.safe_send(bot, manager.tg_id, text, reply_markup=markup) is not None:
             delivered += 1
-    log.info("Еженедельная сводка (%s) отправлена руководителям: %s из %s", period.label, delivered, len(managers))
+    log.info("Еженедельная сводка (%s) отправлена начальникам: %s из %s", period.label, delivered, len(managers))
     return delivered
 
 
 async def weekly_digest(
     bot: Bot, sessionmaker: Sessionmaker, now: datetime | None = None, *, once: bool = False
 ) -> None:
-    """Каждому активному руководителю — дашборд команды за прошлую неделю и кнопки периодов/сотрудников.
+    """Каждому активному начальнику — дашборд команды за прошлую неделю и кнопки периодов/сотрудников.
 
     once=True (так вызывает планировщик) — не отправлять, если сводка за эту неделю уже ушла:
     например, её догнали после запуска бота, а потом наступило время по расписанию, или бот
@@ -501,19 +548,19 @@ async def weekly_digest(
 
 
 async def recover_stalled_evaluations(bot: Bot, sessionmaker: Sessionmaker, now: datetime | None = None) -> int:
-    """Сдачи, оценку которых прервала остановка бота, — оценить по правилам и передать руководителю.
+    """Сдачи, оценку которых прервала остановка бота, — оценить по правилам и передать начальнику.
 
-    Обычно сдачу оценивает и передаёт руководителю сам обработчик «📤 Отправить»
+    Обычно сдачу оценивает и передаёт начальнику сам обработчик «📤 Отправить»
     (bot.handlers.task_submit.on_confirm): сдача сохраняется сразу, потом до evaluation_budget_sec()
-    идёт оценка AI (иначе — по правилам), и только после неё — уведомление руководителю. Если бота
+    идёт оценка AI (иначе — по правилам), и только после неё — уведомление начальнику. Если бота
     остановили в это время (обновление на хостинге: старый экземпляр через ~1,5 мин прерывает
-    недоделанное; сбой, нехватка памяти, выключенный компьютер), сдача осталась без оценки, руководитель
+    недоделанное; сбой, нехватка памяти, выключенный компьютер), сдача осталась без оценки, начальник
     о ней не знает, а у сотрудника висит «⏳ Анализирую результат…».
 
     Признак: задача на проверке, сдача без оценки (ai_source пуст) и без решения, сделана больше
     evaluation_budget_sec() + 5 мин назад (живой обработчик к этому времени уже записал бы хотя бы оценку
     по правилам), но не раньше суток назад. Каждая сдача «занимается» записью JobLog(job="eval", key=id) —
-    два экземпляра бота её не задвоят. Возвращает, сколько сдач передано руководителю.
+    два экземпляра бота её не задвоят. Возвращает, сколько сдач передано начальнику.
     """
     now = now or utcnow()
     stalled_before = now - timedelta(seconds=ai_evaluate.evaluation_budget_sec() + _EVAL_STALL_MARGIN_SEC)
@@ -538,14 +585,14 @@ async def recover_stalled_evaluations(bot: Bot, sessionmaker: Sessionmaker, now:
             if await _recover_evaluation(bot, sessionmaker, sub_id):
                 recovered += 1
         except Exception:
-            log.exception("Не удалось передать руководителю сдачу #%s с прерванной оценкой", sub_id)
+            log.exception("Не удалось передать начальнику сдачу #%s с прерванной оценкой", sub_id)
     if recovered:
-        log.info("Сдачи с прерванной оценкой (бот был остановлен) переданы руководителю: %s", recovered)
+        log.info("Сдачи с прерванной оценкой (бот был остановлен) переданы начальнику: %s", recovered)
     return recovered
 
 
 async def _recover_evaluation(bot: Bot, sessionmaker: Sessionmaker, sub_id: int) -> bool:
-    """Одна сдача: занять (JobLog), оценить по правилам, уведомить руководителя и сотрудника."""
+    """Одна сдача: занять (JobLog), оценить по правилам, уведомить начальника и сотрудника."""
     key = str(sub_id)
     if not await _claim_job(sessionmaker, JOB_EVALUATION, key):
         return False
@@ -574,7 +621,7 @@ async def _recover_evaluation(bot: Bot, sessionmaker: Sessionmaker, sub_id: int)
         raise
     log.warning(
         "Оценка сдачи #%s по задаче #%s была прервана остановкой бота — оценено по правилам, сдача передана "
-        "руководителю",
+        "начальнику",
         sub.id,
         task.id,
     )
@@ -584,10 +631,166 @@ async def _recover_evaluation(bot: Bot, sessionmaker: Sessionmaker, sub_id: int)
         await notify.safe_send(
             bot,
             task.assignee.tg_id,
-            f"✅ Результат по задаче #{task.id} «{esc(task.title)}» передан руководителю на проверку. "
+            f"✅ Результат по задаче #{task.id} «{esc(task.title)}» передан начальнику на проверку. "
             "Решение придёт сюда.",
             reply_markup=notify.task_button_kb(task, "📋 Открыть", "open"),
         )
+    return True
+
+
+# --- Автоподтверждение ---------------------------------------------------------------------------------
+
+
+async def run_auto_decisions(bot: Bot, sessionmaker: Sessionmaker, now: datetime | None = None) -> dict[str, int]:
+    """Начальник не ответил за AUTO_CONFIRM_HOURS — принять решение за него (правила — bot.services.auto):
+
+    * оценка AI (не выше AUTO_CONFIRM_MAX_SCORE) становится итоговой — исполнитель получает результат,
+      начальник — сообщение с кнопкой «✏️ Изменить оценку»;
+    * поручение сотрудника принимается с предложенным весом и средним приоритетом;
+    * за AUTO_CONFIRM_REMIND_HOURS до этого начальнику уходит напоминание (ReminderLog — один раз).
+
+    В тихие часы ничего не делает. Отсчёт для того, что ждало ещё до первого запуска, идёт от первого
+    запуска (JobLog «auto/start»). Решение занимается условным UPDATE в сервисе: два экземпляра бота не
+    примут его дважды, а если начальник успел решить сам — ничего не происходит. Возвращает, сколько
+    оценок подтверждено, поручений принято и напоминаний отправлено.
+    """
+    result = {"confirmed": 0, "approved": 0, "reminded": 0}
+    now = now or utcnow()
+    if not auto.enabled():
+        return result
+    feature_start = await _auto_feature_start(sessionmaker, now)
+    if reminders.in_quiet_hours(now):
+        return result
+    async with sessionmaker() as session:
+        candidates = await _auto_candidates(session, now)
+        if not candidates:
+            return result
+        sent = await reminders.sent_kinds(session, [task.id for task in candidates])
+        managers = await users.list_managers(session)
+    for task in candidates:
+        try:
+            outcome = await _auto_step(bot, sessionmaker, task, feature_start, sent[task.id], managers, now)
+        except Exception:
+            log.exception("Автоподтверждение по задаче #%s не выполнено", task.id)
+            continue
+        if outcome is not None:
+            result[outcome] += 1
+    if any(result.values()):
+        log.info("Автоподтверждение: %s", result)
+    return result
+
+
+async def _auto_feature_start(sessionmaker: Sessionmaker, now: datetime) -> datetime:
+    """Когда автоподтверждение впервые заработало в этой базе (первый вызов записывает ``now``).
+    Прочитанное время помнится в памяти процесса (по движку базы)."""
+    engine = getattr(sessionmaker.kw.get("bind"), "sync_engine", None)
+    if engine is not None and engine in _auto_starts:
+        return _auto_starts[engine]
+    stmt = select(JobLog.created_at).where(JobLog.job == JOB_AUTO, JobLog.key == _AUTO_START_KEY)
+    async with sessionmaker() as session:
+        found = await session.scalar(stmt)
+    if found is None:
+        await _claim(sessionmaker, JobLog(job=JOB_AUTO, key=_AUTO_START_KEY, created_at=now))
+        async with sessionmaker() as session:  # запись могла сделать и другой экземпляр бота — берём её время
+            found = await session.scalar(stmt)
+    if found is None:
+        return now
+    if engine is not None:
+        _auto_starts[engine] = found
+    return found
+
+
+async def _auto_candidates(session: AsyncSession, now: datetime) -> list[Task]:
+    """Сдачи на проверке и поручения, которые ждут достаточно долго, чтобы о них пора было напомнить
+    или принять решение (одним запросом; самые свежие отсекаются по времени)."""
+    settings = get_settings()
+    quiet_hours = (settings.quiet_hours_end - settings.quiet_hours_start) % 24
+    # Раньше всего действие — напоминание, перенесённое из тихих часов на вечер накануне.
+    earliest = max(0, settings.auto_confirm_hours - max(0, settings.auto_confirm_remind_hours) - quiet_hours - 1)
+    cutoff = now - timedelta(hours=earliest)
+    stmt = (
+        select(Task)
+        .where(
+            or_(
+                and_(Task.status == TaskStatus.SUBMITTED, Task.submitted_at <= cutoff),
+                and_(Task.status == TaskStatus.PROPOSED, Task.created_at <= cutoff),
+            )
+        )
+        .order_by(Task.id)
+    )
+    return list((await session.scalars(stmt)).all())
+
+
+async def _auto_step(
+    bot: Bot,
+    sessionmaker: Sessionmaker,
+    task: Task,
+    feature_start: datetime,
+    sent: set[str],
+    managers: list[User],
+    now: datetime,
+) -> str | None:
+    """Одна задача: принять решение, напомнить или ничего. -> "confirmed" | "approved" | "reminded" | None."""
+    if task.status == TaskStatus.SUBMITTED:
+        sub = task.last_submission
+        plan = auto.score_due(task, sub, feature_start)
+        if plan is None or sub is None:
+            return None  # оценку этой сдачи подтверждает только начальник (или оценки ещё нет)
+        if now >= plan.due:
+            return "confirmed" if await _auto_confirm(bot, sessionmaker, sub.id) else None
+        kind, reason, data = f"auto_score_{sub.id}", "auto_score", {"due": plan.due}
+    else:
+        plan = auto.proposal_due(task, feature_start)
+        if plan is None or task.deadline <= now or not task.assignee.is_active:
+            return None  # срок поручения прошёл или сотрудник неактивен — решает начальник
+        if now >= plan.due:
+            return "approved" if await _auto_approve(bot, sessionmaker, task.id) else None
+        kind, reason, data = "auto_proposal", "auto_proposal", {"due": plan.due}
+    if plan.remind_at is None or now < plan.remind_at or kind in sent:
+        return None
+    if reason == "auto_proposal":
+        async with sessionmaker() as session:
+            stored = await tasks.suggested_weight(session, task.id)
+        data["source"] = stored[1] if stored is not None else "rules"
+    reminder = Reminder(task, kind, reminders.MANAGER, reason, data=data)
+    return "reminded" if await _deliver(bot, sessionmaker, reminder, managers, now) else None
+
+
+async def _auto_confirm(bot: Bot, sessionmaker: Sessionmaker, sub_id: int) -> bool:
+    """Подтвердить оценку AI за начальника и разослать уведомления. False — решение уже принято."""
+    async with sessionmaker() as session:
+        try:
+            task = await tasks.review_auto_confirm(session, sub_id)
+            await session.commit()
+        except DomainError:
+            await session.rollback()
+            return False
+        sub = task.last_submission
+        log.info("Оценка сдачи #%s по задаче #%s подтверждена автоматически", sub_id, task.id)
+        if sub is not None:
+            await notify.notify_auto_confirmed(bot, session, task, sub)
+    return True
+
+
+async def _auto_approve(bot: Bot, sessionmaker: Sessionmaker, task_id: int) -> bool:
+    """Принять поручение за начальника с предложенным весом. False — поручение уже обработано."""
+    async with sessionmaker() as session:
+        task = await tasks.get_task(session, task_id)
+        if task is None or task.status != TaskStatus.PROPOSED:
+            return False
+        stored = await tasks.suggested_weight(session, task_id)
+        source = stored[1] if stored is not None else "rules"
+        if source != "ai":
+            # Вес AI при внесении поручения не получили (AI был недоступен или занят) — пробуем ещё раз.
+            source = (await proposal_flow.suggest_weight(session, task, time_budget=None, always_store=True)).source
+        try:
+            task = await tasks.auto_approve_proposal(session, task_id)
+            await session.commit()
+        except DomainError:
+            await session.rollback()
+            return False
+        log.info("Поручение #%s принято автоматически (вес %s %%)", task.id, task.weight)
+        await notify.notify_proposal_auto_approved(bot, session, task, source)
     return True
 
 
@@ -655,7 +858,7 @@ async def _backup_if_due(bot: Bot, sessionmaker: Sessionmaker, now: datetime) ->
 
     Задание занимается записью JobLog(job="backup", key=местная дата) ДО отправки — второй
     экземпляр бота копию не отправит. Повтора при неудаче нет (как и в режиме polling): следующая
-    копия — завтра. "disabled" | "not_due" | "done" | "sent:<скольким руководителям доставлено>".
+    копия — завтра. "disabled" | "not_due" | "done" | "sent:<скольким начальникам доставлено>".
     """
     settings = get_settings()
     if not settings.backup_enabled:
@@ -676,6 +879,7 @@ async def run_due_jobs(bot: Bot, sessionmaker: Sessionmaker, now: datetime | Non
     """Выполнить всё, чему пора (режим webhook: фоновый цикл бота каждые 5 минут и /tick).
 
     * сдачи с прерванной оценкой — recover_stalled_evaluations (JobLog не даёт передать дважды);
+    * автоподтверждение оценок и поручений — run_auto_decisions (в тихие часы ничего);
     * напоминания — run_reminders (в тихие часы ничего; ReminderLog не даёт отправить дважды);
     * еженедельная сводка — если её время наступило не больше 6 ч назад и она ещё не ушла;
     * резервная копия — раз в местные сутки после BACKUP_HOUR (если BACKUP_ENABLED).
@@ -683,12 +887,14 @@ async def run_due_jobs(bot: Bot, sessionmaker: Sessionmaker, now: datetime | Non
     Можно вызывать сколько угодно раз и из двух экземпляров бота одновременно (при деплое старый
     и новый экземпляры работают вместе ~1–1,5 мин, у каждого свой фоновый цикл): каждое действие
     выполняется один раз. Ошибка одного задания не мешает остальным. Возвращает итог по заданиям,
-    например {"evaluations": 0, "reminders": 2, "digest": "not_due", "backup": "done"}
+    например {"evaluations": 0, "auto": {"confirmed": 0, "approved": 0, "reminded": 0}, "reminders": 2,
+    "digest": "not_due", "backup": "done"}
     ("error" — задание упало).
     """
     now = now or utcnow()
     steps: tuple[tuple[str, _TickStep], ...] = (
         ("evaluations", recover_stalled_evaluations),
+        ("auto", run_auto_decisions),
         ("reminders", run_reminders),
         ("digest", _digest_if_due),
         ("backup", _backup_if_due),
@@ -723,6 +929,10 @@ def tick_schedule_summary(interval_sec: float | None = None) -> str:
         f"{settings.quiet_hours_start}:00–{settings.quiet_hours_end}:00)",
         f"сводка — по {days[weekday]} с {hour}:00 (догоняется в течение 6 ч)",
     ]
+    if settings.auto_confirm_hours > 0:
+        parts.append(f"автоподтверждение — через {settings.auto_confirm_hours} ч без ответа начальника")
+    else:
+        parts.append("автоподтверждение выключено (AUTO_CONFIRM_HOURS=0)")
     if settings.backup_enabled:
         parts.append(f"резервная копия — раз в день после {_backup_hour(settings.backup_hour)}:00")
     else:

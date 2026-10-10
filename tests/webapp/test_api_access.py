@@ -11,8 +11,8 @@ from bot.webapp import api
 
 from .conftest import EMP, EMP2, MGR, MiniApp
 
-# Кто может вызывать маршрут: all — любой с валидным initData; ME — активный руководитель и сотрудник;
-# M — руководитель; E — сотрудник; A — исполнитель задачи.
+# Кто может вызывать маршрут: all — любой с валидным initData; ME — активный начальник и сотрудник;
+# M — начальник; E — сотрудник; A — исполнитель задачи.
 ROLES: dict[tuple[str, str], str] = {
     ("GET", "/api/me"): "all",
     ("GET", "/api/tasks"): "ME",
@@ -28,6 +28,7 @@ ROLES: dict[tuple[str, str], str] = {
     ("GET", "/api/review"): "M",
     ("POST", "/api/submissions/{sub_id}/confirm"): "M",
     ("POST", "/api/submissions/{sub_id}/score"): "M",
+    ("POST", "/api/submissions/{sub_id}/revise"): "M",
     ("POST", "/api/submissions/{sub_id}/rework"): "M",
     ("POST", "/api/submissions/{sub_id}/files"): "M",
     ("GET", "/api/proposals"): "M",

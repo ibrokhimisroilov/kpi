@@ -31,6 +31,7 @@ from bot.db.models import (
     User,
     UserStatus,
 )
+from bot.services import auto
 from bot.services.kpi import KpiResult
 from bot.services.periods import Period
 from bot.ui import render
@@ -66,9 +67,10 @@ AI_LABEL = "🤖 AI предлагает"
 RULES_LABEL = "📐 Расчёт по правилам (AI недоступен)"
 DECISION_LABELS: dict[ReviewDecision, str] = {
     ReviewDecision.APPROVED: "✅ подтверждена",
-    ReviewDecision.CHANGED: "✏️ изменена руководителем",
+    ReviewDecision.CHANGED: "✏️ изменена начальником",
     ReviewDecision.REWORK: "↩️ Возвращено на доработку",
 }
+AUTO_DECISION_LABEL = "⏱ подтверждена автоматически"  # оценку AI подтвердил бот (Submission.auto_confirmed)
 _ATTACHMENT_NAMES = {"photo": "фото", "video": "видео", "document": "документ", "other": "файл"}
 _PROPOSAL_EDIT_FIELDS = ("title", "expected_result", "plan", "deadline")
 _TASK_EDIT_FIELDS = ("title", "expected_result", "plan", "deadline", "priority", "weight")
@@ -246,6 +248,9 @@ def actions(task: Task, viewer: User) -> dict[str, Any]:
     status = task.status
     last = task.last_submission
     review = manager and status == TaskStatus.SUBMITTED and last is not None and last.decision is None
+    # Оценку подтвердил бот — начальник ещё может её изменить (bot.services.auto, AUTO_REVISE_DAYS).
+    revise = manager and last is not None and auto.can_revise(task, last) and task.assignee_id != viewer.id
+    revise_until = auto.revise_until(last) if revise else None
     if manager and status == TaskStatus.PROPOSED:
         fields: list[str] = list(_PROPOSAL_EDIT_FIELDS)
     elif manager and status in OPEN_STATUSES:
@@ -260,15 +265,36 @@ def actions(task: Task, viewer: User) -> dict[str, Any]:
         "cancel": manager and status in OPEN_STATUSES,
         "review": review,
         "review_submission_id": last.id if review and last is not None else None,
+        "revise": revise,
+        "revise_submission_id": last.id if revise and last is not None else None,
+        "revise_until_text": render.auto_when(revise_until) if revise_until is not None else None,
         "approve": manager and status == TaskStatus.PROPOSED,
         "reject": manager and status == TaskStatus.PROPOSED,
     }
 
 
 def _ai_hidden(task: Task, viewer: User) -> bool:
-    """Исполнитель не видит оценку AI, пока по последней сдаче нет решения руководителя."""
+    """Исполнитель не видит оценку AI, пока по последней сдаче нет решения начальника."""
     last = task.last_submission
     return not viewer.is_manager and last is not None and last.decision is None
+
+
+def _auto_note(task: Task, viewer: User) -> str | None:
+    """Строка об автоподтверждении для начальника — те же слова, что в чате (render)."""
+    if not viewer.is_manager:
+        return None
+    if task.status == TaskStatus.PROPOSED:
+        plan = auto.proposal_due(task)
+        if plan is None or task.deadline <= plan.due:
+            return None
+        return (
+            f"⏱ Без вашего решения поручение будет принято автоматически {render.auto_when(plan.due)} "
+            f"с весом {task.weight} % и средним приоритетом."
+        )
+    last = task.last_submission
+    if task.status == TaskStatus.SUBMITTED and last is not None:
+        return render._auto_note(task, last)  # noqa: SLF001 - строка чата
+    return None
 
 
 def task_detail(task: Task, viewer: User, now: datetime) -> dict[str, Any]:
@@ -297,6 +323,8 @@ def task_detail(task: Task, viewer: User, now: datetime) -> dict[str, Any]:
         "created_by": user_ref(task.created_by),
         "manager": user_ref(task.manager) if task.manager is not None else None,
         "weight_pending": task.status == TaskStatus.PROPOSED,
+        # Начальнику: когда поручение / оценка будут приняты без него или почему оценка его ждёт (None — нечего сказать).
+        "auto_note": _auto_note(task, viewer),
         "ai_score": None if _ai_hidden(task, viewer) else task.ai_score,
         "attempts": len(task.submissions),
         "rework_comment": rework_comment,
@@ -335,7 +363,7 @@ def _ai(sub: Submission, *, full: bool) -> dict[str, Any]:
 
 
 def submission(task: Task, sub: Submission, *, manager_view: bool) -> dict[str, Any]:
-    """Submission. Руководитель видит всё; исполнитель — оценку AI только после решения и без обоснования."""
+    """Submission. Начальник видит всё; исполнитель — оценку AI только после решения и без обоснования."""
     ai: dict[str, Any] | None = None
     ai_pending = False
     ai_hidden = False
@@ -369,7 +397,9 @@ def submission(task: Task, sub: Submission, *, manager_view: bool) -> dict[str, 
         "ai_pending": ai_pending,
         "ai_hidden": ai_hidden,
         "decision": decision.value if decision is not None else None,
-        "decision_label": DECISION_LABELS.get(decision) if decision is not None else None,
+        "decision_label": AUTO_DECISION_LABEL if sub.auto_confirmed
+        else DECISION_LABELS.get(decision) if decision is not None else None,
+        "auto_confirmed": sub.auto_confirmed,
         "final_score": sub.final_score,
         "final_score_text": fmt_pct(sub.final_score) if sub.final_score is not None else None,
         "review_comment": sub.review_comment,
@@ -379,7 +409,7 @@ def submission(task: Task, sub: Submission, *, manager_view: bool) -> dict[str, 
 
 
 def visible_events(task: Task, events: Sequence[TaskEvent], viewer: User) -> list[TaskEvent]:
-    """Исполнитель не видит предварительную оценку AI, пока руководитель не принял решение
+    """Исполнитель не видит предварительную оценку AI, пока начальник не принял решение
     (как task_view._visible_events): скрываются AI_EVALUATED после последней сдачи без решения."""
     if viewer.is_manager:
         return list(events)

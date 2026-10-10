@@ -6,9 +6,9 @@
 подтверждают выполнение?» (файлы, фото, видео) -> сводка -> «📤 Отправить».
 
 После отправки: submit_result -> commit -> общий конвейер ``bot.services.submission_flow`` (тот же, что
-у приложения в Telegram): предварительная оценка (AI или правила) -> commit -> уведомление руководителю.
-Оценку AI сотруднику не показываем — решение принимает руководитель. Если AI упал или думает слишком
-долго, оценка считается по правилам, а сдача всё равно уходит руководителю.
+у приложения в Telegram): предварительная оценка (AI или правила) -> commit -> уведомление начальнику.
+Оценку AI сотруднику не показываем — решение принимает начальник. Если AI упал или думает слишком
+долго, оценка считается по правилам, а сдача всё равно уходит начальнику.
 """
 
 from __future__ import annotations
@@ -189,7 +189,7 @@ async def start_submit(
     question, kb = _step_prompt(SubmitSG.fact.state, data)
     intro = _intro_text(task)
     text = _fit(f"{dropped}\n\n{intro}" if dropped else intro, question)
-    # Список «Сдать результат» превращаем в диалог; напоминание, карточку и замечания руководителя
+    # Список «Сдать результат» превращаем в диалог; напоминание, карточку и замечания начальника
     # не трогаем — диалог начинается новым сообщением.
     if isinstance(msg, Message) and (msg.text or "").startswith(LIST_TITLE):
         sent = await common.edit_or_answer(callback, text, kb)
@@ -226,18 +226,18 @@ def _intro_text(task: Task) -> str:
         comment = _rework_comment(task)
         if comment:
             # Сначала экранируем, потом режем: truncate рассчитана на HTML и выбросила бы хвост после «<».
-            lines.append(f"💬 Комментарий руководителя: <i>{truncate(esc(comment), 1000)}</i>")
+            lines.append(f"💬 Комментарий начальника: <i>{truncate(esc(comment), 1000)}</i>")
     if task.submissions:
         lines.append(f"🔁 Попытка сдачи №{len(task.submissions) + 1}")
     return "\n".join(lines)
 
 
 _NOT_OPEN_TEXTS: dict[TaskStatus, str] = {
-    TaskStatus.SUBMITTED: "📝 Результат уже отправлен и ждёт проверки руководителя.",
+    TaskStatus.SUBMITTED: "📝 Результат уже отправлен и ждёт проверки начальника.",
     TaskStatus.DONE: "✅ Задача уже выполнена и оценена — сдавать результат не нужно.",
-    TaskStatus.CANCELLED: "🚫 Задача отменена руководителем — сдавать результат не нужно.",
-    TaskStatus.PROPOSED: "📥 Поручение ещё не подтверждено руководителем — сдать результат можно после подтверждения.",
-    TaskStatus.REJECTED: "❌ Поручение отклонено руководителем — сдавать результат не нужно.",
+    TaskStatus.CANCELLED: "🚫 Задача отменена начальником — сдавать результат не нужно.",
+    TaskStatus.PROPOSED: "📥 Поручение ещё не подтверждено начальником — сдать результат можно после подтверждения.",
+    TaskStatus.REJECTED: "❌ Поручение отклонено начальником — сдавать результат не нужно.",
 }
 
 
@@ -247,7 +247,7 @@ def _not_open_text(task: Task) -> str:
 
 
 def _rework_comment(task: Task) -> str | None:
-    """Комментарий руководителя к последней сдаче, возвращённой на доработку."""
+    """Комментарий начальника к последней сдаче, возвращённой на доработку."""
     sub = task.last_submission
     if sub is not None and sub.decision == ReviewDecision.REWORK and sub.review_comment:
         return sub.review_comment
@@ -576,7 +576,7 @@ async def _store_file(state: FSMContext, item: dict[str, Any], caption: str | No
     """Добавить файл (и подпись к нему) в FSM. -> (added | dup | overflow, порядковый номер события).
 
     Подпись к файлу («Сводная таблица по 110 договорам») — это описание материалов: сохраняем её
-    вместе с текстовыми пояснениями шага файлов, чтобы руководитель и AI её увидели.
+    вместе с текстовыми пояснениями шага файлов, чтобы начальник и AI её увидели.
     Между чтением и записью данных нет await с переключением задач (MemoryStorage),
     поэтому сообщения альбома, обрабатываемые параллельно, не теряют файлы друг друга.
     """
@@ -774,7 +774,7 @@ async def _send_result(
     bot: Bot,
     data: dict[str, Any],
 ) -> None:
-    """«📤 Отправить»: сохранить сдачу, предварительно оценить (AI или правила), уведомить руководителя."""
+    """«📤 Отправить»: сохранить сдачу, предварительно оценить (AI или правила), уведомить начальника."""
     await state.set_state(SubmitSG.sending)  # повторное нажатие не создаст вторую сдачу
     task_id = data.get("task_id")
     if not task_id or not data.get("fact"):
@@ -825,7 +825,7 @@ async def _send_result(
         "Обычно это несколько секунд — сообщение обновится само.",
     )
 
-    # Оценка (AI или правила) и уведомление руководителю — общий конвейер чата и приложения.
+    # Оценка (AI или правила) и уведомление начальнику — общий конвейер чата и приложения.
     result = await submission_flow.run_after_submit(
         bot, session, task, sub, budget_sec=_ai_budget_sec(), use_ai=ai_available()
     )
@@ -833,11 +833,11 @@ async def _send_result(
     status = result.status if result.status is not None else TaskStatus.SUBMITTED
     files_line = f"\n📎 Файлов: {len(files)}" if files else ""
     if status == TaskStatus.CANCELLED:
-        head = "⚠️ <b>Результат сохранён, но руководитель тем временем отменил задачу</b> — проверять его не будут."
+        head = "⚠️ <b>Результат сохранён, но начальник тем временем отменил задачу</b> — проверять его не будут."
     elif status in (TaskStatus.DONE, TaskStatus.REWORK):
-        head = "✅ <b>Результат отправлен.</b> Руководитель уже принял решение — оно пришло отдельным сообщением."
+        head = "✅ <b>Результат отправлен.</b> Начальник уже принял решение — оно пришло отдельным сообщением."
     else:
-        head = "✅ <b>Результат отправлен руководителю на проверку.</b> Решение придёт сюда."
+        head = "✅ <b>Результат отправлен начальнику на проверку.</b> Решение придёт сюда."
     await common.edit_or_answer(callback, f"{head}\n\n{task_line}{files_line}")
 
 
@@ -871,7 +871,7 @@ async def _clear_if(state: FSMContext, expected: State) -> None:
 
 
 # --- Предварительная оценка -----------------------------------------------------------------------
-# Сама оценка и уведомление руководителю — bot.services.submission_flow (общий конвейер с приложением).
+# Сама оценка и уведомление начальнику — bot.services.submission_flow (общий конвейер с приложением).
 
 
 def _ai_budget_sec() -> float:
@@ -879,7 +879,7 @@ def _ai_budget_sec() -> float:
 
     Если бот остановят посреди оценки (обновление на хостинге, сбой), сдачу без оценки позже найдут
     задания по расписанию (bot.scheduler.jobs.recover_stalled_evaluations): оценят по правилам и
-    передадут руководителю.
+    передадут начальнику.
     """
     return ai_evaluate.evaluation_budget_sec()
 

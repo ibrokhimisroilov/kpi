@@ -1,4 +1,4 @@
-"""Общий конвейер после сдачи результата: предварительная оценка (AI или правила) и уведомление руководителю.
+"""Общий конвейер после сдачи результата: предварительная оценка (AI или правила) и уведомление начальнику.
 
 Им пользуются и чат (``bot.handlers.task_submit``), и приложение в Telegram (``bot.webapp.api``, в фоне):
 обе дороги делают после ``tasks.submit_result`` + commit одно и то же. Модуль ничего не знает про
@@ -10,9 +10,9 @@
    ``budget_sec``; AI нет, упал или не уложился — расчёт по правилам (``RULES_PREFIX``). Оценка
    записывается ``tasks.record_evaluation`` + commit; запись оценки AI упала (ошибка базы) — откат,
    перечитывание и правила.
-2. ``fresh`` — свежие задача и сдача из базы: пока AI думал, руководитель мог уже решить по сдаче
+2. ``fresh`` — свежие задача и сдача из базы: пока AI думал, начальник мог уже решить по сдаче
    или отменить задачу.
-3. Сдача ещё ждёт решения — ``notify.notify_submission`` (руководителю: план ↔ факт, кнопки, файлы).
+3. Сдача ещё ждёт решения — ``notify.notify_submission`` (начальнику: план ↔ факт, кнопки, файлы).
 
 Сервисы и уведомления вызываются через атрибуты модулей (``tasks_svc.record_evaluation``,
 ``notify.notify_submission``, ``ai_evaluate.evaluate_submission``…): тесты подменяют именно их.
@@ -79,7 +79,7 @@ def default_budget_sec() -> float:
 
     Если бот остановят посреди оценки (обновление на хостинге, сбой), сдачу без оценки позже найдут
     задания по расписанию (bot.scheduler.jobs.recover_stalled_evaluations): оценят по правилам и
-    передадут руководителю.
+    передадут начальнику.
     """
     return ai_evaluate.evaluation_budget_sec()
 
@@ -160,7 +160,7 @@ async def fresh(
     """Свежие задача и сдача из БД (изменения других пользователей видны); при сбое — fallback."""
     try:
         return await reload(session, task_id, sub_id)
-    except Exception:  # noqa: BLE001 - уведомить руководителя важнее, чем идеально свежие данные
+    except Exception:  # noqa: BLE001 - уведомить начальника важнее, чем идеально свежие данные
         log.exception("Не удалось перечитать сдачу #%s перед уведомлением", sub_id)
         return fallback
 
@@ -180,7 +180,7 @@ async def run_after_submit(
     budget_sec: float | None = None,
     use_ai: bool | None = None,
 ) -> FlowResult:
-    """Сдача уже сохранена (submit_result + commit): оценить её и уведомить руководителя.
+    """Сдача уже сохранена (submit_result + commit): оценить её и уведомить начальника.
 
     budget_sec None — ``default_budget_sec()``; use_ai None — ``provider.ai_available()``.
     Никогда не бросает Exception: сдача уже сохранена, а не дооценённую сдачу позже подберёт
@@ -205,7 +205,7 @@ async def _run(
     try:
         current = await evaluate_and_record(bot, session, task, sub, budget_sec=budget_sec, use_ai=use_ai)
         source = current[1].ai_source
-    except Exception:  # noqa: BLE001 - сдача уже сохранена, руководитель должен её получить
+    except Exception:  # noqa: BLE001 - сдача уже сохранена, начальник должен её получить
         log.exception("Не удалось сохранить предварительную оценку сдачи #%s", sub_id)
         try:
             current = await reload(session, task_id, sub_id)
@@ -213,7 +213,7 @@ async def _run(
             log.exception("Не удалось перечитать сдачу #%s", sub_id)
             current = None
     if current is not None:
-        # Пока AI думал (до пары минут), руководитель мог уже решить по сдаче из «📝 На проверке»
+        # Пока AI думал (до пары минут), начальник мог уже решить по сдаче из «📝 На проверке»
         # или отменить задачу — сессия этого не видит, поэтому перечитываем свежее состояние.
         current = await fresh(session, task_id, sub_id, current)
     notified = False
@@ -222,8 +222,8 @@ async def _run(
         try:
             await notify.notify_submission(bot, session, *current)
         except Exception:  # noqa: BLE001
-            log.exception("Не удалось уведомить руководителя о сдаче #%s", sub_id)
+            log.exception("Не удалось уведомить начальника о сдаче #%s", sub_id)
     elif current is not None:
-        log.info("Сдача #%s уже не ждёт проверки (%s) — уведомление руководителю не нужно", sub_id, current[0].status)
+        log.info("Сдача #%s уже не ждёт проверки (%s) — уведомление начальнику не нужно", sub_id, current[0].status)
     status = current[0].status if current is not None else None
     return FlowResult(task_id=task_id, submission_id=sub_id, status=status, source=source, notified=notified)

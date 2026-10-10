@@ -71,7 +71,7 @@ async def test_register_admin_becomes_active_manager(session) -> None:
     assert user.role == Role.MANAGER and user.status == UserStatus.ACTIVE
     assert user.full_name == "Петров Пётр"
 
-    # Даже если права «потеряны», повторный /start снова делает активным руководителем.
+    # Даже если права «потеряны», повторный /start снова делает активным начальником.
     user.role, user.status = Role.EMPLOYEE, UserStatus.BLOCKED
     again, created_again = await users.register_or_get(session, 1001, "boss2", "Петров Пётр")
     assert again is user and not created_again
@@ -141,14 +141,14 @@ async def test_set_role_rules(session, manager: User, employee: User, user_facto
     await users.set_role(session, employee.id, Role.MANAGER, manager)
     assert employee.is_manager
     assert set(await users.list_managers(session)) == {manager, employee}
-    # Руководителей двое — второго (не из ADMIN_IDS) можно понизить.
+    # Начальников двое — второго (не из ADMIN_IDS) можно понизить.
     await users.set_role(session, employee.id, Role.EMPLOYEE, manager)
     assert employee.role == Role.EMPLOYEE
 
 
 async def test_last_manager_is_protected(session, user_factory) -> None:
-    only_manager = await user_factory(3001, "Единственный Руководитель", role=Role.MANAGER)
-    # Действующее лицо — руководитель, которого в БД уже нет как активного (устаревший объект).
+    only_manager = await user_factory(3001, "Единственный Начальник", role=Role.MANAGER)
+    # Действующее лицо — начальник, которого в БД уже нет как активного (устаревший объект).
     stale_actor = User(id=99_999, tg_id=99_999, full_name="Устаревший", role=Role.MANAGER, status=UserStatus.ACTIVE)
     with pytest.raises(DomainError, match="последний"):
         await users.set_role(session, only_manager.id, Role.EMPLOYEE, stale_actor)
@@ -163,13 +163,13 @@ async def test_user_lists_sorting(session, manager: User, user_factory) -> None:
     e = await user_factory(4003, "ёлкин Егор")
     pending = await user_factory(4004, "Ждущий Жора", status=UserStatus.PENDING)
     blocked = await user_factory(4005, "Блокированный Блок", status=UserStatus.BLOCKED)
-    second_manager = await user_factory(4006, "Абрамов Руководитель", role=Role.MANAGER)
+    second_manager = await user_factory(4006, "Абрамов Начальник", role=Role.MANAGER)
 
     assert await users.list_employees(session) == [a, b, e]
     assert await users.list_managers(session) == [second_manager, manager]
     everyone = await users.list_all(session)
     assert everyone[0] is pending                     # сначала заявки
-    assert everyone[1:3] == [second_manager, manager]  # затем активные: руководители выше
+    assert everyone[1:3] == [second_manager, manager]  # затем активные: начальники выше
     assert everyone[3:6] == [a, b, e]
     assert everyone[-1] is blocked
 
@@ -265,7 +265,7 @@ async def test_propose_and_approve(session, clock, manager: User, employee: User
     assert await svc.list_proposals(session) == [task]
 
     with pytest.raises(DomainError):
-        await svc.approve_proposal(session, task.id, employee, weight=20)  # не руководитель
+        await svc.approve_proposal(session, task.id, employee, weight=20)  # не начальник
 
     approved = await svc.approve_proposal(session, task.id, manager, weight=25, priority=Priority.LOW)
     assert approved.status == TaskStatus.ACTIVE
@@ -352,7 +352,7 @@ async def test_update_task_without_changes_writes_no_event(session, clock, manag
 async def test_update_task_rules(session, clock, manager: User, employee: User) -> None:
     task = await new_task(session, clock, manager, employee)
     with pytest.raises(DomainError):
-        await svc.update_task(session, task.id, employee, title="Моё")  # только руководитель
+        await svc.update_task(session, task.id, employee, title="Моё")  # только начальник
     with pytest.raises(DomainError):
         await svc.update_task(session, task.id, manager, deadline=clock.now - timedelta(days=1))
     with pytest.raises(DomainError):
@@ -475,7 +475,7 @@ async def test_submit_permissions_and_status(session, clock, manager: User, empl
     with pytest.raises(DomainError):
         await svc.submit_result(session, task.id, employee2, fact_text="Чужая задача")
     with pytest.raises(DomainError):
-        await svc.submit_result(session, task.id, manager, fact_text="Руководитель")
+        await svc.submit_result(session, task.id, manager, fact_text="Начальник")
     with pytest.raises(DomainError):
         await svc.submit_result(session, task.id, employee, fact_text="   ")  # «что сделано» обязательно
     with pytest.raises(DomainError):

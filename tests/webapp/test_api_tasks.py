@@ -20,7 +20,7 @@ KINDS = ["active", "overdue", "rework", "submitted", "done", "proposed", "cancel
 
 
 async def seed_mix(ma: MiniApp) -> tuple[Any, list[Any], dict[str, int]]:
-    """Руководитель и три сотрудника; у Иванова — задача каждого вида, у остальных — по нескольку."""
+    """Начальник и три сотрудника; у Иванова — задача каждого вида, у остальных — по нескольку."""
     mgr, staff = await ma.seed_team(3)
     emp, emp2, emp3 = staff
     now = __import__("bot.utils.dates", fromlist=["utcnow"]).utcnow()
@@ -60,7 +60,7 @@ async def test_lists_match_service_for_every_scope_and_status(ma: MiniApp, froze
             assert [item["id"] for item in resp["items"]] == expected, (tg_id, params, status)
             assert resp["total"] == total and resp["pages"] == max(1, -(-total // 50))
             assert resp["truncated"] is False and "counts" not in resp.data
-    # Сотрудник: «Все» — без отменённых; руководитель — с ними. Отклонённые — нигде.
+    # Сотрудник: «Все» — без отменённых; начальник — с ними. Отклонённые — нигде.
     all_emp = await ma.get("/api/tasks", as_=EMP, params={"status": "all", "limit": 50})
     statuses = {item["status"] for item in all_emp["items"]}
     assert "cancelled" not in statuses and "rejected" not in statuses
@@ -425,7 +425,7 @@ async def test_patch_active_task_all_fields(ma: MiniApp, frozen: Any) -> None:
     task = resp["task"]
     assert (task["title"], task["weight"], task["priority"], task["plan_text"]) == ("Новое название", 30, "low", "50 актов")
     text = ma.h.last_text(EMP)
-    assert "✏️ Руководитель изменил задачу" in text and "→" in text and "Новое название" in text
+    assert "✏️ Начальник изменил задачу" in text and "→" in text and "Новое название" in text
     events = await ma.h.scalars(select(TaskEvent).where(TaskEvent.task_id == task_id, TaskEvent.type == EventType.EDITED))
     assert len(events) == 1
 
@@ -442,7 +442,7 @@ async def test_patch_rules(ma: MiniApp, frozen: Any) -> None:
     assert resp.status == 400 and resp.code == "domain" and resp.error == api.PROPOSAL_FIELDS
     resp = await ma.patch(f"/api/tasks/{proposal_id}", as_=MGR, json={"title": "Поручение (уточнено)"})
     assert resp.status == 200 and resp["changed"] == ["title"]
-    assert "✏️ Руководитель скорректировал ваше поручение" in ma.h.last_text(EMP)
+    assert "✏️ Начальник скорректировал ваше поручение" in ma.h.last_text(EMP)
     resp = await ma.patch(f"/api/tasks/{task_id}", as_=MGR, json={"plan_value": None})
     assert resp.status == 200 and set(resp["changed"]) == {"plan_value", "plan_unit"}
     assert resp["task"]["plan_value"] is None and resp["task"]["plan_unit"] is None
@@ -480,7 +480,7 @@ async def test_cancel_task_notifies_and_repeat_fails(ma: MiniApp, frozen: Any) -
     resp = await ma.post(f"/api/tasks/{task_id}/cancel", as_=MGR, json={"reason": "Не актуально"})
     assert resp.status == 200 and resp["task"]["status"] == "cancelled" and resp["delivered"] is True
     text = ma.h.last_text(EMP)
-    assert "🚫 Задача отменена руководителем" in text and "Не актуально" in text
+    assert "🚫 Задача отменена начальником" in text and "Не актуально" in text
     again = await ma.post(f"/api/tasks/{task_id}/cancel", as_=MGR)
     assert again.status == 400 and again.code == "domain"
     resp = await ma.post(f"/api/tasks/{task_id}/cancel", as_=MGR, json={"reason": "я" * 1001})

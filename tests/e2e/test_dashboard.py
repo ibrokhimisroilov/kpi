@@ -1,8 +1,8 @@
-"""Сценарии отчётов по эффективности (ТЗ «Коэффициент эффективности», «Что получает руководитель»; SPEC 7.8).
+"""Сценарии отчётов по эффективности (ТЗ «Коэффициент эффективности», «Что получает начальник»; SPEC 7.8).
 
 Бот целиком (bot.main.build_dispatcher) на фейковом Telegram API (tests/e2e/fakebot.py), AI выключен.
-Задачи засеваются через сервисы — так, как их поставил бы руководитель и сдал сотрудник; оценки
-руководитель подтверждает на экране проверки (или сервисом проверки), а отчёты смотрятся «глазами»
+Задачи засеваются через сервисы — так, как их поставил бы начальник и сдал сотрудник; оценки
+начальник подтверждает на экране проверки (или сервисом проверки), а отчёты смотрятся «глазами»
 пользователей: тексты, кнопки, alert'ы, файлы.
 
 Время бота заморожено фикстурой ``clock``: «сейчас» — четверг 08.10.2026 12:00 по Ташкенту, текущая
@@ -57,7 +57,7 @@ def local(day: int, month: int = 10, hour: int = 18, minute: int = 0, year: int 
 
 
 # Пример из ТЗ: веса 30/20/20/30, итоговые оценки 100/110/90/105 -> 101,5 -> «102 %».
-# (название, вес, оценка AI, итоговая оценка руководителя, срок — день октября, 18:00)
+# (название, вес, оценка AI, итоговая оценка начальника, срок — день октября, 18:00)
 TZ_TABLE = (
     ("Подготовка ТЗ", 30, 100, 100, 5),
     ("Анализ договоров", 20, 110, 110, 6),
@@ -117,7 +117,7 @@ class Team:
 
 
 async def seed_team(h: BotHarness) -> Team:
-    """Руководитель Петрова и три активных сотрудника (Новикова — без задач)."""
+    """Начальник Петрова и три активных сотрудника (Новикова — без задач)."""
     return Team(
         mgr=await h.seed_user(MGR, "Петрова Анна Сергеевна", role="manager", position="Начальник управления"),
         ivanov=await h.seed_user(IVANOV, "Иванов Иван Иванович", position="Юрист"),
@@ -134,7 +134,7 @@ async def _user(session: AsyncSession, tg_id: int) -> User:
 
 def _submit_moment(clock: Clock, deadline: datetime, late: bool) -> datetime:
     """Когда сотрудник сдал результат: в срок — за 3 часа до срока (но не позже, чем час назад);
-    с опозданием — через 6 часов после срока. Проверка руководителем — ещё через полчаса."""
+    с опозданием — через 6 часов после срока. Проверка начальником — ещё через полчаса."""
     if late:
         moment = deadline + timedelta(hours=6)
     else:
@@ -147,7 +147,7 @@ async def seed_active(
     h: BotHarness, clock: Clock, assignee: int, title: str, weight: int, deadline: datetime,
     *, by_employee: bool = False,
 ) -> int:
-    """Задача в работе: поставлена руководителем (или внесена сотрудником и подтверждена)
+    """Задача в работе: поставлена начальником (или внесена сотрудником и подтверждена)
     за 3 дня до срока, но не позже, чем за 2 часа до «сейчас»."""
     async with h.db() as s:
         mgr, emp = await _user(s, MGR), await _user(s, assignee)
@@ -187,9 +187,9 @@ async def seed_done(
     h: BotHarness, clock: Clock, assignee: int, title: str, weight: int, score: float, deadline: datetime,
     *, ai: float | None = None, late: bool = False, by_employee: bool = False, rework: bool = False,
 ) -> int:
-    """Задача выполнена: сдана, руководитель подтвердил оценку AI (или поставил свою ``score``).
+    """Задача выполнена: сдана, начальник подтвердил оценку AI (или поставил свою ``score``).
 
-    rework=True: первую сдачу руководитель вернул на доработку, через 10 минут сотрудник сдал снова.
+    rework=True: первую сдачу начальник вернул на доработку, через 10 минут сотрудник сдал снова.
     """
     ai = score if ai is None else ai
     task_id, sub_id = await seed_submitted(
@@ -215,7 +215,7 @@ async def seed_done(
 
 
 async def seed_tz_table(h: BotHarness, clock: Clock, *, late_supplier: bool = False) -> None:
-    """Иванову — четыре задачи из таблицы ТЗ, все проверены руководителем.
+    """Иванову — четыре задачи из таблицы ТЗ, все проверены начальником.
 
     late_supplier=True: «Работа с поставщиками» внесена самим Ивановым и сдана с опозданием.
     """
@@ -243,7 +243,7 @@ def lines(text: str | None) -> list[str]:
 
 
 async def test_team_dashboard_shows_tz_example_after_review(app: BotHarness, clock: Clock) -> None:
-    """Иванов сдал четыре задачи из таблицы ТЗ. Руководитель Петрова в «📝 На проверке» три оценки
+    """Иванов сдал четыре задачи из таблицы ТЗ. Начальник Петрова в «📝 На проверке» три оценки
     подтверждает, а «Отчёт» (AI предложил 95 %) оценивает на 90 %. Затем открывает «📊 Команда»:
     у Иванова 102 % (101,5 по формуле), у Сидорова 80 %, у Новиковой задач нет, эффективность
     команды — взвешенно по всем оценённым задачам: (10150 + 50×80) / 150 ≈ 94 %."""
@@ -298,7 +298,7 @@ async def test_team_dashboard_shows_tz_example_after_review(app: BotHarness, clo
 
 
 async def test_team_dashboard_without_employees(app: BotHarness, clock: Clock) -> None:
-    """В команде ещё никого не подтвердили: руководитель видит «Активных сотрудников пока нет»
+    """В команде ещё никого не подтвердили: начальник видит «Активных сотрудников пока нет»
     и «нет данных», а не пустой экран или ошибку."""
     h = app
     await h.seed_user(MGR, "Петрова Анна Сергеевна", role="manager")
@@ -331,7 +331,7 @@ async def test_large_team_fits_one_message(app: BotHarness, clock: Clock) -> Non
 
 
 async def test_period_switching_and_navigation(app: BotHarness, clock: Clock) -> None:
-    """Руководитель листает дашборд команды. У Иванова три оценённые задачи: на этой неделе (100 %),
+    """Начальник листает дашборд команды. У Иванова три оценённые задачи: на этой неделе (100 %),
     на прошлой — 1 октября (80 %) и 23 сентября (60 %). Неделя/месяц/квартал/год считаются той же
     формулой по задачам периода; ◀ листает назад, ▶ есть только у прошлых периодов; всё — правкой
     одного и того же сообщения."""
@@ -415,7 +415,7 @@ async def test_forged_period_callbacks_are_normalized(app: BotHarness, clock: Cl
 
 
 async def test_blocked_manager_cannot_use_old_dashboard_buttons(app: BotHarness, clock: Clock) -> None:
-    """Второго руководителя Кузнецова заблокировали, а у него остался открытый дашборд.
+    """Второго начальника Кузнецова заблокировали, а у него остался открытый дашборд.
     Кнопки периода, карточки и экспорта отвечают «Недостаточно прав» и ничего не показывают."""
     h = app
     team = await seed_team(h)
@@ -466,7 +466,7 @@ async def test_week_boundaries_follow_local_time(app: BotHarness, clock: Clock) 
 
 
 async def test_employee_card_shows_all_indicators(app: BotHarness, clock: Clock) -> None:
-    """Из дашборда руководитель открывает карточку Иванова: эффективность за неделю и месяц,
+    """Из дашборда начальник открывает карточку Иванова: эффективность за неделю и месяц,
     «Выполнено задач», «Просрочено», «Выполнение в срок», «Перевыполнено», «Внесено самостоятельно»
     и что вошло в расчёт. «Работу с поставщиками» Иванов внёс сам и сдал с опозданием."""
     h = app
@@ -564,7 +564,7 @@ async def test_employee_card_counts_overdue_as_zero_and_skips_review(app: BotHar
     assert rows[0] == "👤 Иванов Иван Иванович — 100 %"
     assert "⏰ Просрочено: 1" in rows and "🔄 В работе: 1 · 📝 На проверке: 2" in rows
 
-    # Руководитель подтверждает 120 % за «Отчёт».
+    # Начальник подтверждает 120 % за «Отчёт».
     async with h.db() as s:
         await tasks.review_confirm(s, review_sub, await _user(s, MGR))
         await s.commit()
@@ -595,7 +595,7 @@ async def test_overdue_not_counted_when_setting_disabled(
 
 
 async def test_card_of_unknown_user_and_inaccessible_message(app: BotHarness, clock: Clock) -> None:
-    """Руководитель нажимает кнопку карточки удалённого из базы сотрудника — alert «Сотрудник не найден.»;
+    """Начальник нажимает кнопку карточки удалённого из базы сотрудника — alert «Сотрудник не найден.»;
     кнопка периода на старом (недоступном) сообщении — карточка приходит новым сообщением."""
     h = app
     team = await seed_team(h)
@@ -619,7 +619,7 @@ async def test_card_of_unknown_user_and_inaccessible_message(app: BotHarness, cl
 
 async def test_evaluation_history_pagination(app: BotHarness, clock: Clock) -> None:
     """У Иванова 12 оценённых задач (по одной в день с 26.09 по 07.10) и одна на проверке.
-    История показывает по 10, свежие сверху, с оценкой AI → итоговой, решением руководителя,
+    История показывает по 10, свежие сверху, с оценкой AI → итоговой, решением начальника,
     опозданием и числом доработок; «Вперёд ▶» / «◀ Назад» листают, «📊 К карточке» возвращает карточку."""
     h = app
     await seed_team(h)
@@ -715,7 +715,7 @@ async def test_my_kpi_shows_only_own_data(app: BotHarness, clock: Clock) -> None
     assert log.answers and not log.alert
     assert lines(h.last_text(IVANOV))[0] == "👤 Иванов Иван Иванович — 102 %"
 
-    # Своя история оценок и возврат к своей карточке (без кнопок руководителя).
+    # Своя история оценок и возврат к своей карточке (без кнопок начальника).
     await h.press_button(IVANOV, "📜 История оценок")
     assert lines(h.last_text(IVANOV))[0] == "📜 История оценок · Иванов И. И."
     await h.press_button(IVANOV, "📊 К карточке")
@@ -782,7 +782,7 @@ def _records(rows: list[tuple]) -> list[dict]:
 
 
 async def test_export_sends_xlsx_with_three_sheets(app: BotHarness, clock: Clock) -> None:
-    """Руководитель выбирает «📤 Экспорт» → «Эта неделя»: приходит Excel-файл kpi_week_20261005.xlsx,
+    """Начальник выбирает «📤 Экспорт» → «Эта неделя»: приходит Excel-файл kpi_week_20261005.xlsx,
     он открывается, в нём листы «Сводка», «Задачи», «Журнал»; KPI Иванова — 101,5 (числом),
     команды — 94,3; сообщение «⏳ Готовлю отчёт…» после отправки исчезает."""
     h = app
@@ -857,7 +857,7 @@ async def test_export_sends_xlsx_with_three_sheets(app: BotHarness, clock: Clock
 async def test_export_survives_report_failure(
     app: BotHarness, clock: Clock, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Если собрать отчёт не удалось (ошибка в выгрузке), руководитель видит понятное сообщение
+    """Если собрать отчёт не удалось (ошибка в выгрузке), начальник видит понятное сообщение
     вместо «⏳ Готовлю отчёт…», а бот продолжает работать."""
     from bot.handlers import dashboard
 
@@ -878,7 +878,7 @@ async def test_export_survives_report_failure(
 
 
 async def test_export_summary_covers_every_task_of_blocked_employee(app: BotHarness, clock: Clock) -> None:
-    """Сидоров выполнил задачу на этой неделе и уволился (руководитель его заблокировал).
+    """Сидоров выполнил задачу на этой неделе и уволился (начальник его заблокировал).
     В выгрузке за неделю его задача есть на листе «Задачи», значит и на «Сводке» он должен быть,
     а «Итого по команде» — учитывать все задачи листа «Задачи» (иначе итог не сходится с таблицей)."""
     h = app
@@ -900,7 +900,7 @@ async def test_export_summary_covers_every_task_of_blocked_employee(app: BotHarn
 
 
 async def test_blocked_employee_history_stays_reachable(app: BotHarness, clock: Clock) -> None:
-    """Сидоров уволился, руководитель его заблокировал. На дашборде команды его больше нет, но
+    """Сидоров уволился, начальник его заблокировал. На дашборде команды его больше нет, но
     в «👥 Сотрудники» у его карточки есть «📊 Карточка»: эффективность за неделю (80 %) и
     история оценок («Бюджет на квартал») по-прежнему доступны — разблокировать для этого не нужно."""
     h = app
@@ -925,7 +925,7 @@ async def test_blocked_employee_history_stays_reachable(app: BotHarness, clock: 
 
 
 async def test_manager_typing_my_kpi_gets_pointed_to_team(app: BotHarness, clock: Clock) -> None:
-    """Руководитель (например, недавно повышенный из сотрудников) набирает /kpi или старую кнопку
+    """Начальник (например, недавно повышенный из сотрудников) набирает /kpi или старую кнопку
     «📈 Моя эффективность»: вместо «Не понял» бот объясняет, что это раздел сотрудника, и
     показывает, где смотреть эффективность команды."""
     h = app
@@ -941,7 +941,7 @@ async def test_manager_typing_my_kpi_gets_pointed_to_team(app: BotHarness, clock
 
 
 async def test_team_button_interrupts_review_dialog(app: BotHarness, clock: Clock) -> None:
-    """Руководитель начал менять оценку («✏️ Изменить оценку»), но передумал и нажал «📊 Команда».
+    """Начальник начал менять оценку («✏️ Изменить оценку»), но передумал и нажал «📊 Команда».
     Дашборд открывается, диалог проверки сброшен: следующее «90» оценкой не считается."""
     h = app
     await seed_team(h)
@@ -1002,7 +1002,7 @@ async def test_html_special_characters_in_names_and_titles(app: BotHarness, cloc
 
 
 async def test_weekly_digest_buttons_lead_to_dashboard(app: BotHarness, clock: Clock) -> None:
-    """Руководитель получил от планировщика еженедельную сводку за прошлую неделю. Её кнопки работают
+    """Начальник получил от планировщика еженедельную сводку за прошлую неделю. Её кнопки работают
     как дашборд: «Позже ▶» — текущая неделя, «👤 Иванов» — карточка сотрудника."""
     from bot.scheduler import jobs
 

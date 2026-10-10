@@ -20,7 +20,7 @@ class IsActiveUser(BaseFilter):
 
 
 class IsManager(BaseFilter):
-    """Активный руководитель."""
+    """Активный начальник."""
 
     async def __call__(self, event: TelegramObject, user: User | None = None) -> bool:
         return user is not None and user.status == UserStatus.ACTIVE and user.role == Role.MANAGER

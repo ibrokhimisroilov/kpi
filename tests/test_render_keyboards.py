@@ -430,7 +430,7 @@ async def test_user_keyboards(world, user_factory) -> None:
     assert actions(kb.registration_kb(worker)) == ["approve", "reject"]
     pending = await user_factory(2401, "Ждущий", status=UserStatus.PENDING)
     blocked = await user_factory(2402, "Блок", status=UserStatus.BLOCKED)
-    other_manager = await user_factory(2403, "Второй Руководитель", role=Role.MANAGER)
+    other_manager = await user_factory(2403, "Второй Начальник", role=Role.MANAGER)
     assert actions(kb.user_manage_kb(pending, manager)) == ["approve", "reject"]
     assert actions(kb.user_manage_kb(blocked, manager)) == ["card", "unblock"]  # история оценок ушедшего
     assert set(actions(kb.user_manage_kb(worker, manager))) == {"card", "role_mgr", "block"}
@@ -515,7 +515,7 @@ def test_callbacks_fit_64_bytes_with_huge_ids() -> None:
     big = 10**12
     user = User(id=big, tg_id=big, full_name="Очень Длинная Фамилия Сотрудника Для Проверки Кнопок",
                 role=Role.EMPLOYEE, status=UserStatus.ACTIVE)
-    viewer = User(id=big - 1, tg_id=big - 1, full_name="Руководитель", role=Role.MANAGER, status=UserStatus.ACTIVE)
+    viewer = User(id=big - 1, tg_id=big - 1, full_name="Начальник", role=Role.MANAGER, status=UserStatus.ACTIVE)
     task = Task(id=big, title="Т" * 255, status=TaskStatus.ACTIVE, assignee_id=big, accepted_at=None,
                 deadline=get_period("week").end, assignee=user, submissions=[])
     sub = Submission(id=big, ai_score=150, attachments=[Attachment(kind=AttachmentKind.DOCUMENT, file_id="x")])

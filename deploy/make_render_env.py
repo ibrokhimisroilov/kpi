@@ -5,8 +5,8 @@
     .venv\\Scripts\\python deploy\\make_render_env.py
     .venv\\Scripts\\python deploy\\make_render_env.py --database-url - --database-password -
 
-Скрипт берёт из локального файла .env токен бота, ID руководителей и ключ Gemini и пишет в
-deploy/render.env ровно те строки, которые руководитель вставляет в Render (поля Blueprint или
+Скрипт берёт из локального файла .env токен бота, ID начальников и ключ Gemini и пишет в
+deploy/render.env ровно те строки, которые начальник вставляет в Render (поля Blueprint или
 «Add from .env»):
 
     BOT_TOKEN=...
@@ -23,7 +23,7 @@ deploy/render.env ровно те строки, которые руководи�
 и не попадает в образ Docker (.dockerignore исключает папку deploy).
 
 Если deploy/render.env уже есть и в нём вписаны DATABASE_URL / DATABASE_PASSWORD, а в командной
-строке они не заданы, — прежние значения сохраняются (руководитель мог вписать их сам в Блокноте).
+строке они не заданы, — прежние значения сохраняются (начальник мог вписать их сам в Блокноте).
 
 Только стандартная библиотека Python (python-dotenv используется, если установлен, — как у бота).
 """
@@ -153,8 +153,8 @@ def _check_admin_ids(values: dict[str, str], report: Report) -> str:
         raise SetupError("ADMIN_IDS в .env записан неверно: нужны числа через запятую, например 123456789,987654321.")
     if not parts:
         report.warnings.append(
-            "ADMIN_IDS пустой: на Render никто не станет руководителем автоматически. "
-            "Впишите Telegram ID руководителей в .env и запустите скрипт снова."
+            "ADMIN_IDS пустой: на Render никто не станет начальником автоматически. "
+            "Впишите Telegram ID начальников в .env и запустите скрипт снова."
         )
         report.status["ADMIN_IDS"] = "ПУСТО — см. предупреждение"
     else:
@@ -350,7 +350,7 @@ def build_parser() -> argparse.ArgumentParser:
             "  BOT_TOKEN, ADMIN_IDS, GEMINI_API_KEY — из .env;\n"
             "  RUN_MODE=webhook;\n"
             "  DATABASE_URL, DATABASE_PASSWORD — из параметров ниже или заглушки, которые\n"
-            "  руководитель заменит сам (docs/DEPLOY_RENDER.md, шаг 2);\n"
+            "  начальник заменит сам (docs/DEPLOY_RENDER.md, шаг 2);\n"
             "  GROQ_API_KEY, CLOUDFLARE_ACCOUNT_ID, CLOUDFLARE_API_TOKEN, MISTRAL_API_KEY,\n"
             "  OPENROUTER_API_KEY — запасной бесплатный AI, из .env, если заданы.\n"
             "Значения секретов на экран не выводятся. Файл .env не меняется."

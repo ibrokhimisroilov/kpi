@@ -1,6 +1,6 @@
 """Устойчивость API приложения: тело запроса читается до соединения с базой и не дольше срока, фоновая
 оценка не держит соединение пула, лимиты частоты (подсказка AI, поручения), гонки сдачи и принятия,
-округление оценки руководителя (docs/MINIAPP_SPEC.md §6.2, §6.3, §8.4–§8.7).
+округление оценки начальника (docs/MINIAPP_SPEC.md §6.2, §6.3, §8.4–§8.7).
 
 Тесты идут и на SQLite, и на PostgreSQL (TEST_DATABASE_URL — настоящий пул 3 + 1, как в проде).
 """
@@ -235,7 +235,7 @@ async def test_formulate_team_daily_cap_falls_back_to_rules(
 
 
 async def test_proposals_rate_limited(ma: MiniApp, frozen: Any, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Поручения — не чаще лимита: каждое рассылается всем руководителям. Отказ сервиса (прошлый срок)
+    """Поручения — не чаще лимита: каждое рассылается всем начальникам. Отказ сервиса (прошлый срок)
     в счёт не идёт."""
     await ma.seed_team(1)
     monkeypatch.setattr(api, "PROPOSAL_LIMITS", ((2, 600.0), (20, api.DAY_SEC)))
@@ -247,11 +247,11 @@ async def test_proposals_rate_limited(ma: MiniApp, frozen: Any, monkeypatch: pyt
     resp = await ma.post("/api/proposals", as_=EMP, json=PROPOSAL)
     assert resp.status == 429 and resp.code == "rate_limited"
     assert resp.error == api.PROPOSE_TOO_OFTEN.format(wait="10 мин")
-    assert len(ma.h.sent_to(MGR)) == before  # руководителю ничего не ушло
+    assert len(ma.h.sent_to(MGR)) == before  # начальнику ничего не ушло
     assert not ma.ctx.gate.busy("propose", EMP)
 
 
-# --- Оценка руководителя — целая, как в чате --------------------------------------------------------------
+# --- Оценка начальника — целая, как в чате --------------------------------------------------------------
 
 
 @pytest.mark.parametrize(("raw", "stored"), [(95.5, 96.0), (95.4, 95.0), (149.6, 150.0), (0.4, 0.0)])

@@ -74,7 +74,7 @@ async def test_approve_sets_active_and_notifies(ma: MiniApp, frozen: Any) -> Non
     assert task["status"] == "active" and task["weight"] == 25 and task["priority"] == "high"
     assert task["accepted"] is True and task["approved_at"] is not None and task["manager"]["id"] == (await ma.h.get_user(MGR)).id
     assert resp["delivered"] is True
-    assert "✅ Руководитель подтвердил ваше поручение" in ma.h.last_text(EMP)
+    assert "✅ Начальник подтвердил ваше поручение" in ma.h.last_text(EMP)
     again = await ma.post(f"/api/tasks/{task_id}/approve", as_=MGR, json={"weight": 25})
     assert again.status == 400 and again.error == "Предложение уже обработано"
 
@@ -86,7 +86,7 @@ async def test_approve_after_deadline_passed(ma: MiniApp, frozen: Any) -> None:
     resp = await ma.post(f"/api/tasks/{task_id}/approve", as_=MGR, json={"weight": 10})
     assert resp.status == 400 and resp.code == "domain"
     assert resp.error == "Срок поручения уже прошёл — сначала измените срок"
-    # Руководитель сначала меняет срок (правка поручения), потом подтверждает.
+    # Начальник сначала меняет срок (правка поручения), потом подтверждает.
     resp = await ma.patch(f"/api/tasks/{task_id}", as_=MGR, json={"deadline": "2026-10-10"})
     assert resp.status == 200 and resp["changed"] == ["deadline"]
     assert (await ma.post(f"/api/tasks/{task_id}/approve", as_=MGR, json={"weight": 10})).status == 200
@@ -98,7 +98,7 @@ async def test_reject_with_and_without_reason(ma: MiniApp, frozen: Any) -> None:
     resp = await ma.post(f"/api/tasks/{first}/reject", as_=MGR, json={"reason": "Не наша зона"})
     assert resp.status == 200 and resp["task"]["status"] == "rejected" and resp["delivered"] is True
     text = ma.h.last_text(EMP)
-    assert "❌ Руководитель отклонил ваше поручение" in text and "Не наша зона" in text
+    assert "❌ Начальник отклонил ваше поручение" in text and "Не наша зона" in text
     second = (await ma.post("/api/proposals", as_=EMP, json=PROPOSAL))["task"]["id"]
     resp = await ma.post(f"/api/tasks/{second}/reject", as_=MGR)
     assert resp.status == 200 and "Причина" not in ma.h.last_text(EMP)

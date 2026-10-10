@@ -1,7 +1,7 @@
 """Ядро: исправленные ошибки, найденные сценарными тестами (каждый тест — история пользователя).
 
 * опечатка в годе срока («31.12.9999», «05.10.2030») — срок отклоняется или виден с годом;
-* «&» и «<» в тексте сотрудника/руководителя не вытесняют из сообщения срок, опоздание и оценку AI;
+* «&» и «<» в тексте сотрудника/начальника не вытесняют из сообщения срок, опоздание и оценку AI;
 * карточка поручения не выдаёт временные вес и приоритет за выбор сотрудника;
 * напоминание о просрочке называет те же дни, что и карточка задачи;
 * сотрудник не может «закрыть» блок данных для AI маркером «>>>», имена файлов — внутри блока;
@@ -114,14 +114,14 @@ def late_pair(fact: str, *, comment: str | None = None) -> tuple[Task, Submissio
 
 
 def test_ampersands_in_fact_do_not_hide_lateness_and_ai_score() -> None:
-    """Иванов вставил в «Что сделано» 3000 знаков «&» (в HTML каждый — «&amp;»). Руководитель всё равно
+    """Иванов вставил в «Что сделано» 3000 знаков «&» (в HTML каждый — «&amp;»). Начальник всё равно
     видит «Сдано: … — с опозданием 3 дн.» и «🤖 AI предлагает: 94 %»; сообщение в лимите Telegram."""
     task, sub = late_pair("&" * 3000)
     text = render.submission_text(task, sub)
     assert len(text) <= 4000
     assert "с опозданием 3 дн." in text
     assert "AI предлагает: <b>94 %</b>" in text
-    assert "Окончательное решение — за руководителем." in text
+    assert "Окончательное решение — за начальником." in text
 
 
 def test_every_long_field_at_maximum_still_fits() -> None:
@@ -139,7 +139,7 @@ def test_every_long_field_at_maximum_still_fits() -> None:
 
 
 def test_rework_comment_of_angle_brackets_keeps_new_deadline() -> None:
-    """Руководитель вернул работу с комментарием из 1500 знаков «<»: в уведомлении сотруднику
+    """Начальник вернул работу с комментарием из 1500 знаков «<»: в уведомлении сотруднику
     строка «📅 Срок: …» остаётся."""
     task, sub = late_pair("Сделано", comment="<" * 1500)
     sub.decision = "rework"
@@ -157,7 +157,7 @@ def test_short_fields_with_html_are_not_shortened() -> None:
 
 
 def test_proposal_card_does_not_show_placeholder_weight() -> None:
-    """Поручение сотрудника ещё не подтверждено: вес и приоритет назначит руководитель — карточка
+    """Поручение сотрудника ещё не подтверждено: вес и приоритет назначит начальник — карточка
     не показывает временные «Вес: 10 %» и «Приоритет: Средний»."""
     task, _ = late_pair("Сделано")
     task.status = TaskStatus.PROPOSED
@@ -165,7 +165,7 @@ def test_proposal_card_does_not_show_placeholder_weight() -> None:
     task.weight = 10
     card = render.task_card(task)
     assert "Вес: 10 %" not in card and "Приоритет:" not in card
-    assert "назначит руководитель при подтверждении" in card
+    assert "назначит начальник при подтверждении" in card
 
 
 # =====================================================================================================
@@ -328,7 +328,7 @@ class OkBot:
 
 
 async def test_user_decision_reports_delivery() -> None:
-    """Сотрудник заблокировал бота: notify_user_decision возвращает False (руководителю нельзя писать
+    """Сотрудник заблокировал бота: notify_user_decision возвращает False (начальнику нельзя писать
     «пользователю отправлено уведомление»); при обычной доставке — True."""
     user = User(id=5, tg_id=2005, full_name="Кузнецова Мария", status=UserStatus.ACTIVE)
     assert await notify.notify_user_decision(BlockedBot(), user, True) is False  # type: ignore[arg-type]

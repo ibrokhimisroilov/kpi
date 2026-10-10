@@ -1385,7 +1385,7 @@ async def test_create_task_shows_wait_message_first_and_types_while_ai_thinks(bo
     log = list(await h.send_text(1001, "проверить 100 договоров и представить отчёт"))
 
     wait, typing = wait_and_typing(log, "⏳ Формулирую измеримый результат")
-    assert wait == 0, "«⏳» — первое, что видит руководитель"
+    assert wait == 0, "«⏳» — первое, что видит начальник"
     assert shown_before_ai(slow, started, "⏳ Формулирую измеримый результат")
     assert typing and min(typing) > wait  # «печатает…» — после «⏳» (новое сообщение его сбросило бы)
     assert "Проверить 100 договоров и представить отчёт" in (h.last_text(1001) or "")
@@ -1456,7 +1456,7 @@ async def test_submit_types_from_the_tap_and_shows_wait_before_ai(bot_app, monke
     wait, typing = wait_and_typing(to_employee, "Анализирую результат")
     assert typing and min(typing) < wait, "«печатает…» — сразу после нажатия, ещё до сохранения сдачи"
     assert shown_before_ai(slow, started, "Анализирую результат"), "«⏳ Анализирую…» — до запроса к AI"
-    assert "Результат отправлен руководителю" in (h.last_text(2001) or "")
+    assert "Результат отправлен начальнику" in (h.last_text(2001) or "")
 
 
 # --- Журнал при запуске --------------------------------------------------------------------------------

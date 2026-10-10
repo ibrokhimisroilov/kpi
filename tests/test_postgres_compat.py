@@ -84,8 +84,8 @@ LOCK_WAIT_SEC = 0.3  # за это время сессия, ждущая бло�
 
 @dataclass
 class Team:
-    boss_id: int      # руководитель из ADMIN_IDS
-    deputy_id: int    # второй руководитель
+    boss_id: int      # начальник из ADMIN_IDS
+    deputy_id: int    # второй начальник
     employee_id: int
 
 
@@ -467,7 +467,7 @@ CHANGED_MEANWHILE = "Задача только что изменилась — �
 
 @pytest.mark.parametrize("first_action", ["submit", "cancel"])
 async def test_submit_and_cancel_interleaved(pg_engine: AsyncEngine, clock, first_action: str) -> None:
-    """Сотрудник сдаёт, руководитель отменяет: оба прочитали задачу «в работе», первый занял строку.
+    """Сотрудник сдаёт, начальник отменяет: оба прочитали задачу «в работе», первый занял строку.
 
     Второй ждёт commit первого и получает отказ — отмена не «съедает» только что сданный результат,
     а сдача не «оживляет» отменённую задачу.

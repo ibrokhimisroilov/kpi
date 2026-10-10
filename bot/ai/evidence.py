@@ -227,7 +227,7 @@ def _unsupported_reason(att: Attachment, name: str) -> str:
     suffix = PurePath(name).suffix.lower()
     mime = (att.mime_type or "").lower()
     if att.kind == AttachmentKind.VIDEO or mime.startswith("video/"):
-        return "видео не анализируется, его посмотрит руководитель"
+        return "видео не анализируется, его посмотрит начальник"
     if suffix in (".doc", ".xls", ".ppt"):
         return "старый формат Office — сохраните файл как .docx/.xlsx"
     return "формат не поддерживается для анализа"

@@ -30,9 +30,10 @@ class TaskCB(CallbackData, prefix="t"):
 
 
 class SubCB(CallbackData, prefix="s"):
-    """Проверка сданного результата руководителем (handlers/task_review.py).
+    """Проверка сданного результата начальником (handlers/task_review.py).
 
     action: ok (подтвердить оценку AI) | change (изменить оценку) | rework (вернуть) | files (показать файлы)
+            | revise (изменить оценку, подтверждённую автоматически)
     """
 
     action: str
@@ -68,7 +69,7 @@ class PeriodCB(CallbackData, prefix="p"):
 class ListCB(CallbackData, prefix="l"):
     """Списки задач с пагинацией.
 
-    scope: my (мои задачи сотрудника) | all (все задачи, руководитель) | emp (задачи одного сотрудника)
+    scope: my (мои задачи сотрудника) | all (все задачи, начальник) | emp (задачи одного сотрудника)
            -> handlers/task_view.py
            review -> handlers/task_review.py ; proposals -> handlers/task_propose.py
     status: open | overdue | review | done | all

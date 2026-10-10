@@ -1,7 +1,7 @@
 """Планировщик и уведомления глазами пользователей (SPEC 3.5, 6, 8; ТЗ п. 3 «Бот контролирует сроки»).
 
 Напоминания о сроке, просрочки, тихие часы, непроверенные результаты, еженедельная сводка
-руководителю и все функции bot.notify — через фейковый Telegram API (tests/e2e/fakebot.py)
+начальнику и все функции bot.notify — через фейковый Telegram API (tests/e2e/fakebot.py)
 и настоящий Dispatcher (кнопки из напоминаний нажимаются и должны работать).
 
 Путешествие во времени: фикстура ``travel`` (поверх ``clock`` из tests/conftest.py) замораживает
@@ -10,7 +10,7 @@ utcnow в сервисах, рендере и хендлерах, а ``run_remin
 
 Календарь (Asia/Tashkent, UTC+5): задачу ставят в пятницу 02.10.2026 в 12:00, срок —
 среда 07.10 в 18:00 (через 5 дней). Тихие часы 21:00–08:00, ежедневное напоминание
-о просрочке — после 10:00, руководителю о непроверенном результате — через 2 дня.
+о просрочке — после 10:00, начальнику о непроверенном результате — через 2 дня.
 """
 
 from __future__ import annotations
@@ -48,8 +48,8 @@ from bot.utils.dates import to_utc
 
 from .fakebot import MANAGER_TG_ID, BotHarness, RequestLog, StoredMessage
 
-MGR = MANAGER_TG_ID  # Петрова Анна Сергеевна — руководитель (ADMIN_IDS)
-MGR2 = 1002          # Смирнов Олег Петрович — второй руководитель
+MGR = MANAGER_TG_ID  # Петрова Анна Сергеевна — начальник (ADMIN_IDS)
+MGR2 = 1002          # Смирнов Олег Петрович — второй начальник
 EMP = 2001           # Иванов Иван Иванович — исполнитель
 EMP2 = 2002          # Сидорова Мария Олеговна — сотрудница
 
@@ -91,7 +91,7 @@ async def make_task(
     plan_unit: str | None = "договоров",
     weight: int = 20,
 ) -> int:
-    """Руководитель ставит задачу (через сервис, как это делает диалог «➕ Поставить задачу»)."""
+    """Начальник ставит задачу (через сервис, как это делает диалог «➕ Поставить задачу»)."""
     async with h.db() as s:
         creator = await users_svc.get_by_tg(s, manager_tg)
         assignee = await users_svc.get_by_tg(s, assignee_tg)
@@ -139,7 +139,7 @@ async def submit(
 
 
 async def as_manager(h: BotHarness, action: Any, tg_id: int = MGR) -> Any:
-    """Выполнить сервисное действие руководителя: ``await as_manager(h, lambda s, mgr: ...)``."""
+    """Выполнить сервисное действие начальника: ``await as_manager(h, lambda s, mgr: ...)``."""
     async with h.db() as s:
         manager = await users_svc.get_by_tg(s, tg_id)
         result = await action(s, manager)
@@ -188,7 +188,7 @@ def methods_to(log: RequestLog, chat_id: int) -> list[str]:
 
 @dataclass
 class Office:
-    """Отдел: руководитель Петрова, сотрудник Иванов и задача «Анализ договоров» со сроком через 5 дней."""
+    """Отдел: начальник Петрова, сотрудник Иванов и задача «Анализ договоров» со сроком через 5 дней."""
 
     h: BotHarness
     clock: Any
@@ -246,7 +246,7 @@ async def office(app: BotHarness, travel: Any) -> Office:
 async def test_reminders_before_deadline_come_once_at_each_threshold(office: Office) -> None:
     """Задача со сроком через 5 дней. Сотрудник получает «осталось 3 дня», «осталось 1 день»
     и в день срока «осталось 2 часа» — каждое ровно один раз, с ожидаемым результатом и кнопками
-    «📤 Сдать результат» / «📋 Открыть». Руководителя до срока не беспокоят."""
+    «📤 Сдать результат» / «📋 Открыть». Начальника до срока не беспокоят."""
     h = office.h
     for when in (local(10, 2, 12, 15), local(10, 3, 18), local(10, 4, 17, 45)):
         log = await office.tick(when)
@@ -317,13 +317,13 @@ async def test_employee_opens_task_from_reminder(office: Office) -> None:
 
 
 # =====================================================================================================
-# 2. Срок истёк: вопросы ТЗ сотруднику, уведомление руководителю, ежедневные напоминания
+# 2. Срок истёк: вопросы ТЗ сотруднику, уведомление начальнику, ежедневные напоминания
 # =====================================================================================================
 
 
 async def test_deadline_passed_employee_asked_questions_and_manager_warned(office: Office) -> None:
     """Через час после срока сотрудник получает «⌛ Срок задачи … истёк» с тремя вопросами ТЗ
-    и кнопкой «📤 Сдать результат», а руководитель — «⚠️ Просрочена задача #N … (Иванов И. И.)»
+    и кнопкой «📤 Сдать результат», а начальник — «⚠️ Просрочена задача #N … (Иванов И. И.)»
     с кнопкой «📋 Открыть»."""
     h = office.h
     log = await office.tick(local(10, 7, 19))
@@ -346,7 +346,7 @@ async def test_deadline_passed_employee_asked_questions_and_manager_warned(offic
 
 
 async def test_manager_overdue_notice_mentions_accepted_task(office: Office) -> None:
-    """Если сотрудник принял задачу в работу, руководитель видит «принята в работу», а не
+    """Если сотрудник принял задачу в работу, начальник видит «принята в работу», а не
     «исполнитель не подтвердил получение»."""
     h = office.h
     await h.capture(notify.notify_new_task(h.bot, await office.task()))
@@ -359,7 +359,7 @@ async def test_manager_overdue_notice_mentions_accepted_task(office: Office) -> 
 
 
 async def test_manager_opens_overdue_task_from_notice(office: Office) -> None:
-    """Руководитель нажимает «📋 Открыть» в уведомлении о просрочке — карточка со статусом
+    """Начальник нажимает «📋 Открыть» в уведомлении о просрочке — карточка со статусом
     «⏰ Просрочена» и кнопками управления задачей."""
     h = office.h
     await office.tick(local(10, 7, 19))
@@ -374,7 +374,7 @@ async def test_manager_opens_overdue_task_from_notice(office: Office) -> None:
 
 async def test_submit_button_in_overdue_reminder_starts_submission(office: Office) -> None:
     """Сотрудник жмёт «📤 Сдать результат» прямо в напоминании «⌛ Срок истёк» и проходит весь диалог:
-    что сделано → результат → факт числом → файл → «📤 Отправить». Руководитель получает
+    что сделано → результат → факт числом → файл → «📤 Отправить». Начальник получает
     план↔факт с пометкой «с опозданием», кнопки проверки и сам файл; после сдачи напоминания
     о просрочке прекращаются, а напоминание в чате сотрудника осталось как было."""
     h = office.h
@@ -404,7 +404,7 @@ async def test_submit_button_in_overdue_reminder_starts_submission(office: Offic
     assert "⚠️ Срок уже прошёл" in summary and "Анализ.xlsx" in summary
 
     log = await h.press_button(EMP, "Отправить")
-    assert "Результат отправлен руководителю" in h.last_text(EMP)
+    assert "Результат отправлен начальнику" in h.last_text(EMP)
     to_manager = log.to(MGR)
     assert "📝 Результат по задаче #%d" % office.task_id in to_manager.text
     assert "с опозданием" in to_manager.text
@@ -426,7 +426,7 @@ async def test_submit_button_in_overdue_reminder_starts_submission(office: Offic
 async def test_submit_from_early_reminder_stops_further_reminders(office: Office) -> None:
     """Сотрудник получил «осталось 3 дня» и сразу сдал результат из напоминания (без файлов,
     шаги «результат» и «факт числом» пропустил). Сдача — «в срок», и больше никаких «осталось
-    1 день» / «срок истёк»; руководитель получает результат с кнопками проверки."""
+    1 день» / «срок истёк»; начальник получает результат с кнопками проверки."""
     h = office.h
     await office.tick(local(10, 4, 18))
     office.clock.set(local(10, 4, 18, 5))
@@ -462,7 +462,7 @@ async def test_submit_button_in_reminder_rejects_other_employee(office: Office) 
 
 
 async def test_submit_button_in_old_reminder_after_task_cancelled(office: Office) -> None:
-    """Руководитель отменил задачу, а сотрудник жмёт «📤 Сдать результат» в старом напоминании —
+    """Начальник отменил задачу, а сотрудник жмёт «📤 Сдать результат» в старом напоминании —
     alert «Задача не в работе», диалог не начинается."""
     h = office.h
     await office.tick(local(10, 7, 19))
@@ -474,7 +474,7 @@ async def test_submit_button_in_old_reminder_after_task_cancelled(office: Office
 
 async def test_overdue_daily_reminder_after_10_local_once_a_day(office: Office) -> None:
     """Сотрудник так и не сдал результат: на следующий день — одно напоминание после 10:00
-    (в 8:00 и 9:45 — ещё нет), назавтра — снова одно. Руководителю повторно не пишут."""
+    (в 8:00 и 9:45 — ещё нет), назавтра — снова одно. Начальнику повторно не пишут."""
     h = office.h
     await office.tick(local(10, 7, 19))
     for when in (local(10, 7, 20, 45), local(10, 8, 8), local(10, 8, 9, 45)):
@@ -531,7 +531,7 @@ async def test_overdue_daily_reminder_days_match_task_card(office: Office) -> No
 )
 async def test_quiet_hours_nothing_sent_until_8(office: Office, day: int, hour: int, minute: int) -> None:
     """Тихие часы 21:00–08:00: срок уже истёк, но бот молчит и ничего не помечает отправленным.
-    В 08:00 приходят «⌛ Срок истёк» сотруднику и «⚠️ Просрочена» руководителю, а ежедневное
+    В 08:00 приходят «⌛ Срок истёк» сотруднику и «⚠️ Просрочена» начальнику, а ежедневное
     напоминание в этот же день (в 10:00) уже не дублирует их."""
     h = office.h
     log = await office.tick(local(10, day, hour, minute))
@@ -555,12 +555,12 @@ async def test_quiet_hours_boundaries(office: Office) -> None:
 
 
 # =====================================================================================================
-# 4. Непроверенный результат — напоминание руководителю
+# 4. Непроверенный результат — напоминание начальнику
 # =====================================================================================================
 
 
 async def test_manager_reminded_about_unreviewed_result_once_a_day(office: Office) -> None:
-    """Сотрудник сдал результат в срок (06.10 18:00), руководитель не проверяет. Через 2 дня —
+    """Сотрудник сдал результат в срок (06.10 18:00), начальник не проверяет. Через 2 дня —
     «📝 Ждёт проверки 2 дня …» с кнопкой «🔍 Проверить», не чаще раза в день. Сотрудника, сдавшего
     в срок, после истечения срока не дёргают. Кнопка открывает проверку, после решения напоминания
     прекращаются."""
@@ -633,7 +633,7 @@ async def test_repeated_runs_are_idempotent(office: Office) -> None:
 
 async def test_employee_blocked_bot_marked_sent_without_crash(office: Office) -> None:
     """Сотрудник заблокировал бота: напоминание не доходит, бот не падает и не «долбит» его каждые
-    15 минут; руководитель о просрочке всё равно узнаёт. Когда сотрудник разблокировал бота,
+    15 минут; начальник о просрочке всё равно узнаёт. Когда сотрудник разблокировал бота,
     следующее ежедневное напоминание доходит."""
     h = office.h
     h.api.blocked_chats.add(EMP)
@@ -658,7 +658,7 @@ async def test_employee_blocked_bot_marked_sent_without_crash(office: Office) ->
 
 
 async def test_manager_blocked_bot_overdue_notice_marked_sent(office: Office) -> None:
-    """Руководитель заблокировал бота: сотрудник получает «срок истёк», уведомление руководителю
+    """Начальник заблокировал бота: сотрудник получает «срок истёк», уведомление начальнику
     помечается отправленным и больше не пытается уйти."""
     h = office.h
     h.api.blocked_chats.add(MGR)
@@ -694,7 +694,7 @@ async def test_network_failure_retried_on_next_run(office: Office, monkeypatch: 
 
 async def test_deactivated_employee_gets_nothing_manager_still_warned(office: Office) -> None:
     """Сотрудника заблокировали в боте (уволен): напоминания ему не уходят (помечаются),
-    а руководитель о просроченной задаче узнаёт."""
+    а начальник о просроченной задаче узнаёт."""
     h = office.h
     await set_status(h, EMP, UserStatus.BLOCKED)
     assert not (await office.tick(local(10, 4, 18))).calls
@@ -705,8 +705,8 @@ async def test_deactivated_employee_gets_nothing_manager_still_warned(office: Of
 
 
 async def test_overdue_notice_goes_to_responsible_manager_only(app: BotHarness, travel: Any) -> None:
-    """Руководителей двое: уведомление о просрочке получает тот, кто ставил задачу. Если его
-    заблокировали в боте — уведомление получают все активные руководители."""
+    """Начальников двое: уведомление о просрочке получает тот, кто ставил задачу. Если его
+    заблокировали в боте — уведомление получают все активные начальники."""
     h = app
     clock = travel
     clock.set(created_at())
@@ -729,7 +729,7 @@ async def test_overdue_notice_goes_to_responsible_manager_only(app: BotHarness, 
 
 async def test_closed_and_proposed_tasks_get_no_reminders(app: BotHarness, travel: Any) -> None:
     """Отменённая, выполненная и ещё не подтверждённая (внесённая сотрудником) задачи
-    со сроком в прошлом — никаких напоминаний ни сотруднику, ни руководителю."""
+    со сроком в прошлом — никаких напоминаний ни сотруднику, ни начальнику."""
     h = app
     clock = travel
     clock.set(created_at())
@@ -756,7 +756,7 @@ async def test_closed_and_proposed_tasks_get_no_reminders(app: BotHarness, trave
 
 
 async def test_deadline_extended_reminders_start_over(office: Office) -> None:
-    """После «осталось 1 день» руководитель перенёс срок на неделю: по старому сроку ничего
+    """После «осталось 1 день» начальник перенёс срок на неделю: по старому сроку ничего
     не приходит, а по новому напоминания идут заново («осталось 3 дня» — снова)."""
     h, clock = office.h, office.clock
     await office.tick(local(10, 4, 18))
@@ -795,7 +795,7 @@ async def test_rework_with_new_deadline_restarts_reminders(office: Office) -> No
 
 
 # =====================================================================================================
-# 6. Еженедельная сводка руководителю
+# 6. Еженедельная сводка начальнику
 # =====================================================================================================
 
 
@@ -827,7 +827,7 @@ async def seed_week(h: BotHarness, clock: Any) -> None:
 
 
 async def test_weekly_digest_to_every_manager(app: BotHarness, travel: Any) -> None:
-    """Понедельник 9:00: каждый руководитель получает сводку за прошлую неделю — KPI команды
+    """Понедельник 9:00: каждый начальник получает сводку за прошлую неделю — KPI команды
     и каждого сотрудника, что ждёт решения, кнопки периодов и сотрудников. Сотрудникам сводка
     не приходит."""
     h = app
@@ -863,7 +863,7 @@ async def test_weekly_digest_to_every_manager(app: BotHarness, travel: Any) -> N
 
 
 async def test_weekly_digest_buttons_work(app: BotHarness, travel: Any) -> None:
-    """Руководитель нажимает в сводке кнопку сотрудника — открывается его карточка эффективности;
+    """Начальник нажимает в сводке кнопку сотрудника — открывается его карточка эффективности;
     кнопка периода «Месяц» переключает дашборд команды."""
     h = app
     clock = travel
@@ -889,7 +889,7 @@ async def test_weekly_digest_buttons_work(app: BotHarness, travel: Any) -> None:
 
 
 async def test_weekly_digest_survives_blocked_and_deactivated_managers(app: BotHarness, travel: Any) -> None:
-    """Один руководитель заблокировал бота, другого отключили в боте: сводка без ошибок доходит
+    """Один начальник заблокировал бота, другого отключили в боте: сводка без ошибок доходит
     до оставшегося, отключённому не отправляется вовсе."""
     h = app
     clock = travel
@@ -905,7 +905,7 @@ async def test_weekly_digest_survives_blocked_and_deactivated_managers(app: BotH
 
 
 async def test_weekly_digest_without_employees_sends_nothing(app: BotHarness, travel: Any) -> None:
-    """В боте пока только руководитель — пустую сводку не шлём."""
+    """В боте пока только начальник — пустую сводку не шлём."""
     h = app
     clock = travel
     await h.seed_user(MGR, "Петрова Анна Сергеевна", role="manager")
@@ -1027,7 +1027,7 @@ async def test_weekly_digest_catch_up_window(
 
 async def test_caught_up_digest_is_not_sent_twice(app: BotHarness, travel: Any) -> None:
     """Сводку за неделю 05.10–11.10 догнали после запуска в 9:31. В 10:00 бот перезапустили, и
-    планировщик снова попробовал её отправить, — руководители не получают её второй раз. Через
+    планировщик снова попробовал её отправить, — начальники не получают её второй раз. Через
     неделю приходит уже новая сводка. Учёт ведётся в БД (DigestLog), поэтому переживает перезапуск."""
     h = app
     clock = travel
@@ -1049,7 +1049,7 @@ async def test_caught_up_digest_is_not_sent_twice(app: BotHarness, travel: Any) 
 
 
 async def test_digest_not_delivered_to_anyone_is_retried(app: BotHarness, travel: Any) -> None:
-    """Оба руководителя заблокировали бота — сводка никому не дошла и не считается отправленной:
+    """Оба начальника заблокировали бота — сводка никому не дошла и не считается отправленной:
     когда планировщик попробует снова (например, после перезапуска), она уйдёт."""
     h = app
     clock = travel
@@ -1145,9 +1145,9 @@ async def test_very_long_texts_do_not_break_messages(app: BotHarness, travel: An
 
 
 async def test_notify_proposal_to_all_active_managers(app: BotHarness, travel: Any) -> None:
-    """Сотрудник внёс устное поручение: всем активным руководителям — «📥 Сотрудник внёс поручение»
-    с кнопками «✅ Подтвердить» / «✏️ Изменить» / «❌ Отклонить»; отключённому руководителю — нет;
-    руководитель, заблокировавший бота, не мешает остальным."""
+    """Сотрудник внёс устное поручение: всем активным начальникам — «📥 Сотрудник внёс поручение»
+    с кнопками «✅ Подтвердить» / «✏️ Изменить» / «❌ Отклонить»; отключённому начальнику — нет;
+    начальник, заблокировавший бота, не мешает остальным."""
     h = app
     clock = travel
     clock.set(created_at())
@@ -1175,7 +1175,7 @@ async def test_notify_proposal_to_all_active_managers(app: BotHarness, travel: A
 
 
 async def test_notify_proposal_decision_approved(app: BotHarness, travel: Any) -> None:
-    """Руководитель подтвердил поручение: сотруднику — «✅ Руководитель подтвердил ваше поручение»,
+    """Начальник подтвердил поручение: сотруднику — «✅ Начальник подтвердил ваше поручение»,
     карточка и кнопка «📤 Сдать результат», которая сразу запускает сдачу."""
     h = app
     clock = travel
@@ -1190,7 +1190,7 @@ async def test_notify_proposal_decision_approved(app: BotHarness, travel: Any) -
     await as_manager(h, lambda s, mgr: tasks_svc.approve_proposal(s, task.id, mgr, weight=15))
     log = await h.capture(notify.notify_proposal_decision(h.bot, await h.get_task(task.id), approved=True))
     [msg] = sent(h, log, EMP)
-    assert msg.text.startswith("✅ Руководитель подтвердил ваше поручение")
+    assert msg.text.startswith("✅ Начальник подтвердил ваше поручение")
     assert "Справка для аудита" in msg.text and "15 %" in msg.text
     assert msg.button_texts == SUBMIT_BUTTONS
     await h.press_button(EMP, "Сдать результат", msg.message_id)
@@ -1198,7 +1198,7 @@ async def test_notify_proposal_decision_approved(app: BotHarness, travel: Any) -
 
 
 async def test_notify_proposal_decision_rejected_with_reason(app: BotHarness, travel: Any) -> None:
-    """Поручение отклонено: «❌ Руководитель отклонил ваше поручение», причина показана как есть
+    """Поручение отклонено: «❌ Начальник отклонил ваше поручение», причина показана как есть
     (HTML в причине не ломает сообщение), кнопок нет."""
     h = app
     clock = travel
@@ -1216,14 +1216,14 @@ async def test_notify_proposal_decision_rejected_with_reason(app: BotHarness, tr
         notify.notify_proposal_decision(h.bot, await h.get_task(task.id), approved=False, reason=reason)
     )
     [msg] = sent(h, log, EMP)
-    assert msg.text.startswith("❌ Руководитель отклонил ваше поручение")
+    assert msg.text.startswith("❌ Начальник отклонил ваше поручение")
     assert f"#{task.id}" in msg.text and "«Справка»" in msg.text
     assert f"💬 Причина: {reason}" in msg.text
     assert msg.buttons == []
 
 
 async def test_notify_task_changed_lists_old_and_new_values(office: Office) -> None:
-    """Руководитель изменил срок, вес, приоритет и название: сотрудник видит «было → стало»
+    """Начальник изменил срок, вес, приоритет и название: сотрудник видит «было → стало»
     по каждому полю и кнопки «📤 Сдать результат» / «📋 Открыть». Без изменений — ничего не шлём."""
     h, clock = office.h, office.clock
     clock.set(local(10, 3, 12))
@@ -1241,7 +1241,7 @@ async def test_notify_task_changed_lists_old_and_new_values(office: Office) -> N
     )
     log = await h.capture(notify.notify_task_changed(h.bot, await office.task(), changes))
     [msg] = sent(h, log, EMP)
-    assert msg.text.startswith("✏️ Руководитель изменил задачу")
+    assert msg.text.startswith("✏️ Начальник изменил задачу")
     assert f"#{office.task_id} «Анализ договоров поставки»" in msg.text
     assert "• Срок: 7 октября (ср), 18:00 → 9 октября (пт), 18:00" in msg.text
     assert "• Вес: 20 % → 30 %" in msg.text
@@ -1254,7 +1254,7 @@ async def test_notify_task_changed_lists_old_and_new_values(office: Office) -> N
 
 
 async def test_notify_task_changed_for_proposal(app: BotHarness, travel: Any) -> None:
-    """Руководитель скорректировал ещё не подтверждённое поручение — «скорректировал ваше поручение»,
+    """Начальник скорректировал ещё не подтверждённое поручение — «скорректировал ваше поручение»,
     кнопка только «📋 Открыть» (сдавать пока нечего)."""
     h = app
     clock = travel
@@ -1271,19 +1271,19 @@ async def test_notify_task_changed_for_proposal(app: BotHarness, travel: Any) ->
     )
     log = await h.capture(notify.notify_task_changed(h.bot, await h.get_task(task.id), changes))
     [msg] = sent(h, log, EMP)
-    assert msg.text.startswith("✏️ Руководитель скорректировал ваше поручение")
+    assert msg.text.startswith("✏️ Начальник скорректировал ваше поручение")
     assert "• Ожидаемый результат: «Подготовить справку» → «Справка на 2 страницы»" in msg.text
     assert msg.button_texts == ["📋 Открыть"]
 
 
 async def test_notify_task_cancelled(office: Office) -> None:
-    """Задачу отменили: «🚫 Задача отменена руководителем», причина, «Сдавать результат по ней
+    """Задачу отменили: «🚫 Задача отменена начальником», причина, «Сдавать результат по ней
     не нужно», кнопок нет."""
     h = office.h
     await as_manager(h, lambda s, mgr: tasks_svc.cancel_task(s, office.task_id, mgr, "Договоры отозваны"))
     log = await h.capture(notify.notify_task_cancelled(h.bot, await office.task(), "Договоры отозваны"))
     [msg] = sent(h, log, EMP)
-    assert msg.text.startswith("🚫 Задача отменена руководителем")
+    assert msg.text.startswith("🚫 Задача отменена начальником")
     assert "«Анализ договоров»" in msg.text
     assert "💬 Причина: Договоры отозваны" in msg.text
     assert "Сдавать результат по ней не нужно." in msg.text
@@ -1317,7 +1317,7 @@ async def notify_submission(h: BotHarness, task_id: int) -> RequestLog:
 
 
 async def test_notify_submission_photos_as_album_documents_one_by_one(office: Office) -> None:
-    """Сотрудник сдал результат с 3 фото, 2 документами и видео. Руководитель получает
+    """Сотрудник сдал результат с 3 фото, 2 документами и видео. Начальник получает
     «📝 Результат по задаче» (план ↔ факт, оценка, кнопки проверки и «📎 Файлы (6)»), затем фото
     одним альбомом с подписью, документы — каждый отдельным сообщением с именем файла, видео — видео."""
     h = office.h
@@ -1374,8 +1374,8 @@ async def test_notify_submission_photo_albums_respect_telegram_limits(
 
 
 async def test_notify_submission_goes_to_responsible_manager(app: BotHarness, travel: Any) -> None:
-    """Руководителей двое: результат проверяет тот, кто ставил задачу. Если его отключили в боте —
-    результат получают все активные руководители."""
+    """Начальников двое: результат проверяет тот, кто ставил задачу. Если его отключили в боте —
+    результат получают все активные начальники."""
     h = app
     clock = travel
     clock.set(created_at())
@@ -1393,7 +1393,7 @@ async def test_notify_submission_goes_to_responsible_manager(app: BotHarness, tr
 
 
 async def test_notify_submission_manager_blocked_bot_no_files_no_crash(office: Office) -> None:
-    """Руководитель заблокировал бота: сообщение не доходит, файлы ему даже не пытаются слать,
+    """Начальник заблокировал бота: сообщение не доходит, файлы ему даже не пытаются слать,
     исключений нет."""
     h = office.h
     await submission_with_files(h, office, photos=2, docs=["Акт.pdf"], videos=0)
@@ -1404,7 +1404,7 @@ async def test_notify_submission_manager_blocked_bot_no_files_no_crash(office: O
 
 
 async def test_files_button_in_submission_resends_attachments(office: Office) -> None:
-    """Руководитель нажимает «📎 Файлы (3)» в сообщении о сдаче — фото приходят альбомом,
+    """Начальник нажимает «📎 Файлы (3)» в сообщении о сдаче — фото приходят альбомом,
     документ — отдельно."""
     h = office.h
     await submission_with_files(h, office, photos=2, docs=["Акт.pdf"], videos=0)
@@ -1416,7 +1416,7 @@ async def test_files_button_in_submission_resends_attachments(office: Office) ->
 
 async def test_notify_review_result_confirmed_and_changed(office: Office) -> None:
     """Сотруднику приходит итог проверки: «🏁 Результат по задаче #N оценён», итоговая оценка
-    и решение; при изменённой оценке — комментарий руководителя. Кнопка — только «📋 Открыть»."""
+    и решение; при изменённой оценке — комментарий начальника. Кнопка — только «📋 Открыть»."""
     h, clock = office.h, office.clock
     clock.set(local(10, 6, 12))
     sub_id = await submit(h, office.task_id)
@@ -1426,8 +1426,8 @@ async def test_notify_review_result_confirmed_and_changed(office: Office) -> Non
     [msg] = sent(h, log, EMP)
     assert msg.text.startswith(f"🏁 Результат по задаче #{office.task_id} оценён")
     assert "Итоговая оценка: 95 %" in msg.text
-    assert "✏️ Оценку выставил руководитель." in msg.text
-    assert "💬 Комментарий руководителя: Отчёт без рекомендаций" in msg.text
+    assert "✏️ Оценку выставил начальник." in msg.text
+    assert "💬 Комментарий начальника: Отчёт без рекомендаций" in msg.text
     assert msg.button_texts == ["📋 Открыть"]
 
     other = await make_task(h, title="Отчёт по претензиям", due=local(10, 9, 18))
@@ -1437,13 +1437,13 @@ async def test_notify_review_result_confirmed_and_changed(office: Office) -> Non
     log = await h.capture(notify.notify_review_result(h.bot, task, task.last_submission))
     [msg] = sent(h, log, EMP)
     assert "Итоговая оценка: 110 %" in msg.text
-    assert "✅ Руководитель подтвердил предварительную оценку." in msg.text
+    assert "✅ Начальник подтвердил предварительную оценку." in msg.text
 
 
 async def test_notify_rework_submit_button_shows_manager_comment(office: Office) -> None:
     """Результат вернули на доработку: сотрудник видит «↩️ Задача #N возвращена на доработку»,
     комментарий, новый срок и кнопку «📤 Сдать результат», которая начинает повторную сдачу
-    с комментарием руководителя перед глазами."""
+    с комментарием начальника перед глазами."""
     h, clock = office.h, office.clock
     clock.set(local(10, 6, 12))
     sub_id = await submit(h, office.task_id)
@@ -1457,7 +1457,7 @@ async def test_notify_rework_submit_button_shows_manager_comment(office: Office)
     log = await h.capture(notify.notify_rework(h.bot, task, task.last_submission))
     [msg] = sent(h, log, EMP)
     assert msg.text.startswith(f"↩️ Задача #{office.task_id} возвращена на доработку")
-    assert "💬 Комментарий руководителя: Добавьте рекомендации по <нарушениям>" in msg.text
+    assert "💬 Комментарий начальника: Добавьте рекомендации по <нарушениям>" in msg.text
     assert "📅 Срок: 9 октября (пт), 18:00" in msg.text
     assert msg.button_texts == SUBMIT_BUTTONS
 
@@ -1469,7 +1469,7 @@ async def test_notify_rework_submit_button_shows_manager_comment(office: Office)
 
 
 async def test_notify_registration_to_managers(app: BotHarness) -> None:
-    """Новый сотрудник отправил заявку: каждому активному руководителю — «👤 Новая заявка на доступ»
+    """Новый сотрудник отправил заявку: каждому активному начальнику — «👤 Новая заявка на доступ»
     с ФИО, должностью, @username и кнопками «✅ Подтвердить» / «❌ Отклонить»."""
     h = app
     await h.seed_user(MGR, "Петрова Анна Сергеевна", role="manager")
@@ -1503,7 +1503,7 @@ async def test_notify_user_decision_approved_and_rejected(app: BotHarness) -> No
     h.api.reply_keyboards[3002] = h.api.reply_keyboards[3001]  # у него было показано меню
     log = await h.capture(notify.notify_user_decision(h.bot, rejected, approved=False))
     [msg] = sent(h, log, 3002)
-    assert msg.text.startswith("❌ Заявка на доступ отклонена руководителем.")
+    assert msg.text.startswith("❌ Заявка на доступ отклонена начальником.")
     assert h.reply_keyboard(3002) is None
 
 

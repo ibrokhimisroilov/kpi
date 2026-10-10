@@ -78,10 +78,10 @@ _CANCEL_HINTS = {
 # анкета (start), task_create / task_submit / task_review, task_view, task_propose.
 _PROMPT_KEYS = ("q_msg_id", "prompt_id", "tv_prompt_id", "msg_id")
 TXT_PENDING = (
-    "⏳ Заявка на рассмотрении у руководителя.\n"
+    "⏳ Заявка на рассмотрении у начальника.\n"
     "Как только вас подтвердят, придёт уведомление."
 )
-TXT_BLOCKED = "⛔ Доступ закрыт. Обратитесь к руководителю."
+TXT_BLOCKED = "⛔ Доступ закрыт. Обратитесь к начальнику."
 TXT_CANCELLED = "Действие отменено."
 TXT_NOT_UNDERSTOOD = "Не понял. Воспользуйтесь меню 👇"
 TXT_ANSWER_ABOVE = "Пожалуйста, ответьте на вопрос выше или нажмите /cancel."
@@ -92,7 +92,7 @@ TXT_APP_EMPLOYEE = "📱 Ваши задачи, сдача результата 
 
 TXT_ASK_NAME = (
     "👋 Добро пожаловать! Это бот для постановки задач и оценки эффективности.\n\n"
-    "Чтобы получить доступ, ответьте на 2 вопроса — руководитель получит заявку и подтвердит её.\n\n"
+    "Чтобы получить доступ, ответьте на 2 вопроса — начальник получит заявку и подтвердит её.\n\n"
     "<b>Шаг 1 из 2.</b> Введите ваши <b>фамилию, имя и отчество</b>.\n"
     "Например: <i>Иванов Иван Иванович</i>"
 )
@@ -132,7 +132,7 @@ def _greeting(user: User) -> str:
     if user.role == Role.MANAGER:
         return (
             f"👋 Здравствуйте, {name}!\n"
-            "Вы вошли как <b>руководитель</b>.\n\n"
+            "Вы вошли как <b>начальник</b>.\n\n"
             f"• {BTN_NEW_TASK} — задача, ожидаемый результат, срок, приоритет и вес\n"
             f"• {BTN_REVIEW} — результаты сотрудников и оценка AI\n"
             f"• {BTN_PROPOSALS} — поручения, внесённые сотрудниками\n"
@@ -146,7 +146,7 @@ def _greeting(user: User) -> str:
         f"👋 Здравствуйте, {name}!\n"
         "Здесь ваши задачи, сроки и оценка эффективности.\n\n"
         f"• {BTN_MY_TASKS} — задачи и сроки\n"
-        f"• {BTN_PROPOSE} — внести устное поручение руководителя\n"
+        f"• {BTN_PROPOSE} — внести устное поручение начальника\n"
         f"• {BTN_SUBMIT} — отчитаться о выполнении\n"
         f"• {BTN_MY_KPI} — ваш коэффициент эффективности\n\n"
         f"Подробнее — «{BTN_HELP}»."
@@ -162,7 +162,7 @@ async def _bot_link(bot: Bot) -> str | None:
 
 
 async def _manager_extras(session: AsyncSession, bot: Bot) -> str:
-    """Подсказки руководителю: новые заявки, как подключить сотрудников."""
+    """Подсказки начальнику: новые заявки, как подключить сотрудников."""
     lines: list[str] = []
     pending = await users.list_pending(session)
     if pending:
@@ -388,7 +388,7 @@ async def _finish_registration(
     user: User | None,
     position: str | None,
 ) -> None:
-    """Сохранить анкету, уведомить руководителей. На callback отвечает вызывающий хендлер."""
+    """Сохранить анкету, уведомить начальников. На callback отвечает вызывающий хендлер."""
     data = await state.get_data()
     full_name: str | None = data.get("full_name")
     user = await _ensure_user(session, event, user)
@@ -406,12 +406,12 @@ async def _finish_registration(
     try:
         await notify.notify_registration(bot, session, user)
     except Exception:  # уведомление не должно ломать регистрацию — анкета уже сохранена
-        log.exception("Не удалось отправить руководителям заявку пользователя %s", user.id)
+        log.exception("Не удалось отправить начальникам заявку пользователя %s", user.id)
 
     summary = f"👤 {esc(user.full_name)}\n💼 {esc(user.position) if user.position else 'должность не указана'}"
     if await users.list_managers(session):
         text = (
-            "✅ Заявка отправлена руководителю.\n\n"
+            "✅ Заявка отправлена начальнику.\n\n"
             f"{summary}\n\n"
             "Как только вас подтвердят, придёт уведомление."
         )
@@ -419,8 +419,8 @@ async def _finish_registration(
         text = (
             "✅ Анкета сохранена.\n\n"
             f"{summary}\n\n"
-            "⚠️ В боте пока нет ни одного руководителя, поэтому заявку некому подтвердить. "
-            "Сообщите об этом руководителю: ему нужно запустить бота (его Telegram ID должен быть "
+            "⚠️ В боте пока нет ни одного начальника, поэтому заявку некому подтвердить. "
+            "Сообщите об этом начальнику: ему нужно запустить бота (его Telegram ID должен быть "
             "указан в настройках ADMIN_IDS). Как только вас подтвердят, придёт уведомление."
         )
     await common.send_new(event, text, keyboards.main_menu(user))

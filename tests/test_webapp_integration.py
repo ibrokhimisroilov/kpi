@@ -640,7 +640,7 @@ async def test_start_manager_gets_app_button_in_webhook_mode(chat: BotHarness, w
     messages = h.messages(MGR)
     assert len(messages) == 2
     greeting, app_message = messages
-    assert "руководитель" in greeting.text
+    assert "начальник" in greeting.text
     assert BTN_NEW_TASK in (h.reply_keyboard(MGR) or [])  # главное меню осталось на месте
     assert app_message.text == start.TXT_APP_MANAGER
     [button] = app_message.buttons

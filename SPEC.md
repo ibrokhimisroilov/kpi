@@ -17,7 +17,7 @@
   `DbInt` (диапазон INTEGER SQLite): подделанный id вроде 2^63 не совпадает ни с одним фильтром → «Кнопка устарела».
 * Время: в БД — **naive UTC**; пользователю — местное время `settings.timezone` (по умолчанию Asia/Tashkent).
   Хелперы — `bot/utils/dates.py` (`utcnow`, `to_local`, `to_utc`, `deadline_from_local_date`, `fmt_*`).
-* **AI только предлагает** оценку, окончательное решение — за руководителем. При недоступности AI
+* **AI только предлагает** оценку, окончательное решение — за начальником. При недоступности AI
   (нет ключа, исчерпан бесплатный лимит, бесплатный тариф закрыт, ошибка сети) бот сам переходит к следующему
   бесплатному провайдеру, а если не ответил никто — работает на правилах; бот никогда не «ломается» из-за AI.
 * Всё, что меняет задачу, пишется в журнал `TaskEvent` («все изменения фиксируются в системе»).
@@ -55,14 +55,14 @@ bot/
   handlers/common.py           # edit_or_answer, send_new, remove_markup, deny, dt_to/from_state (готово) [core]
   handlers/start.py            # /start, регистрация, меню, помощь, отмена              [B1]
   handlers/users_admin.py      # сотрудники: подтверждение, роли, блокировка             [B2]
-  handlers/task_create.py      # руководитель ставит задачу                             [B3]
-  handlers/task_propose.py     # сотрудник вносит поручение; подтверждение руководителем [B4]
+  handlers/task_create.py      # начальник ставит задачу                             [B3]
+  handlers/task_propose.py     # сотрудник вносит поручение; подтверждение начальником [B4]
   handlers/task_view.py        # списки задач, карточка, принять, правка, отмена, история [B5]
   handlers/task_submit.py      # сотрудник сдаёт фактический результат + AI-оценка       [B6]
-  handlers/task_review.py      # руководитель подтверждает/меняет/возвращает             [B7]
+  handlers/task_review.py      # начальник подтверждает/меняет/возвращает             [B7]
   handlers/dashboard.py        # команда, карточка сотрудника, моя эффективность, экспорт [B8]
   scheduler/jobs.py            # напоминания, просрочки, еженедельная сводка             [A5]
-  scheduler/backup.py          # ежедневная резервная копия базы руководителям в Telegram [A5]
+  scheduler/backup.py          # ежедневная резервная копия базы начальникам в Telegram [A5]
   web.py                       # режим webhook: веб-сервер, фоновый цикл, монтирование Mini App (§10.4, §10.6, §11)
   webapp/                      # приложение в Telegram (Mini App): API /api, страница /app, SPA (§11, docs/MINIAPP_SPEC.md)
   fsm_storage.py               # DbStorage — диалоги (FSM) в таблице fsm_state (§10.1)
@@ -108,7 +108,7 @@ reviewer_id, reviewed_at)`; связи `task`, `reviewer`, `attachments`.
 ### Жизненный цикл задачи
 
 ```
-                 (сотрудник вносит)            (руководитель ставит)
+                 (сотрудник вносит)            (начальник ставит)
                     PROPOSED ──reject──► REJECTED      │
                        │approve                         │
                        ▼                                ▼
@@ -118,7 +118,7 @@ reviewer_id, reviewed_at)`; связи `task`, `reviewer`, `attachments`.
    │               SUBMITTED ──confirm/change──► DONE (final_score)
    │                   │ rework
    └──── REWORK ◄──────┘
-   ACTIVE/REWORK/PROPOSED ──cancel (руководитель)──► CANCELLED
+   ACTIVE/REWORK/PROPOSED ──cancel (начальник)──► CANCELLED
 ```
 
 * REWORK ведёт себя как ACTIVE (можно сдавать снова, приходят напоминания).
@@ -138,20 +138,20 @@ async def get_by_tg(session, tg_id: int) -> User | None
 async def get_user(session, user_id: int) -> User | None
 async def register_or_get(session, tg_id: int, username: str | None, tg_full_name: str) -> tuple[User, bool]
     # создаёт при первом /start; если tg_id в settings.admin_ids -> role=MANAGER, status=ACTIVE сразу
-    # (и при повторном /start тоже повышает до активного руководителя). Возвращает (user, created).
+    # (и при повторном /start тоже повышает до активного начальника). Возвращает (user, created).
 async def complete_registration(session, user: User, full_name: str, position: str | None) -> User
-    # сотрудник ввёл ФИО/должность; статус остаётся PENDING (ждёт руководителя)
+    # сотрудник ввёл ФИО/должность; статус остаётся PENDING (ждёт начальника)
 async def approve_user(session, user_id: int, actor: User) -> User      # -> ACTIVE (роль не меняется)
 async def reject_user(session, user_id: int, actor: User) -> User       # -> BLOCKED
 async def block_user(session, user_id: int, actor: User) -> User        # -> BLOCKED; нельзя заблокировать себя
 async def unblock_user(session, user_id: int, actor: User) -> User      # -> ACTIVE
-async def set_role(session, user_id: int, role: Role, actor: User) -> User  # нельзя понизить себя / последнего руководителя
+async def set_role(session, user_id: int, role: Role, actor: User) -> User  # нельзя понизить себя / последнего начальника
 async def list_employees(session) -> list[User]   # ACTIVE + EMPLOYEE, сортировка по full_name
 async def list_managers(session) -> list[User]    # ACTIVE + MANAGER
 async def list_pending(session) -> list[User]     # PENDING, у кого заполнено full_name (регистрация завершена)
 async def list_all(session) -> list[User]         # все, сортировка: статус, роль, ФИО
 ```
-`actor` во всех мутациях должен быть активным руководителем, иначе DomainError.
+`actor` во всех мутациях должен быть активным начальником, иначе DomainError.
 
 ### 3.2 `bot/services/tasks.py` [A1]
 
@@ -170,7 +170,7 @@ async def create_task(session, *, creator: User, assignee_id: int, title: str, e
                       deadline: datetime, weight: int, priority: Priority = Priority.MEDIUM,
                       description: str | None = None, plan_value: float | None = None,
                       plan_unit: str | None = None) -> Task
-    # creator — активный руководитель; assignee — активный сотрудник; weight 1..100; deadline UTC.
+    # creator — активный начальник; assignee — активный сотрудник; weight 1..100; deadline UTC.
     # status=ACTIVE, source=MANAGER, manager_id=creator.id. Событие CREATED.
 async def propose_task(session, *, employee: User, title: str, expected_result: str, deadline: datetime,
                        description: str | None = None, plan_value: float | None = None,
@@ -183,7 +183,7 @@ async def reject_proposal(session, task_id: int, manager: User, reason: str | No
     # PROPOSED -> REJECTED. Событие REJECTED(reason).
 async def update_task(session, task_id: int, actor: User, **fields) -> tuple[Task, dict[str, tuple]]
     # Разрешённые поля: title, expected_result, description, plan_value, plan_unit, deadline, priority, weight.
-    # Только руководитель; только для PROPOSED/ACTIVE/REWORK. Возвращает (task, changes {field: (old, new)}).
+    # Только начальник; только для PROPOSED/ACTIVE/REWORK. Возвращает (task, changes {field: (old, new)}).
     # Пустые changes -> событие не пишется. Смена deadline сбрасывает ReminderLog задачи. Событие EDITED.
 async def accept_task(session, task_id: int, employee: User) -> Task
     # исполнитель подтверждает получение (accepted_at); повторно — без ошибки. Событие ACCEPTED.
@@ -317,10 +317,10 @@ def in_quiet_hours(now: datetime | None = None) -> bool          # по мест
   пороги помечает сам через mark_sent).
 * **в день срока**: `0 < осталось ≤ reminder_hours_before часов` → `kind="before_hours"`.
 * **срок истёк**: `kind="deadline_passed"` (сотруднику: «Что фактически сделано? Какой получен результат?
-  Какие документы подтверждают выполнение?» + кнопка «Сдать результат») и `kind="overdue_manager"` (руководителю).
+  Какие документы подтверждают выполнение?» + кнопка «Сдать результат») и `kind="overdue_manager"` (начальнику).
 * **ежедневно по просроченным**: после `settings.overdue_reminder_hour` местного времени — `kind=f"overdue_{YYYY-MM-DD}"`,
   но не в тот же день, когда ушло `deadline_passed`.
-* **непроверенный результат**: SUBMITTED дольше `review_reminder_days` → руководителю `kind=f"review_{YYYY-MM-DD}"` раз в день.
+* **непроверенный результат**: SUBMITTED дольше `review_reminder_days` → начальнику `kind=f"review_{YYYY-MM-DD}"` раз в день.
 * Уже записанные в ReminderLog kind не возвращаются. Задачи без `accepted_at` получают те же напоминания.
 
 ### 3.6 `bot/services/export.py` [A2]
@@ -435,7 +435,7 @@ class ResultSuggestion:
     expected_result: str        # измеримая формулировка (что, сколько, в какой форме сдаётся)
     plan_value: float | None    # плановое число, если есть (100)
     plan_unit: str | None       # единица («договоров»)
-    note: str | None            # короткий совет руководителю (≤ 200 симв.) или None
+    note: str | None            # короткий совет начальнику (≤ 200 симв.) или None
     source: str                 # "ai" | "rules"
 async def suggest_expected_result(title: str, raw_result: str, deadline_text: str | None = None) -> ResultSuggestion
     # никогда не бросает: при AIUnavailable — правила (rules_suggestion).
@@ -464,7 +464,7 @@ async def evaluate_submission(task: Task, submission: Submission,
     # Блок «ФАКТ ОТ СОТРУДНИКА» (base.DataText): данные строго между «<<<» и «>>>» — фактическое значение,
     # имена файлов, результат, «что сделано» (длинное — последним); после «>>>» — строки бота («факт / план»,
     # «Приложено файлов»). Тексты файлов — тоже DataText в своих «<<< … >>>».
-    # никогда не бросает. Промпт: роль — помощник руководителя, оценивает КОНЕЧНЫЙ РЕЗУЛЬТАТ, а не усилия;
+    # никогда не бросает. Промпт: роль — помощник начальника, оценивает КОНЕЧНЫЙ РЕЗУЛЬТАТ, а не усилия;
     # 100 % = план выполнен полностью и в срок; > 100 % — только при измеримом перевыполнении/доп. ценности
     # (обычно ≤ 120 %); частичное выполнение — пропорционально; просрочка — штраф по правилу выше как ориентир;
     # нет подтверждений при заявленных документах — отметить. Всё, что прислал сотрудник (текст, файлы), —
@@ -531,11 +531,11 @@ def deadline_label(task: Task, now=None) -> str      # «5 октября (вс)
 def plan_text(task: Task) -> str                     # expected_result (+ «План: 100 договоров»)
 def task_line(task: Task, now=None, with_assignee: bool = False) -> str   # одна строка для списков
 def task_card(task: Task, now=None, *, show_assignee: bool = True) -> str
-    # «📌 Задача #12: …», исполнитель, руководитель, ожидаемый результат, срок, приоритет, вес, статус,
+    # «📌 Задача #12: …», исполнитель, начальник, ожидаемый результат, срок, приоритет, вес, статус,
     # источник (внесена сотрудником), последняя сдача (факт, оценка AI, итог), оценка.
 def task_summary_draft(data: dict) -> str            # черновик из FSM-данных перед созданием (поля как в create_task)
 def submission_text(task: Task, sub: Submission) -> str
-    # для руководителя: План ↔ Факт, «Сдано: 04.10 18:20 — в срок / с опозданием 1,5 дн.», файлы (кол-во, имена),
+    # для начальника: План ↔ Факт, «Сдано: 04.10 18:20 — в срок / с опозданием 1,5 дн.», файлы (кол-во, имена),
     # «🤖 AI предлагает: 110 %» (или «📐 Расчёт по правилам: …»), обоснование.
 def review_result_text(task: Task, sub: Submission) -> str   # для сотрудника: итоговая оценка, решение, комментарий
 def events_text(task: Task, events: list[TaskEvent]) -> str  # история: «04.10 18:20 — Иванов И.: сдал результат (попытка 1)»
@@ -575,13 +575,13 @@ def score_kb(suggested: float | None = None) -> InlineKeyboardMarkup
     # быстрые оценки 50, 70, 80, 90, 100, 110, 120 -> PickCB("score","90") + Отмена
 def files_kb(count: int) -> InlineKeyboardMarkup   # [✅ Готово (N)] PickCB("files","done") / [Без файлов] ("files","none") / Отмена
 def task_actions_kb(task: Task, viewer: User) -> InlineKeyboardMarkup
-    # руководитель: PROPOSED -> approve/reject/pedit (TaskCB); ACTIVE/REWORK -> «✏️ Изменить» edit, «🚫 Отменить» cancel;
+    # начальник: PROPOSED -> approve/reject/pedit (TaskCB); ACTIVE/REWORK -> «✏️ Изменить» edit, «🚫 Отменить» cancel;
     #               SUBMITTED -> «🔍 Проверить» review; всегда «📜 История» history.
     # исполнитель:  ACTIVE без accepted_at -> «✅ Принял в работу» accept; ACTIVE/REWORK -> «📤 Сдать результат» submit;
     #               «📜 История» history.
 def new_task_kb(task: Task) -> InlineKeyboardMarkup      # сотруднику: [✅ Принял в работу] [📋 Открыть]
 def submit_kb(task: Task) -> InlineKeyboardMarkup        # [📤 Сдать результат] [📋 Открыть] — для напоминаний
-def proposal_kb(task: Task) -> InlineKeyboardMarkup      # руководителю: [✅ Подтвердить] [✏️ Изменить] [❌ Отклонить]
+def proposal_kb(task: Task) -> InlineKeyboardMarkup      # начальнику: [✅ Подтвердить] [✏️ Изменить] [❌ Отклонить]
 def review_kb(sub: Submission) -> InlineKeyboardMarkup
     # [✅ Подтвердить 110 %] SubCB("ok") (если ai_score есть) / [✏️ Изменить оценку] ("change") / [↩ На доработку] ("rework")
     # + [📎 Файлы (N)] ("files") при наличии вложений
@@ -613,19 +613,19 @@ async def safe_send(bot, chat_id: int, text: str, **kwargs) -> Message | None
 async def send_attachments(bot, chat_id: int, sub: Submission) -> None
     # фото — send_photo/media group, документы — send_document по file_id, видео — send_video; caption с именем.
 # Уведомления одному человеку возвращают bool «доставлено» (None — упали с ошибкой; исключений нет):
-# руководителю пишется «исполнитель получил уведомление» только при True, иначе — «⚠️ Уведомление не
+# начальнику пишется «исполнитель получил уведомление» только при True, иначе — «⚠️ Уведомление не
 # доставлено … сообщите лично» (handlers.common.NOT_DELIVERED).
 async def notify_new_task(bot, task: Task) -> bool            # исполнителю: карточка + new_task_kb
-async def notify_proposal(bot, session, task: Task) -> int    # всем активным руководителям: карточка + proposal_kb; -> сколько получили
+async def notify_proposal(bot, session, task: Task) -> int    # всем активным начальникам: карточка + proposal_kb; -> сколько получили
 async def notify_proposal_decision(bot, task: Task, approved: bool, reason: str | None = None) -> bool
 async def notify_task_changed(bot, task: Task, changes: dict[str, tuple]) -> bool   # исполнителю: что изменилось (план — с единицей)
 async def notify_task_cancelled(bot, task: Task, reason: str | None = None) -> bool
 async def notify_submission(bot, session, task: Task, sub: Submission) -> None
-    # получатель: task.manager (если активный руководитель), иначе все активные руководители;
+    # получатель: task.manager (если активный начальник), иначе все активные начальники;
     # submission_text + review_kb, затем send_attachments.
 async def notify_review_result(bot, task: Task, sub: Submission) -> bool   # исполнителю: review_result_text
 async def notify_rework(bot, task: Task, sub: Submission) -> bool          # исполнителю: комментарий, новый срок, submit_kb
-async def notify_registration(bot, session, user: User) -> None            # руководителям: заявка + registration_kb
+async def notify_registration(bot, session, user: User) -> None            # начальникам: заявка + registration_kb
 async def notify_user_decision(bot, user: User, approved: bool) -> bool    # пользователю: доступ открыт (+ main_menu) / отклонён
 ```
 
@@ -670,26 +670,26 @@ async def notify_user_decision(bot, user: User, approved: bool) -> bool    # п�
 | Кнопка / команда | Роль | Модуль |
 |---|---|---|
 | /start, /menu, /help, «❓ Помощь», /cancel | все | start |
-| «👥 Сотрудники» /staff | руководитель | users_admin |
-| «➕ Поставить задачу» /new | руководитель | task_create |
+| «👥 Сотрудники» /staff | начальник | users_admin |
+| «➕ Поставить задачу» /new | начальник | task_create |
 | «➕ Добавить поручение» /propose | сотрудник | task_propose |
-| «📥 Предложения» /proposals | руководитель | task_propose |
+| «📥 Предложения» /proposals | начальник | task_propose |
 | «✅ Сдать результат» /submit | сотрудник | task_submit |
-| «📝 На проверке» /review | руководитель | task_review |
-| «📋 Задачи» /tasks | руководитель | task_view |
+| «📝 На проверке» /review | начальник | task_review |
+| «📋 Задачи» /tasks | начальник | task_view |
 | «📋 Мои задачи» /my | сотрудник | task_view |
-| «📊 Команда» /team | руководитель | dashboard |
+| «📊 Команда» /team | начальник | dashboard |
 | «📈 Моя эффективность» /kpi | сотрудник | dashboard |
-| «📤 Экспорт» /export | руководитель | dashboard |
+| «📤 Экспорт» /export | начальник | dashboard |
 
 ### 7.1 start.py [B1]
 * `/start`: `register_or_get`. Активный → приветствие по роли + `main_menu`. Новый/без ФИО → FSM регистрации:
   ФИО («Иванов Иван Иванович», 2–200 симв., минимум 2 слова) → должность (или «⏭ Пропустить») →
-  `complete_registration` → commit → `notify_registration` → «Заявка отправлена руководителю». PENDING с ФИО →
+  `complete_registration` → commit → `notify_registration` → «Заявка отправлена начальнику». PENDING с ФИО →
   «Заявка на рассмотрении». BLOCKED → «Доступ закрыт».
 * Приветствие активного (`_send_welcome`, и после `/start`, и при смене статуса во время анкеты): если
   `settings.webapp_url` не пуст (webhook + https + `WEBAPP_ENABLED`, §11) — **вторым** сообщением
-  «📱 Команда, задачи, проверка результатов и KPI — в приложении.» (руководителю) / «📱 Ваши задачи, сдача
+  «📱 Команда, задачи, проверка результатов и KPI — в приложении.» (начальнику) / «📱 Ваши задачи, сдача
   результата и KPI — в приложении.» (сотруднику) с inline-кнопкой `keyboards.open_app_kb(url)`
   («📱 Открыть приложение», `web_app=WebAppInfo(url)`). Отдельное сообщение — потому что у приветствия
   reply-клавиатура главного меню. Неактивным и в `polling` — не отправляется; обращений к БД не добавляет.
@@ -702,13 +702,13 @@ async def notify_user_decision(bot, user: User, approved: bool) -> bool    # п�
 * `/help`, «❓ Помощь» → `render.help_text(user)`.
 * `/menu` → меню.
 
-### 7.2 users_admin.py [B2] (руководитель)
+### 7.2 users_admin.py [B2] (начальник)
 * «👥 Сотрудники»: список всех (`render.user_line`), сначала заявки PENDING; кнопка на каждого → `UserCB("manage")` →
   карточка с `user_manage_kb`. Действия approve/reject/block/unblock/role_mgr/role_emp → сервис → commit →
   обновить карточку; approve/reject → `notify_user_decision`. Заявки, пришедшие уведомлением (`registration_kb`), —
-  тот же хендлер; если заявка уже обработана другим руководителем — ответить alert «Уже обработано».
+  тот же хендлер; если заявка уже обработана другим начальником — ответить alert «Уже обработано».
 
-### 7.3 task_create.py [B3] (руководитель) — «Поставить задачу»
+### 7.3 task_create.py [B3] (начальник) — «Поставить задачу»
 Сценарий (каждый шаг — с кнопкой Отмена):
 1. Выбор сотрудника (`choose_user_kb(list_employees)`); нет сотрудников → «Сначала подтвердите сотрудников (👥 Сотрудники)».
 2. «Задача» — короткое название (≤ 255).
@@ -720,7 +720,7 @@ async def notify_user_decision(bot, user: User, approved: bool) -> bool    # п�
    Диалог хранится в БД и переживает перезапуск, поэтому флаг не должен «заморозить» черновик: при мягкой
    остановке бота посреди запроса (`CancelledError`) сохраняется вариант по правилам (`ai_lost`); флаг старше
    `(ai_timeout_sec + 5) × число моделей + 60 с` (жёсткая остановка) считается брошенным. В обоих случаях
-   следующее сообщение руководителя показывает вариант по правилам с кнопками и пояснением «Вариант от AI не пришёл».
+   следующее сообщение начальника показывает вариант по правилам с кнопками и пояснением «Вариант от AI не пришёл».
 4. Срок — `deadline_kb()` или текстом (`parse_deadline`); непонятно/в прошлом → переспросить с примерами.
 5. Приоритет — `priority_kb()`.
 6. Вес — `weight_kb(load)`, где load = `weight_load(...)` на неделю срока; подсказка «Сейчас на неделе: 70 %. Рекомендуется,
@@ -731,8 +731,8 @@ async def notify_user_decision(bot, user: User, approved: bool) -> bool    # п�
 
 ### 7.4 task_propose.py [B4]
 Сотрудник «➕ Добавить поручение» (устное поручение): название → ожидаемый результат (AI-помощь как в 7.3, тот же
-`ai_suggestion_kb`) → план (если нужно) → срок → сводка → `propose_task` → commit → `notify_proposal` → «Отправлено руководителю».
-Руководитель (уведомление с `proposal_kb` или «📥 Предложения» → список `ListCB("proposals")`):
+`ai_suggestion_kb`) → план (если нужно) → срок → сводка → `propose_task` → commit → `notify_proposal` → «Отправлено начальнику».
+Начальник (уведомление с `proposal_kb` или «📥 Предложения» → список `ListCB("proposals")`):
 * ✅ Подтвердить → выбор веса (`weight_kb(load)`) → приоритет → `approve_proposal` → commit → `notify_proposal_decision(approved=True)`.
 * ✏️ Изменить (`pedit`) → `edit_fields_kb` (название, результат, план, срок) → ввод → `update_task` → показать карточку снова
   с `proposal_kb` (изменения видны сотруднику после подтверждения: `notify_task_changed`).
@@ -741,12 +741,12 @@ async def notify_user_decision(bot, user: User, approved: bool) -> bool    # п�
 
 ### 7.5 task_view.py [B5]
 * «📋 Мои задачи» (сотрудник): `ListCB("my", "open")` — вкладки: В работе / Просрочены / На проверке / Выполнены / Все.
-* «📋 Задачи» (руководитель): `ListCB("all", "open")`, те же вкладки, в строке — исполнитель. `ListCB("emp", ..., user_id)` —
+* «📋 Задачи» (начальник): `ListCB("all", "open")`, те же вкладки, в строке — исполнитель. `ListCB("emp", ..., user_id)` —
   задачи одного сотрудника (из карточки сотрудника).
-* `TaskCB("open")` → `task_card` + `task_actions_kb(task, user)`. Права: руководитель — любые; сотрудник — только свои.
+* `TaskCB("open")` → `task_card` + `task_actions_kb(task, user)`. Права: начальник — любые; сотрудник — только свои.
 * `TaskCB("accept")` → `accept_task` → обновить карточку.
 * `TaskCB("history")` → `events_text(task, task_events(...))`.
-* `TaskCB("edit")` (руководитель, ACTIVE/REWORK) → `edit_fields_kb` (название, результат, план, срок, приоритет, вес) → ввод
+* `TaskCB("edit")` (начальник, ACTIVE/REWORK) → `edit_fields_kb` (название, результат, план, срок, приоритет, вес) → ввод
   (срок — `deadline_kb`/текст; приоритет — `priority_kb`; вес — `weight_kb`) → `update_task` → commit →
   `notify_task_changed` → карточка.
 * `TaskCB("cancel")` → подтверждение + причина (или Пропустить) → `cancel_task` → commit → `notify_task_cancelled`.
@@ -754,7 +754,7 @@ async def notify_user_decision(bot, user: User, approved: bool) -> bool    # п�
 ### 7.6 task_submit.py [B6] (сотрудник)
 * «✅ Сдать результат» → список открытых задач сотрудника (ACTIVE/REWORK) кнопками `TaskCB("submit")`; нет задач — сообщить.
 * `TaskCB("submit")` (из списка, карточки, напоминания): проверить, что задача своя и открыта. Показать план
-  (`plan_text`), при REWORK — последний комментарий руководителя. Затем вопросы:
+  (`plan_text`), при REWORK — последний комментарий начальника. Затем вопросы:
   1. «Что фактически сделано?» (текст, обязательно).
   2. «Какой получен результат?» (текст или Пропустить).
   3. Если у задачи есть plan_value: «Фактическое значение? План: 100 договоров» (число или Пропустить; `parse_number`).
@@ -763,15 +763,15 @@ async def notify_user_decision(bot, user: User, approved: bool) -> bool    # п�
      (несколько, в т.ч. альбомом; на каждый — «📎 Добавлено: N»; `files_kb(N)`), «✅ Готово» / «Без файлов».
   5. Сводка + `confirm_kb("📤 Отправить", edit=False)`.
 * Отправка: `submit_result` → **commit** → сообщение «⏳ Анализирую результат…» → `collect_evidence` → `evaluate_submission` →
-  `record_evaluation` → commit → `notify_submission` → сотруднику: «✅ Результат отправлен руководителю на проверку»
-  (оценку AI сотруднику не показывать до решения руководителя).
+  `record_evaluation` → commit → `notify_submission` → сотруднику: «✅ Результат отправлен начальнику на проверку»
+  (оценку AI сотруднику не показывать до решения начальника).
 * Если AI упал/долго — всё равно `rules_score` (evaluate_submission сам не бросает). Бюджет всей оценки —
   `ai_evaluate.evaluation_budget_sec()` = `ai_timeout_sec × 2 + 30` с; AI получает `time_budget` = остаток после
   скачивания файлов минус 5 с, чтобы перебор моделей закончился сам, а не был прерван общим сроком.
-* Бота остановили посреди оценки (деплой, сбой) — сдача сохранена без оценки, руководитель не уведомлён:
+* Бота остановили посреди оценки (деплой, сбой) — сдача сохранена без оценки, начальник не уведомлён:
   её находит `jobs.recover_stalled_evaluations` (§8) и доводит до конца.
 
-### 7.7 task_review.py [B7] (руководитель)
+### 7.7 task_review.py [B7] (начальник)
 * «📝 На проверке» → `ListCB("review")`: задачи SUBMITTED; кнопка → `TaskCB("review")` → `submission_text` + `review_kb`.
 * `SubCB("ok")` → `review_confirm` → commit → `notify_review_result` → отредактировать сообщение: «✅ Подтверждено: 110 %».
 * `SubCB("change")` → `score_kb(ai_score)` или ввод числа (`parse_percent`, 0..max_score) → «Комментарий к оценке?»
@@ -782,13 +782,13 @@ async def notify_user_decision(bot, user: User, approved: bool) -> bool    # п�
 * Если сдача уже проверена/не последняя/задача не SUBMITTED → alert «Результат уже обработан».
 
 ### 7.8 dashboard.py [B8]
-* «📊 Команда» (руководитель) → `get_period("week", 0)`, `kpi_for_team`, `team_dashboard` + `team_kb`. `PeriodCB("team")` —
+* «📊 Команда» (начальник) → `get_period("week", 0)`, `kpi_for_team`, `team_dashboard` + `team_kb`. `PeriodCB("team")` —
   переключение периода/листание (редактировать сообщение).
 * `UserCB("card")` / `PeriodCB("emp")` → `employee_card` (неделя + месяц + выбранный период) + `employee_card_kb`.
 * `UserCB("history")` → `evaluated_history` → `history_text` + `history_kb` (пагинация через UserCB(page)).
 * «📈 Моя эффективность» (сотрудник) / `PeriodCB("me")` → своя карточка (`employee_card`) + period_kb("me").
   Сотрудник видит только себя.
-* «📤 Экспорт» (руководитель) → `export_kb` → `PeriodCB("export")` → «⏳ Готовлю отчёт…» → `build_report_xlsx` →
+* «📤 Экспорт» (начальник) → `export_kb` → `PeriodCB("export")` → «⏳ Готовлю отчёт…» → `build_report_xlsx` →
   `answer_document(BufferedInputFile(data, filename="kpi_<период>.xlsx"))`.
 
 ## 8. Планировщик `bot/scheduler/jobs.py` [A5]
@@ -802,17 +802,17 @@ async def run_reminders(bot, sessionmaker, now: datetime | None = None) -> int  
     # в тихие часы ничего не отправлять (кроме ничего). due_reminders -> отправить -> mark_sent -> commit.
     # Тексты: «⏰ До срока задачи «…» осталось 3 дня (5 октября, 18:00)» + submit_kb;
     # «⌛ Срок задачи «…» истёк. Что фактически сделано? Какой получен результат? Какие документы подтверждают выполнение?» + submit_kb;
-    # руководителю — «⚠️ Просрочена задача #N «…» (Иванов И.)» + кнопка открыть; «📝 Ждёт проверки N дн.» + TaskCB("review").
+    # начальнику — «⚠️ Просрочена задача #N «…» (Иванов И.)» + кнопка открыть; «📝 Ждёт проверки N дн.» + TaskCB("review").
     # Если сотрудник заблокировал бота — пометить отправленным всё равно (не долбить).
 async def weekly_digest(bot, sessionmaker, now: datetime | None = None, *, once: bool = False) -> None
-    # каждому активному руководителю: team_dashboard за прошлую неделю (offset=-1) + team_kb
+    # каждому активному начальнику: team_dashboard за прошлую неделю (offset=-1) + team_kb
     # (+ кнопки «📝 На проверке (N)» / «📥 Предложения (N)», если есть что решать).
     # Доставлено хоть одному -> запись DigestLog; once=True и запись за эту неделю уже есть -> ничего не слать.
 async def recover_stalled_evaluations(bot, sessionmaker, now: datetime | None = None) -> int
     # Сдачи с прерванной оценкой: задача SUBMITTED, сдача без ai_source и decision, created_at старше
     # evaluation_budget_sec() + 5 мин, но не старше суток. Каждая «занимается» JobLog("eval", str(sub.id)),
-    # затем rules_score -> record_evaluation(source="rules") -> commit -> notify_submission руководителю,
-    # сотруднику — «✅ Результат по задаче #N «…» передан руководителю на проверку». -> сколько передано.
+    # затем rules_score -> record_evaluation(source="rules") -> commit -> notify_submission начальнику,
+    # сотруднику — «✅ Результат по задаче #N «…» передан начальнику на проверку». -> сколько передано.
 ```
 `setup_scheduler` при `settings.backup_enabled` добавляет cron-задание `id="backup"` (`backup_hour`:00 по
 `settings.tz`, coalesce, misfire_grace_time 1 ч; неверный час -> 23) -> `bot/scheduler/backup.py`:
@@ -822,10 +822,10 @@ async def make_backup_bytes(database_url, *, max_bytes: int | None = None) -> by
     # согласованный снимок файла SQLite: sqlite3 online backup (src.backup(:memory:) -> serialize) в asyncio.to_thread;
     # None — база не SQLite / не в файле (:memory:) / файла нет; снимок больше max_bytes -> BackupTooLarge(size, limit).
 async def send_backup(bot, sessionmaker, now: datetime | None = None) -> int
-    # каждому активному руководителю (users.list_managers) — документ kpi_backup_ГГГГ-ММ-ДД.db (местная дата),
+    # каждому активному начальнику (users.list_managers) — документ kpi_backup_ГГГГ-ММ-ДД.db (местная дата),
     # без звука, подпись «💾 Резервная копия базы за 02.10.2026. Храните этот файл: …»; после первой загрузки —
     # тот же file_id. База больше MAX_BACKUP_BYTES — warning в лог и один раз (до удачной копии/перезапуска)
-    # сообщение руководителям. Никогда не бросает; -> скольким руководителям доставлен файл.
+    # сообщение начальникам. Никогда не бросает; -> скольким начальникам доставлен файл.
 ```
 
 ## 9. main.py [A5]
@@ -836,7 +836,7 @@ async def send_backup(bot, sessionmaker, now: datetime | None = None) -> int
 * Роутеры в порядке из раздела 7 + `start.fallback_router` последним.
 * `dp.errors` → `DomainError`: callback → `answer(msg, show_alert=True)`, message → `answer(msg)`;
   прочие → лог + «⚠️ Произошла ошибка, попробуйте ещё раз».
-* `set_my_commands` (start, menu, help, cancel; для руководителей — /new /team /review /tasks /staff /export,
+* `set_my_commands` (start, menu, help, cancel; для начальников — /new /team /review /tasks /staff /export,
   для сотрудников — /my /propose /submit /kpi — достаточно общего списка).
 * `init_db`, `setup_scheduler(...).start()`, `dp.start_polling(bot)`; при остановке — `scheduler.shutdown()`, `engine.dispose()`.
 * `def build_dispatcher(sessionmaker) -> Dispatcher` — отдельно, чтобы тесты могли собирать бота без сети.
@@ -1058,7 +1058,7 @@ def tick_schedule_summary(interval_sec: float | None = None) -> str   # расп
 
 ### 10.8 Резервная копия
 
-Ежедневная копия базы руководителям в Telegram (§8, `BACKUP_ENABLED`, `BACKUP_HOUR`) работает в обоих режимах:
+Ежедневная копия базы начальникам в Telegram (§8, `BACKUP_ENABLED`, `BACKUP_HOUR`) работает в обоих режимах:
 в `polling` — по APScheduler, в `webhook` — фоновым циклом бота (`JobLog("backup", <местная дата>)`). Копия — **всегда
 файл SQLite** `kpi_backup_ГГГГ-ММ-ДД.db`: для SQLite — online backup, для PostgreSQL — `backup.export_database`
 (все таблицы `Base.metadata` на один момент времени, REPEATABLE READ, в файл SQLite той же схемы). Такой файл
@@ -1094,13 +1094,13 @@ def tick_schedule_summary(interval_sec: float | None = None) -> str   # расп
 Полный контракт (API, схемы JSON, вход, SPA, тест-план, бюджеты обменов с базой) — **[docs/MINIAPP_SPEC.md](docs/MINIAPP_SPEC.md)**.
 Здесь — как приложение встроено в бота.
 
-* **Что это.** Одностраничное приложение внутри Telegram: руководителю — дашборд команды с графиками, задачи с
+* **Что это.** Одностраничное приложение внутри Telegram: начальнику — дашборд команды с графиками, задачи с
   фильтрами и поиском, карточки, очередь проверки (оценка AI → подтвердить / изменить / вернуть), поручения
   сотрудников, форма «Новая задача» с AI «Сделать измеримым», Excel в чат; сотруднику — «Мои задачи» (принять),
   «Сдать» с загрузкой файлов, «Мой KPI» с историей, «Поручение». Регистрация и «👥 Сотрудники» — только в чате.
 * **Одни сервисы и уведомления.** Каждое действие вызывает ту же функцию `bot/services/*`, что и чат (те же
   проверки, `DomainError` → HTTP 400 с тем же текстом), затем commit и те же `bot.notify.*`. Сдача — общий конвейер
-  `services/submission_flow.py` (оценка AI/правила + уведомление руководителю) для чата и приложения. Новых
+  `services/submission_flow.py` (оценка AI/правила + уведомление начальнику) для чата и приложения. Новых
   таблиц и миграций нет.
 * **Где работает.** Только `RUN_MODE=webhook` (нужен публичный https): страницу и API раздаёт тот же веб-сервер
   (`bot/web.py`, §10.4) — бесплатно, без CDN и сторонних библиотек (единственный внешний скрипт —
@@ -1128,3 +1128,80 @@ def tick_schedule_summary(interval_sec: float | None = None) -> str   # расп
   `test_api_budget.py`), `tests/e2e/test_submission_flow.py` (общий конвейер сдачи),
   `tests/test_webapp_integration.py` (настройки, монтирование, кнопки). Скриншоты экранов —
   `docs/miniapp_screens/`.
+
+## 12. Админ и автоподтверждение
+
+### 12.1 Админ бота
+
+Админ — начальник со всеми правами, которого нельзя понизить или заблокировать (`users.ADMIN_PROTECTED`).
+Отдельной роли нет: `Role.MANAGER` + признак админа.
+
+* Признак: отметка `User.is_admin` в базе **или** Telegram ID в настройке `ADMIN_IDS` — `users.is_admin(user)`.
+* `users.grant_admin(session, tg_id) -> User` — поставить отметку. Человек зарегистрирован (есть ФИО) — сразу
+  активный начальник. Ещё не писал боту — создаётся запись PENDING с пустым ФИО и отметкой: её нет ни среди
+  начальников, ни среди заявок, а первый `/start` (`register_or_get`) выдаёт права и берёт имя из Telegram.
+* `users.revoke_admin(session, tg_id)` — снять отметку (остаётся обычным начальником); `users.list_admins`.
+* Команда: `python -m bot.tools.admin grant|revoke|list [Telegram ID]` — работает с базой из `DATABASE_URL`,
+  настройки хостинга менять не нужно. Перед действием вызывает `init_db` (колонка добавится, если её нет).
+* В списке сотрудников админ с отметкой показан как «🛡 админ» (`render.user_line`); в карточке — `ADMIN_NOTE`,
+  кнопок «понизить» / «заблокировать» нет (`users_admin._is_config_admin` = `users.is_admin`).
+* **Новые колонки.** `init_db` после `create_all` вызывает `_add_missing_columns`: колонка модели, которой нет
+  в таблице, добавляется `ALTER TABLE … ADD COLUMN` (PostgreSQL — `IF NOT EXISTS`, под той же advisory-
+  блокировкой). Годятся только колонки, допускающие NULL или с `server_default`; иначе — `RuntimeError` при
+  запуске (нужна ручная миграция). `users.is_admin` — `Boolean`, `server_default=false()`.
+
+### 12.2 Автоподтверждение (`bot/services/auto.py`)
+
+Начальник не ответил за `AUTO_CONFIRM_HOURS` (24) — решение принимается само.
+
+| Что | Как | Что ждёт начальника всегда |
+|---|---|---|
+| Оценка результата | оценка AI становится итоговой: `tasks.review_auto_confirm` → DONE, `decision=APPROVED`, проверяющего нет (`Submission.auto_confirmed`) | расчёт по правилам (`ai_source != "ai"`), оценка выше `AUTO_CONFIRM_MAX_SCORE` (100), сдача без оценки — `auto.score_block` |
+| Поручение сотрудника | `tasks.auto_approve_proposal` → ACTIVE: вес — предложенный (временный вес поручения), приоритет средний, `manager_id` пуст (результат получат все начальники) | поручение с истёкшим сроком, неактивный сотрудник |
+| Заявка на доступ | — | всегда |
+
+**Время** (`auto.plan(started, feature_start) -> AutoPlan(due, remind_at)`): отсчёт — от сдачи
+(`Submission.created_at`) / внесения поручения (`Task.created_at`), но не раньше первого запуска задания в этой
+базе (`JobLog(job="auto", key="start")`): всё, что ждало до обновления, считается от него. Выходные считаются.
+`due` в тихие часы переносится на их конец (8:00). `remind_at = due − AUTO_CONFIRM_REMIND_HOURS` (3 ч); попало
+в тихие часы — за час до их начала накануне (20:00); получилось не позже начала отсчёта — напоминания нет.
+
+**Задание** `jobs.run_auto_decisions(bot, sessionmaker, now) -> {"confirmed", "approved", "reminded"}` — шаг
+`auto` в `run_due_jobs` (после `evaluations`) и своё задание в планировщике polling. В тихие часы ничего не
+делает. Кандидаты — одним запросом (SUBMITTED / PROPOSED, ждущие дольше `AUTO_CONFIRM_HOURS − напоминание −
+тихие часы − 1` ч). Решение занимается условным UPDATE сервиса: два экземпляра бота не примут его дважды, а
+если начальник решил сам — `DomainError`, шаг пропускается. Напоминания идут через `_deliver` (ReminderLog:
+`auto_score_<sub_id>`, `auto_proposal`; причины `auto_score` / `auto_proposal`, данные — `Reminder.data`).
+
+**Вес поручения** (`bot/ai/weigh.py`, `services/proposal_flow.py`): после `propose_task` + commit чат и
+приложение вызывают `proposal_flow.run_after_propose(bot, session, task)`: `weigh.suggest_weight` (назначение
+`formulate`, не дольше `WEIGHT_BUDGET_SEC` = 8 с; вес 5–50 кратно 5 с учётом других задач недели —
+`tasks.week_tasks`) → `tasks.set_proposal_weight` (временный вес + событие `WEIGHT_SUGGESTED`) →
+`notify_proposal(…, suggestion)`. AI выключен — вес по умолчанию (`AUTO_PROPOSAL_WEIGHT` = 10) без обращений
+к базе. При автоматическом принятии, если веса от AI нет, задание спрашивает AI ещё раз (`always_store=True`).
+Начальник видит подсказку: «💡 Предлагаемый вес» в карточке поручения, «💡» у кнопки веса
+(`keyboards.weight_kb(load, suggested)`), в приложении вес выбран заранее.
+
+**Изменить после автоподтверждения.** `tasks.review_revise_auto(session, sub_id, manager, score, comment)` —
+в течение `AUTO_REVISE_DAYS` (7) после `reviewed_at`, пока сдача `auto_confirmed`: задача остаётся DONE,
+`final_score` — новый, решение — CHANGED, событие `SCORE_CHANGED(previous, after_auto=True)`; иначе
+`DomainError(REVISE_CLOSED)`. Вернуть на доработку уже нельзя. Чат: `SubCB("revise")` (кнопка под сообщением
+об автоподтверждении — `keyboards.auto_confirmed_kb` — и в карточке задачи) → диалог `ReviewSG.score` →
+`comment` с пометкой `revise`. Приложение: `POST /api/submissions/{id}/revise`, `actions.revise`.
+
+**Что видят люди.**
+* Начальник, новая сдача (`render.submission_text`): «⏱ Без вашего решения оценка подтвердится автоматически
+  03.10 в 12:00.» или «⚠️ Сама эта оценка не подтвердится: она рассчитана без AI / выше 100 % — нужно ваше решение.»
+* Начальник, поручение (`render.task_card`, вид начальника): «💡 Предлагаемый вес: 15 %» и «⏱ Без вашего
+  решения поручение будет принято автоматически …».
+* Напоминание: «⏰ Оценка подтвердится автоматически …» + [🔍 Проверить]; «⏰ Поручение будет принято
+  автоматически …» + кнопки поручения.
+* После: `notify_auto_confirmed` — исполнителю итог («подтверждена автоматически»), начальнику задачи «⏱ Оценка
+  подтверждена автоматически: 95 %» + [✏️ Изменить оценку] [📋 Открыть]; `notify_proposal_auto_approved` —
+  исполнителю карточка «Ваше поручение принято автоматически», всем начальникам — вес и приоритет + [📋 Открыть].
+* Журнал задачи: «оценка подтверждена автоматически», «поручение принято автоматически», «предложен вес
+  поручения», «оценка изменена после автоподтверждения».
+
+**Настройки** (`bot/config.py`): `AUTO_CONFIRM_HOURS` (24; 0 — выключено), `AUTO_CONFIRM_MAX_SCORE` (100),
+`AUTO_CONFIRM_REMIND_HOURS` (3), `AUTO_REVISE_DAYS` (7), `AUTO_PROPOSAL_WEIGHT` (10).
+**Тесты:** `tests/test_auto.py`, `tests/test_admin.py`.

@@ -224,7 +224,7 @@ async def test_sdk_logs_nothing_about_afc(real_sdk, caplog) -> None:
     transport = real_sdk(rest_answer('{"score": 103}'))
     caplog.set_level(logging.DEBUG)
     for _ in range(2):  # предупреждение SDK пишет один раз на процесс, info — на каждый запрос
-        data, model = await generate_json(system="Ты — помощник руководителя", parts=["План 100"], schema=SCHEMA)
+        data, model = await generate_json(system="Ты — помощник начальника", parts=["План 100"], schema=SCHEMA)
         assert (data, model) == ({"score": 103}, "gemini-3.8-flash")
 
     assert afc_records(caplog) == []

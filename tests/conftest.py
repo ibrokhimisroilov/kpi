@@ -88,6 +88,7 @@ _CLOCK_MODULES = (
     "bot.services.kpi",
     "bot.services.periods",
     "bot.services.reminders",
+    "bot.services.auto",
     "bot.services.export",
     "bot.ai.evaluate",
     "bot.ui.render",
@@ -354,7 +355,7 @@ async def add_user(
 
 @pytest_asyncio.fixture
 async def manager(session: AsyncSession) -> User:
-    """Активный руководитель из ADMIN_IDS (tg 1001) — через register_or_get, как при /start."""
+    """Активный начальник из ADMIN_IDS (tg 1001) — через register_or_get, как при /start."""
     user, created = await users_service.register_or_get(session, 1001, "boss", "Петров Пётр Петрович")
     assert created and user.is_manager
     return user

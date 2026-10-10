@@ -1,4 +1,4 @@
-"""Сотрудники (руководитель): список, заявки на доступ, роли, блокировка. SPEC 7.2.
+"""Сотрудники (начальник): список, заявки на доступ, роли, блокировка. SPEC 7.2.
 
 * «👥 Сотрудники» / /staff — список всех пользователей (сначала заявки), по кнопке на каждого.
 * UserCB("staff", 0, page) — листание списка (действие этого модуля, в SPEC не описано).
@@ -7,7 +7,7 @@
   обновлённая карточка. Те же хендлеры обслуживают кнопки уведомления о новой заявке
   (`keyboards.registration_kb`): сообщение-уведомление превращается в карточку.
 * После блокировки и смены роли незаконченный диалог пользователя сбрасывается (он ему
-  больше не подходит). Руководителю из ADMIN_IDS кнопки «понизить»/«заблокировать» не показываются.
+  больше не подходит). Админу бота кнопки «понизить»/«заблокировать» не показываются.
 
 Права проверяются внутри хендлеров (без фильтра роли на декораторе), чтобы у
 неподходящего пользователя кнопка не «висела», а получила alert.
@@ -27,7 +27,6 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot import notify
-from bot.config import get_settings
 from bot.db.models import Role, User, UserStatus
 from bot.filters import IsManager
 from bot.handlers import common
@@ -53,19 +52,17 @@ DECISIONS = ("approve", "reject")
 
 ALREADY_PROCESSED = "Заявка уже обработана"
 USER_NOT_FOUND = "Пользователь не найден."
-ADMIN_NOTE = (
-    "🔒 Руководитель указан в настройках бота (ADMIN_IDS) — понизить или заблокировать его нельзя."
-)
-# Кнопки, которые не показываются у руководителя из ADMIN_IDS.
+ADMIN_NOTE = "🔒 Это админ бота — понизить или заблокировать его нельзя."
+# Кнопки, которые не показываются у админа.
 _ADMIN_LOCKED = ("role_emp", "block")
 # После этих действий незаконченный диалог пользователя сбрасывается (см. _reset_dialog).
 RESET_DIALOG = ("block", "role_mgr", "role_emp")
 DIALOG_DROPPED = "Незавершённое действие в боте отменено — начните его заново из меню."
 
-# Действия с сотрудниками выполняются по одному. Апдейты разных руководителей обрабатываются
+# Действия с сотрудниками выполняются по одному. Апдейты разных начальников обрабатываются
 # параллельно, и без замка оба увидели бы старый статус: заявку одновременно подтвердили бы
-# и отклонили, два руководителя понизили/заблокировали бы друг друга и оставили бот без
-# руководителя. Бот работает одним процессом, так что замка в памяти достаточно.
+# и отклонили, два начальника понизили/заблокировали бы друг друга и оставили бот без
+# начальника. Бот работает одним процессом, так что замка в памяти достаточно.
 # asyncio.Lock привязывается к event loop, поэтому замок свой на каждый цикл (тесты их меняют).
 _action_locks: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Lock] = weakref.WeakKeyDictionary()
 
@@ -74,7 +71,7 @@ def _action_lock() -> asyncio.Lock:
     return _action_locks.setdefault(asyncio.get_running_loop(), asyncio.Lock())
 
 ROLE_LABELS = {
-    Role.MANAGER: "👔 Руководитель",
+    Role.MANAGER: "👔 Начальник",
     Role.EMPLOYEE: "👤 Сотрудник",
 }
 STATUS_LABELS = {
@@ -87,7 +84,7 @@ STATUS_LABELS = {
 _GROUPS = (
     ("📥 <b>Заявки на доступ</b>", "⏳"),
     ("👤 <b>Сотрудники</b>", "👤"),
-    ("👔 <b>Руководители</b>", "👔"),
+    ("👔 <b>Начальники</b>", "👔"),
     ("🚫 <b>Заблокированы</b>", "🚫"),
 )
 
@@ -110,12 +107,12 @@ _RESULTS: dict[str, tuple[str, str]] = {
         "✅ <b>Пользователь разблокирован</b> — доступ к боту открыт.",
     ),
     "role_mgr": (
-        "👔 Назначен руководителем",
-        "👔 <b>Назначен руководителем</b> — теперь может ставить задачи, проверять результаты и смотреть отчёты.",
+        "👔 Назначен начальником",
+        "👔 <b>Назначен начальником</b> — теперь может ставить задачи, проверять результаты и смотреть отчёты.",
     ),
     "role_emp": (
         "👤 Роль изменена на «Сотрудник»",
-        "👤 <b>Роль изменена на «Сотрудник»</b> — права руководителя сняты.",
+        "👤 <b>Роль изменена на «Сотрудник»</b> — права начальника сняты.",
     ),
 }
 # Решение по заявке не дошло до человека (заблокировал бота) — вместо «отправлено уведомление».
@@ -136,7 +133,7 @@ _UNDELIVERED: dict[str, str] = {
 
 
 def _group(u: User) -> int:
-    """Порядок групп: заявки, активные сотрудники, активные руководители, заблокированные."""
+    """Порядок групп: заявки, активные сотрудники, активные начальники, заблокированные."""
     if u.status == UserStatus.PENDING:
         return 0
     if u.status == UserStatus.BLOCKED:
@@ -170,14 +167,14 @@ def _staff_screen(all_users: list[User], page: int) -> tuple[str, InlineKeyboard
     head = ["👥 <b>Сотрудники</b>"]
     head.append(
         f"Заявок: {counts[0]} · Сотрудников: {counts[1]} · "
-        f"Руководителей: {counts[2]} · Заблокировано: {counts[3]}"
+        f"Начальников: {counts[2]} · Заблокировано: {counts[3]}"
     )
     if counts[0]:
         head.append("⏳ <b>Есть новые заявки</b> — нажмите на имя, чтобы подтвердить или отклонить.")
 
     tail: list[str] = []
     if not counts[0] and not counts[1]:
-        # Ни заявок, ни активных сотрудников (например, в системе только руководители).
+        # Ни заявок, ни активных сотрудников (например, в системе только начальники).
         tail.append("")
         tail.append(
             "Пока в системе нет сотрудников. Попросите их найти бота в Telegram и нажать /start — "
@@ -283,8 +280,8 @@ def _card_kb(target: User, viewer: User, page: int) -> InlineKeyboardMarkup:
 
 
 def _is_config_admin(target: User) -> bool:
-    """Руководитель из ADMIN_IDS: понизить и заблокировать его нельзя (сервис всё равно откажет)."""
-    return target.tg_id in get_settings().admin_ids
+    """Админ бота (ADMIN_IDS или отметка в базе): понизить и заблокировать его нельзя (сервис всё равно откажет)."""
+    return users_svc.is_admin(target)
 
 
 def _action_of(button: InlineKeyboardButton) -> str | None:
@@ -363,9 +360,9 @@ async def user_action(
     action = callback_data.action
     page = callback_data.page
     # Чтение статуса, проверка и изменение — под замком (см. _action_lock): так второй
-    # руководитель читает статус уже после коммита первого.
+    # начальник читает статус уже после коммита первого.
     async with _action_lock():
-        # Права руководителя тоже перечитываем под замком: пока ждали, его могли понизить
+        # Права начальника тоже перечитываем под замком: пока ждали, его могли понизить
         # или заблокировать (UserMiddleware загрузил его до этого).
         await session.refresh(user)
         if not common.is_manager(user):
@@ -376,7 +373,7 @@ async def user_action(
             await callback.answer(USER_NOT_FOUND, show_alert=True)
             return
 
-        # Заявку уже решил другой руководитель (или эта же кнопка нажата повторно).
+        # Заявку уже решил другой начальник (или эта же кнопка нажата повторно).
         if action in DECISIONS and target.status != UserStatus.PENDING:
             await callback.answer(ALREADY_PROCESSED, show_alert=True)
             await _show_card(
@@ -389,7 +386,7 @@ async def user_action(
             target = await _apply(session, action, target.id, user)
         except DomainError as exc:
             # Сервисы проверяют всё до изменений, так что откатывать нечего:
-            # показываем причину (себя, последнего руководителя и т. п.) и актуальную карточку.
+            # показываем причину (себя, последнего начальника и т. п.) и актуальную карточку.
             await callback.answer(exc.message, show_alert=True)
             await _show_card(callback, target, user, page)
             return
@@ -398,7 +395,7 @@ async def user_action(
 
     toast, note = _RESULTS[action]
     await callback.answer(toast)
-    # Сначала уведомить человека: в карточке руководителю — правда о доставке решения по заявке.
+    # Сначала уведомить человека: в карточке начальнику — правда о доставке решения по заявке.
     dialog_dropped = action in RESET_DIALOG and await _reset_dialog(fsm_storage, bot, target)
     delivered = await _notify_target(bot, target, action, dialog_dropped)
     if action in _UNDELIVERED and not delivered:
@@ -410,7 +407,7 @@ async def _reset_dialog(storage: BaseStorage | None, bot: Bot, target: User) -> 
     """Сбросить незаконченный диалог пользователя (поручение, сдача результата, постановка задачи…).
 
     После блокировки или смены роли начатый диалог ему уже не подходит: заблокированный не должен
-    его продолжать, а бывший сотрудник/руководитель потерял бы введённое на последнем шаге из-за
+    его продолжать, а бывший сотрудник/начальник потерял бы введённое на последнем шаге из-за
     отказа сервиса. Возвращает True, если диалог был.
     """
     if storage is None:
@@ -464,13 +461,13 @@ async def _notify_target(bot: Bot, target: User, action: str, dialog_dropped: bo
             sent = await notify.safe_send(
                 bot,
                 target.tg_id,
-                "🚫 Доступ к боту закрыт руководителем.",
+                "🚫 Доступ к боту закрыт начальником.",
                 reply_markup=keyboards.main_menu(target),  # неактивному — убрать клавиатуру
             )
             return sent is not None
         if action in ("role_mgr", "role_emp") and target.status == UserStatus.ACTIVE:
             text = (
-                "👔 Вам назначена роль <b>руководителя</b>: теперь можно ставить задачи, "
+                "👔 Вам назначена роль <b>начальника</b>: теперь можно ставить задачи, "
                 "проверять результаты и смотреть отчёты. Меню обновлено 👇"
                 if action == "role_mgr"
                 else "👤 Ваша роль изменена на <b>«Сотрудник»</b>. Меню обновлено 👇"

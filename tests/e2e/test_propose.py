@@ -1,11 +1,11 @@
-"""Сценарии «Сотрудник вносит устное поручение» и решение руководителя по нему (SPEC 7.4, ТЗ п. 2).
+"""Сценарии «Сотрудник вносит устное поручение» и решение начальника по нему (SPEC 7.4, ТЗ п. 2).
 
 Сотрудник: «➕ Добавить поручение» → название → ожидаемый результат (подсказка AI или правил) →
-плановое число (если нужно) → срок → сводка → «📤 Отправить руководителю». Все активные
-руководители получают карточку с кнопками [✅ Подтвердить] [✏️ Изменить] [❌ Отклонить].
+плановое число (если нужно) → срок → сводка → «📤 Отправить начальнику». Все активные
+начальники получают карточку с кнопками [✅ Подтвердить] [✏️ Изменить] [❌ Отклонить].
 
-Руководитель: подтверждает (вес → приоритет), корректирует (название / результат / план / срок),
-отклоняет (с причиной или без). Второй руководитель, нажавший кнопку по уже решённому
+Начальник: подтверждает (вес → приоритет), корректирует (название / результат / план / срок),
+отклоняет (с причиной или без). Второй начальник, нажавший кнопку по уже решённому
 предложению, получает alert. «📥 Предложения» — очередь с пагинацией. Подтверждённое и
 выполненное поручение попадает в KPI как «внесённое самостоятельно».
 
@@ -40,7 +40,7 @@ from .fakebot import MANAGER_TG_ID, BotHarness
 pytestmark = pytest.mark.asyncio
 
 MGR = MANAGER_TG_ID          # Петрова Анна Сергеевна
-MGR2 = 1002                  # Соколов Олег Петрович — второй руководитель
+MGR2 = 1002                  # Соколов Олег Петрович — второй начальник
 EMP = 2001                   # Иванов Иван Иванович — сотрудник, вносит поручения
 EMP2 = 2002                  # Сидорова Мария Олеговна — ещё один сотрудник
 
@@ -57,7 +57,7 @@ PROPOSAL_BUTTONS = ["✅ Подтвердить", "✏️ Изменить", "�
 
 
 async def team(h: BotHarness, *, second_manager: bool = True, second_employee: bool = False) -> None:
-    """Руководитель(и) и сотрудник(и) уже в системе; у всех показано главное меню."""
+    """Начальник(и) и сотрудник(и) уже в системе; у всех показано главное меню."""
     await h.seed_user(MGR, "Петрова Анна Сергеевна", role="manager")
     people = [MGR]
     if second_manager:
@@ -98,7 +98,7 @@ async def fill_draft(
 async def propose(h: BotHarness, uid: int = EMP, **kwargs: Any) -> int:
     """Сотрудник вносит поручение целиком; возвращает номер задачи."""
     await fill_draft(h, uid, **kwargs)
-    await h.press_button(uid, "Отправить руководителю")
+    await h.press_button(uid, "Отправить начальнику")
     return await h.scalar(select(func.max(Task.id)))
 
 
@@ -194,9 +194,9 @@ def gemini(app: BotHarness, monkeypatch: pytest.MonkeyPatch) -> FakeGemini:
 
 async def test_employee_proposes_task_and_every_active_manager_is_notified(app: BotHarness) -> None:
     """Иванову устно поручили проверить договоры. Он вносит поручение в бота (AI выключен —
-    формулировку проверяют правила), отправляет руководителю — и оба активных руководителя
-    получают карточку с кнопками решения. Заблокированный руководитель ничего не получает,
-    а руководитель, который сам заблокировал бота, не мешает остальным."""
+    формулировку проверяют правила), отправляет начальнику — и оба активных начальника
+    получают карточку с кнопками решения. Заблокированный начальник ничего не получает,
+    а начальник, который сам заблокировал бота, не мешает остальным."""
     h = app
     await team(h)
     await h.seed_user(1003, "Орлов Пётр Ильич", role="manager", status="blocked")
@@ -234,12 +234,12 @@ async def test_employee_proposes_task_and_every_active_manager_is_notified(app: 
     assert "Ожидаемый результат: Проверить 100 договоров и сделать отчёт" in summary
     assert "План: 100 договоров" in summary
     assert "Исполнитель: вы" in summary
-    assert h.buttons(EMP) == ["📤 Отправить руководителю", "✏️ Изменить", "✖️ Отмена"]
+    assert h.buttons(EMP) == ["📤 Отправить начальнику", "✏️ Изменить", "✖️ Отмена"]
     assert await task_count(h) == 0, "до отправки в БД ничего не пишется"
 
-    log = await h.press_button(EMP, "Отправить руководителю")
+    log = await h.press_button(EMP, "Отправить начальнику")
     assert log.alert == "📤 Отправлено"
-    assert "Поручение #1 отправлено руководителю на подтверждение" in h.last_text(EMP)
+    assert "Поручение #1 отправлено начальнику на подтверждение" in h.last_text(EMP)
     assert "Внесена сотрудником" in h.last_text(EMP) and "Исполнитель:" not in h.last_text(EMP)
     assert h.buttons(EMP) == []
     assert await h.get_state(EMP) is None
@@ -265,22 +265,22 @@ async def test_employee_proposes_task_and_every_active_manager_is_notified(app: 
 
 
 async def test_proposal_card_does_not_pretend_weight_and_priority_were_chosen(app: BotHarness) -> None:
-    """Вес и приоритет поручению назначает руководитель при подтверждении. До этого в БД лежат
+    """Вес и приоритет поручению назначает начальник при подтверждении. До этого в БД лежат
     временные значения (вес 10 %, средний приоритет), и карточка не должна выдавать их за
-    выбор сотрудника: руководитель увидит «Вес: 10 %» и решит, что так предложил сотрудник."""
+    выбор сотрудника: начальник увидит «Вес: 10 %» и решит, что так предложил сотрудник."""
     h = app
     await team(h, second_manager=False)
     await propose(h)
     card = h.find_message(MGR, "Сотрудник внёс поручение").content
     assert "Вес: 10 %" not in card
     assert "Приоритет: 🟡 Средний" not in card
-    assert "Вес: 10 %" not in h.find_message(EMP, "отправлено руководителю").content
+    assert "Вес: 10 %" not in h.find_message(EMP, "отправлено начальнику").content
 
 
 async def test_ai_turns_vague_words_into_measurable_result(app: BotHarness, gemini: FakeGemini) -> None:
     """Сотрудник пишет расплывчато. «Gemini» предлагает измеримую формулировку с планом и советом;
     сотрудник просит другой вариант (модель видит прежний), принимает его — шаг «план» не нужен,
-    число уже есть. Руководитель видит и формулировку AI, и исходные слова сотрудника."""
+    число уже есть. Начальник видит и формулировку AI, и исходные слова сотрудника."""
     h = app
     await team(h)
     gemini.answer("Проверить 100 договоров поставщиков и сдать отчёт", 100, "договоров",
@@ -305,7 +305,7 @@ async def test_ai_turns_vague_words_into_measurable_result(app: BotHarness, gemi
     await h.press_button(EMP, "Принять")
     assert "Шаг 3/3" in h.last_text(EMP), "план уже известен — сразу срок"
     await h.press_button(EMP, "Завтра")
-    await h.press_button(EMP, "Отправить руководителю")
+    await h.press_button(EMP, "Отправить начальнику")
 
     task = await h.get_task(1)
     assert task.expected_result == "Сдать реестр 100 проверенных договоров с перечнем нарушений"
@@ -425,7 +425,7 @@ async def test_keep_as_written_without_number_and_skip_plan(app: BotHarness) -> 
     await h.press_button(EMP, "Пропустить")
     await h.press_button(EMP, "Завтра")
     assert "План: — (без числа)" in h.last_text(EMP)
-    await h.press_button(EMP, "Отправить руководителю")
+    await h.press_button(EMP, "Отправить начальнику")
 
     task = await h.get_task(1)
     assert task.expected_result == "подготовить регламент закупок"
@@ -455,7 +455,7 @@ async def test_text_typed_over_suggestion_becomes_own_variant(app: BotHarness) -
 async def test_long_texts_with_html_characters_reach_manager_intact(app: BotHarness) -> None:
     """Сотрудник вставляет длинный текст из письма: название на пределе (255 символов) и результат
     почти на 2000 символов, со знаками «<», «>», «&». Бот не падает на разметке Telegram и лимите
-    длины, а руководитель получает уведомление с кнопками решения."""
+    длины, а начальник получает уведомление с кнопками решения."""
     h = app
     await team(h, second_manager=False)
     title = ("Сверка <актов> & счетов " * 20)[:255]
@@ -468,7 +468,7 @@ async def test_long_texts_with_html_characters_reach_manager_intact(app: BotHarn
     await h.press_button(EMP, "Оставить как написал")
     await h.press_button(EMP, "Завтра")
     assert "Проверьте поручение" in h.last_text(EMP)
-    await h.press_button(EMP, "Отправить руководителю")
+    await h.press_button(EMP, "Отправить начальнику")
 
     task = await h.get_task(1)
     assert task.title == title.strip() and task.expected_result == result.strip()
@@ -484,7 +484,7 @@ async def test_long_texts_with_html_characters_reach_manager_intact(app: BotHarn
     await h.press_button(MGR, "Назад")
     await h.press_button(MGR, "Назад")
     await approve(h)
-    assert "Сверка <актов> & счетов" in h.find_message(EMP, "Руководитель подтвердил").content
+    assert "Сверка <актов> & счетов" in h.find_message(EMP, "Начальник подтвердил").content
 
 async def test_employee_input_mistakes_get_helpful_hints(app: BotHarness) -> None:
     """Сотрудник ошибается на каждом шаге — бот подсказывает и не теряет введённое:
@@ -571,7 +571,7 @@ async def test_employee_corrects_draft_before_sending(app: BotHarness) -> None:
     await h.send_text(EMP, "через 2 недели")
     assert "Проверьте поручение" in h.last_text(EMP)
 
-    await h.press_button(EMP, "Отправить руководителю")
+    await h.press_button(EMP, "Отправить начальнику")
     task = await h.get_task(1)
     assert task.title == "Анализ <договоров> & претензий"
     assert (task.plan_value, task.plan_unit) == (120, "договоров")
@@ -637,7 +637,7 @@ async def test_employee_cancels_or_leaves_dialog_via_menu(app: BotHarness) -> No
 
 async def test_deadline_in_another_year_shows_the_year(app: BotHarness) -> None:
     """Сотрудник опечатался в годе: «05.10.2030» вместо «05.10.2026». Бот принимает дату, но в
-    сводке и у руководителя срок выглядит как «5 октября (сб), 18:00» — без года опечатку не
+    сводке и у начальника срок выглядит как «5 октября (сб), 18:00» — без года опечатку не
     заметить, а задача на 4 года выпадет из KPI. Срок не в текущем году должен показываться с годом."""
     h = app
     await team(h, second_manager=False)
@@ -648,12 +648,12 @@ async def test_deadline_in_another_year_shows_the_year(app: BotHarness) -> None:
     await h.send_text(EMP, f"05.10.{year}")
     assert "Проверьте поручение" in h.last_text(EMP)
     assert str(year) in h.last_text(EMP)
-    await h.press_button(EMP, "Отправить руководителю")
+    await h.press_button(EMP, "Отправить начальнику")
     assert str(year) in h.find_message(MGR, "Сотрудник внёс поручение").content
 
 
 async def test_employee_blocked_mid_draft_cannot_finish_proposal(app: BotHarness) -> None:
-    """Сотрудник начал вносить поручение, и в этот момент руководитель его заблокировал: дальше
+    """Сотрудник начал вносить поручение, и в этот момент начальник его заблокировал: дальше
     диалог не идёт (доступ закрыт), черновик сброшен, в систему ничего не попадает."""
     h = app
     await team(h, second_manager=False)
@@ -666,7 +666,7 @@ async def test_employee_blocked_mid_draft_cannot_finish_proposal(app: BotHarness
     assert "Шаг 2/3" not in log.text and "Доступ закрыт" in log.text
     assert await h.get_state(EMP) is None
     assert await task_count(h) == 0
-    assert h.messages(MGR)[-1].content.startswith("🏠 Главное меню"), "руководителю ничего не пришло"
+    assert h.messages(MGR)[-1].content.startswith("🏠 Главное меню"), "начальнику ничего не пришло"
 
 
 async def test_draft_deadline_expired_while_summary_was_open(app: BotHarness) -> None:
@@ -678,23 +678,23 @@ async def test_draft_deadline_expired_while_summary_was_open(app: BotHarness) ->
     context = h.dp.fsm.get_context(h.bot, chat_id=EMP, user_id=EMP)
     await context.update_data(deadline=(utcnow() - timedelta(hours=1)).isoformat())
 
-    await h.press_button(EMP, "Отправить руководителю")
+    await h.press_button(EMP, "Отправить начальнику")
     assert "Указанный срок уже прошёл — выберите новый" in h.last_text(EMP)
     assert await task_count(h) == 0
 
     await h.press_button(EMP, "Завтра")
     assert "Проверьте поручение" in h.last_text(EMP)
-    await h.press_button(EMP, "Отправить руководителю")
+    await h.press_button(EMP, "Отправить начальнику")
     assert (await h.get_task(1)).deadline == tomorrow_deadline()
 
 
 # =================================================================================================
-#  Руководитель подтверждает
+#  Начальник подтверждает
 # =================================================================================================
 
 
 async def test_manager_approves_with_weight_and_priority(app: BotHarness) -> None:
-    """Руководитель подтверждает поручение: видит загрузку сотрудника на неделе срока (70 %),
+    """Начальник подтверждает поручение: видит загрузку сотрудника на неделе срока (70 %),
     ошибается с весом, вводит 25 % числом, выбирает высокий приоритет. Сотрудник получает
     уведомление с кнопкой «Сдать результат»; задача в работе и сразу принята (её внёс он сам)."""
     h = app
@@ -729,12 +729,12 @@ async def test_manager_approves_with_weight_and_priority(app: BotHarness) -> Non
     confirmed = h.find_message(MGR, "Подтверждено.")
     assert "в работе, сотрудник получил уведомление" in confirmed.content
     assert "Статус: 🔄 В работе" in confirmed.content
-    assert "Ответственный руководитель: Петрова А. С." in confirmed.content
+    assert "Ответственный начальник: Петрова А. С." in confirmed.content
     assert "✏️ Изменить" in confirmed.button_texts and "📜 История" in confirmed.button_texts
     assert await h.get_state(MGR) is None
 
     note = log.to(EMP)
-    assert "Руководитель подтвердил ваше поручение" in note.text
+    assert "Начальник подтвердил ваше поручение" in note.text
     assert "Вес: 25 %" in note.text and "🔴 Высокий" in note.text
     assert "Принята в работу" in note.text
     assert h.buttons(EMP) == ["📤 Сдать результат", "📋 Открыть"]
@@ -749,9 +749,9 @@ async def test_manager_approves_with_weight_and_priority(app: BotHarness) -> Non
 
 
 async def test_cannot_approve_overdue_proposal_until_deadline_changed(app: BotHarness) -> None:
-    """Руководитель начал подтверждать, но срок поручения успел пройти, пока он выбирал вес:
+    """Начальник начал подтверждать, но срок поручения успел пройти, пока он выбирал вес:
     на последнем шаге — alert и снова карточка с кнопками решения. «✅ Подтвердить» теперь сразу
-    просит поменять срок. Руководитель меняет срок, после чего подтверждает."""
+    просит поменять срок. Начальник меняет срок, после чего подтверждает."""
     h = app
     await team(h, second_manager=False)
     task_id = await propose(h)
@@ -800,14 +800,14 @@ async def test_cannot_approve_when_employee_was_blocked(app: BotHarness) -> None
 
 
 # =================================================================================================
-#  Руководитель корректирует
+#  Начальник корректирует
 # =================================================================================================
 
 
 async def test_manager_corrects_proposal_and_employee_sees_each_change(app: BotHarness) -> None:
-    """Руководитель уточняет поручение перед подтверждением: название, результат, план, срок
+    """Начальник уточняет поручение перед подтверждением: название, результат, план, срок
     (кнопкой), затем убирает число из плана. После каждой правки сотрудник видит «было → стало»,
-    руководитель — карточку с кнопками решения. Потом руководитель подтверждает — сотрудник
+    начальник — карточку с кнопками решения. Потом начальник подтверждает — сотрудник
     получает уже исправленную задачу."""
     h = app
     await team(h)
@@ -828,7 +828,7 @@ async def test_manager_corrects_proposal_and_employee_sees_each_change(app: BotH
     assert "Подтвердить поручение?" in h.last_text(MGR)
     assert h.buttons(MGR) == PROPOSAL_BUTTONS
     change = log.to(EMP).text
-    assert "Руководитель скорректировал ваше поручение" in change
+    assert "Начальник скорректировал ваше поручение" in change
     assert f"Название: «{TITLE}» → «Анализ договоров поставщиков за III квартал»" in change
     assert h.buttons(EMP) == ["📋 Открыть"], "поручение ещё не в работе — сдавать нечего"
     await h.press_button(EMP, "Открыть")
@@ -874,14 +874,14 @@ async def test_manager_corrects_proposal_and_employee_sees_each_change(app: BotH
     assert task.expected_result == "Проверить 100 договоров и сдать реестр нарушений в Excel"
     assert task.plan_value is None and task.plan_unit is None
     assert task.deadline != tomorrow_deadline()
-    approved_note = h.find_message(EMP, "Руководитель подтвердил ваше поручение").content
+    approved_note = h.find_message(EMP, "Начальник подтвердил ваше поручение").content
     assert "Анализ договоров поставщиков за III квартал" in approved_note
     edited = [event for event in await events(h, task_id) if event.type == EventType.EDITED]
     assert len(edited) == 5
 
 
 async def test_manager_edit_without_changes_and_back_buttons(app: BotHarness) -> None:
-    """Руководитель открывает правку и вводит то же название — «Ничего не изменилось», сотрудника
+    """Начальник открывает правку и вводит то же название — «Ничего не изменилось», сотрудника
     не беспокоят. Затем выбирает «Срок», передумывает: «◀ Назад» — снова выбор поля, ещё раз
     «◀ Назад» — карточка с кнопками решения. Предложение не изменилось."""
     h = app
@@ -911,7 +911,7 @@ async def test_manager_edit_without_changes_and_back_buttons(app: BotHarness) ->
 
 
 async def test_manager_cancels_approval_and_finds_proposal_in_queue(app: BotHarness) -> None:
-    """Руководитель начал подтверждать и нажал «✖️ Отмена»: поручение остаётся на подтверждении,
+    """Начальник начал подтверждать и нажал «✖️ Отмена»: поручение остаётся на подтверждении,
     сотруднику ничего не приходит, а в «📥 Предложения» оно по-прежнему ждёт решения."""
     h = app
     await team(h, second_manager=False)
@@ -931,12 +931,12 @@ async def test_manager_cancels_approval_and_finds_proposal_in_queue(app: BotHarn
 
 
 # =================================================================================================
-#  Руководитель отклоняет
+#  Начальник отклоняет
 # =================================================================================================
 
 
 async def test_manager_rejects_with_reason(app: BotHarness) -> None:
-    """Руководитель отклоняет поручение и объясняет почему (слишком длинную причину бот просит
+    """Начальник отклоняет поручение и объясняет почему (слишком длинную причину бот просит
     сократить). Сотрудник видит решение и причину; в журнале — событие с причиной."""
     h = app
     await team(h)
@@ -955,7 +955,7 @@ async def test_manager_rejects_with_reason(app: BotHarness) -> None:
     assert "Причина: Это уже входит в план отдела <на октябрь>" in text
     assert "Статус: ❌ Отклонена" in text
     note = log.to(EMP).text
-    assert "Руководитель отклонил ваше поручение" in note and TITLE in note
+    assert "Начальник отклонил ваше поручение" in note and TITLE in note
     assert "Причина: Это уже входит в план отдела <на октябрь>" in note
 
     task = await h.get_task(task_id)
@@ -966,7 +966,7 @@ async def test_manager_rejects_with_reason(app: BotHarness) -> None:
 
 
 async def test_manager_rejects_without_reason(app: BotHarness) -> None:
-    """Руководитель отклоняет поручение, не указывая причину: сотрудник получает короткое
+    """Начальник отклоняет поручение, не указывая причину: сотрудник получает короткое
     уведомление без строки «Причина»."""
     h = app
     await team(h, second_manager=False)
@@ -978,7 +978,7 @@ async def test_manager_rejects_without_reason(app: BotHarness) -> None:
     assert f"Предложение #{task_id} отклонено" in h.last_text(MGR)
     assert "Причина" not in h.last_text(MGR)
     note = log.to(EMP).text
-    assert "Руководитель отклонил ваше поручение" in note and "Причина" not in note
+    assert "Начальник отклонил ваше поручение" in note and "Причина" not in note
     task = await h.get_task(task_id)
     assert task.status == TaskStatus.REJECTED
     rejected = [event for event in await events(h, task_id) if event.type == EventType.REJECTED]
@@ -986,12 +986,12 @@ async def test_manager_rejects_without_reason(app: BotHarness) -> None:
 
 
 # =================================================================================================
-#  Два руководителя и чужие руки
+#  Два начальника и чужие руки
 # =================================================================================================
 
 
 async def test_second_manager_gets_alert_on_already_processed_proposal(app: BotHarness) -> None:
-    """Уведомление пришло обоим руководителям. Петрова подтвердила поручение; Соколов позже жмёт
+    """Уведомление пришло обоим начальникам. Петрова подтвердила поручение; Соколов позже жмёт
     кнопку в своём уведомлении — alert «Предложение уже обработано», а уведомление превращается
     в актуальную карточку (в работе, без кнопок решения). Остальные кнопки решения (если бы
     кто-то нажал их из старого сообщения) тоже дают alert; задача не меняется."""
@@ -1054,7 +1054,7 @@ async def test_second_manager_mid_dialog_when_first_decides(app: BotHarness) -> 
 
 async def test_employee_cannot_decide_proposals_and_manager_cannot_propose(app: BotHarness) -> None:
     """Сотрудник «подделывает» нажатия кнопок решения по своему поручению и листание очереди —
-    получает отказ, поручение не меняется. Руководителю «/propose» недоступна, сотруднику —
+    получает отказ, поручение не меняется. Начальнику «/propose» недоступна, сотруднику —
     «/proposals». Несуществующее поручение — «Задача не найдена»."""
     h = app
     await team(h, second_manager=False)
@@ -1083,7 +1083,7 @@ async def test_employee_cannot_decide_proposals_and_manager_cannot_propose(app: 
 
 
 async def test_proposals_queue_with_pagination(app: BotHarness) -> None:
-    """У руководителя накопилось 9 предложений от двух сотрудников. «📥 Предложения» показывает
+    """У начальника накопилось 9 предложений от двух сотрудников. «📥 Предложения» показывает
     первые 8 (старые сверху) и «Вперёд ▶»; на второй странице — девятое и «◀ Назад». Из списка
     поручение открывается с кнопками решения; подтверждённое исчезает из очереди."""
     h = app
@@ -1123,7 +1123,7 @@ async def test_proposals_queue_with_pagination(app: BotHarness) -> None:
 
 
 async def test_card_opened_from_queue_leads_back_to_queue(app: BotHarness) -> None:
-    """Руководитель открыл поручение из «📥 Предложения» (вторая страница) и решил пока не
+    """Начальник открыл поручение из «📥 Предложения» (вторая страница) и решил пока не
     решать: «◀ К списку задач» должна вернуть его в очередь предложений на ту же страницу,
     а не в «📋 Задачи — В работе», где этого поручения нет («Задач нет» сбивает с толку)."""
     h = app
@@ -1139,7 +1139,7 @@ async def test_card_opened_from_queue_leads_back_to_queue(app: BotHarness) -> No
 
 
 async def test_empty_proposals_queue(app: BotHarness) -> None:
-    """Предложений нет — руководитель видит понятное сообщение без кнопок."""
+    """Предложений нет — начальник видит понятное сообщение без кнопок."""
     h = app
     await team(h, second_manager=False)
     log = await h.press_menu(MGR, BTN_PROPOSALS)
@@ -1153,8 +1153,8 @@ async def test_empty_proposals_queue(app: BotHarness) -> None:
 
 
 async def test_completed_proposal_counts_as_self_initiated_in_kpi(app: BotHarness) -> None:
-    """Полный цикл ТЗ для устного поручения: сотрудник внёс → руководитель подтвердил →
-    сотрудник сдал результат → руководитель подтвердил оценку → в «📈 Моя эффективность»
+    """Полный цикл ТЗ для устного поручения: сотрудник внёс → начальник подтвердил →
+    сотрудник сдал результат → начальник подтвердил оценку → в «📈 Моя эффективность»
     поручение вошло в KPI и посчитано как «внесено самостоятельно». Отклонённое и ещё не
     подтверждённое поручения в KPI не попадают."""
     h = app
@@ -1169,7 +1169,7 @@ async def test_completed_proposal_counts_as_self_initiated_in_kpi(app: BotHarnes
     await h.send_text(EMP, RAW_RESULT)
     await h.press_button(EMP, "Принять")
     await h.send_text(EMP, "сегодня 23:59")
-    await h.press_button(EMP, "Отправить руководителю")
+    await h.press_button(EMP, "Отправить начальнику")
     kpi_task = await h.scalar(select(func.max(Task.id)))
     deadline = (await h.get_task(kpi_task)).deadline
     rejected = await seed_proposal(h, EMP, "Лишнее поручение", deadline=deadline)
@@ -1182,7 +1182,7 @@ async def test_completed_proposal_counts_as_self_initiated_in_kpi(app: BotHarnes
     await h.press_button(MGR, "Пропустить")
     assert (await h.get_task(pending)).status == TaskStatus.PROPOSED
 
-    approved_note = h.find_message(EMP, "Руководитель подтвердил ваше поручение")
+    approved_note = h.find_message(EMP, "Начальник подтвердил ваше поручение")
     await h.press(EMP, TaskCB(action="submit", task_id=kpi_task), approved_note.message_id)
     await h.send_text(EMP, "Проверено 100 договоров, в 12 найдены нарушения")
     await h.press_button(EMP, "Пропустить")
@@ -1204,11 +1204,11 @@ async def test_completed_proposal_counts_as_self_initiated_in_kpi(app: BotHarnes
     assert "Лишнее поручение" not in card and "Ждёт решения" not in card
 
 
-# --- Особые случаи: своё поручение, нет руководителя, опечатка в годе ----------------------------
+# --- Особые случаи: своё поручение, нет начальника, опечатка в годе ----------------------------
 
 
 async def test_promoted_employee_is_told_why_own_proposal_cannot_be_approved(app: BotHarness) -> None:
-    """Иванов внёс поручение, а потом его назначили руководителем. Он открывает своё поручение
+    """Иванов внёс поручение, а потом его назначили начальником. Он открывает своё поручение
     и жмёт «✅ Подтвердить» — бот прямо говорит, что это его собственное поручение и задачи
     ставятся только сотрудникам (а не загадочное «исполнитель больше не активный сотрудник»).
     Петрова видит обычное объяснение про исполнителя. Поручение остаётся на подтверждении."""
@@ -1231,9 +1231,9 @@ async def test_promoted_employee_is_told_why_own_proposal_cannot_be_approved(app
 
 
 async def test_proposal_when_no_manager_is_in_the_bot(app: BotHarness) -> None:
-    """В боте пока нет ни одного активного руководителя. Иванов вносит поручение — оно сохранено,
-    но бот не обещает «отправлено руководителю»: честно говорит, что уведомить некого, и советует
-    сообщить руководителю лично. Поручение ждёт в «📥 Предложения»."""
+    """В боте пока нет ни одного активного начальника. Иванов вносит поручение — оно сохранено,
+    но бот не обещает «отправлено начальнику»: честно говорит, что уведомить некого, и советует
+    сообщить начальнику лично. Поручение ждёт в «📥 Предложения»."""
     h = app
     await h.seed_user(EMP, "Иванов Иван Иванович", position="Юрист")
     await h.send_command(EMP, "menu")
@@ -1243,17 +1243,17 @@ async def test_proposal_when_no_manager_is_in_the_bot(app: BotHarness) -> None:
     await h.send_text(EMP, RAW_RESULT)
     await h.press_button(EMP, "Принять")
     await h.press_button(EMP, "Завтра")
-    log = await h.press_button(EMP, "Отправить руководителю")
+    log = await h.press_button(EMP, "Отправить начальнику")
 
     text = h.last_text(EMP)
-    assert "сохранено" in text and "нет активного руководителя" in text
-    assert "отправлено руководителю на подтверждение" not in text
+    assert "сохранено" in text and "нет активного начальника" in text
+    assert "отправлено начальнику на подтверждение" not in text
     [task] = await h.scalars(select(Task))
     assert task.status == TaskStatus.PROPOSED
 
 
 async def test_far_year_typo_in_deadline_is_explained(app: BotHarness) -> None:
-    """И сотрудник в черновике, и руководитель при правке поручения опечатываются в годе
+    """И сотрудник в черновике, и начальник при правке поручения опечатываются в годе
     («05.10.2099»). Бот не пишет загадочное «не понял срок», а просит проверить год; срок не меняется."""
     h = app
     await team(h, second_manager=False)

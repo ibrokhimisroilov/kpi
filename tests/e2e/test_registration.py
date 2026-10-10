@@ -1,8 +1,8 @@
 """Сценарии регистрации и управления сотрудниками (bot/handlers/start.py, bot/handlers/users_admin.py).
 
-Пользовательские истории: руководители из ADMIN_IDS, анкета сотрудника (ФИО → должность),
-заявка руководителю, подтверждение/отклонение (в том числе вторым руководителем), блокировка,
-смена роли, защита последнего руководителя, /help, /menu, /cancel, сброс диалога кнопкой меню,
+Пользовательские истории: начальники из ADMIN_IDS, анкета сотрудника (ФИО → должность),
+заявка начальнику, подтверждение/отклонение (в том числе вторым начальником), блокировка,
+смена роли, защита последнего начальника, /help, /menu, /cancel, сброс диалога кнопкой меню,
 листание списка сотрудников. Проверяется то, что видят люди (тексты, кнопки, alert, меню), и БД.
 """
 
@@ -30,7 +30,7 @@ from .fakebot import MANAGER_TG_ID, BotHarness
 
 pytestmark = pytest.mark.asyncio
 
-MGR2 = 1002  # второй руководитель из ADMIN_IDS (фикстура two_admins)
+MGR2 = 1002  # второй начальник из ADMIN_IDS (фикстура two_admins)
 EMP = 2001
 EMP2 = 2002
 
@@ -52,14 +52,14 @@ def _set_admins(monkeypatch: pytest.MonkeyPatch, value: str) -> None:
 
 @pytest.fixture
 def two_admins(app: BotHarness, monkeypatch: pytest.MonkeyPatch) -> BotHarness:
-    """В ADMIN_IDS два руководителя: 1001 и 1002."""
+    """В ADMIN_IDS два начальника: 1001 и 1002."""
     _set_admins(monkeypatch, f"{MANAGER_TG_ID},{MGR2}")
     return app
 
 
 @pytest.fixture
 def no_admins(app: BotHarness, monkeypatch: pytest.MonkeyPatch) -> BotHarness:
-    """ADMIN_IDS пуст: руководители только те, кого назначили в боте."""
+    """ADMIN_IDS пуст: начальники только те, кого назначили в боте."""
     _set_admins(monkeypatch, "")
     return app
 
@@ -76,7 +76,7 @@ async def register(h: BotHarness, tg_id: int, full_name: str, position: str | No
 
 
 async def open_card(h: BotHarness, viewer: int, target_name: str) -> None:
-    """Руководитель открывает «👥 Сотрудники» и нажимает на человека."""
+    """Начальник открывает «👥 Сотрудники» и нажимает на человека."""
     if h.reply_keyboard(viewer) is None:
         await h.send_command(viewer, "start")
     await h.press_menu(viewer, BTN_STAFF)
@@ -87,22 +87,22 @@ async def count(h: BotHarness, model: type) -> int:
     return await h.scalar(select(func.count()).select_from(model))
 
 
-# --- Руководители из ADMIN_IDS ------------------------------------------------------------------
+# --- Начальники из ADMIN_IDS ------------------------------------------------------------------
 
 
 async def test_two_admins_get_manager_menu_without_questionnaire(two_admins):
-    """Два руководителя из ADMIN_IDS нажимают /start и сразу получают меню руководителя —
+    """Два начальника из ADMIN_IDS нажимают /start и сразу получают меню начальника —
     без анкеты и без подтверждения. Имя берётся из Telegram, повторный /start не плодит записи.
     Пока сотрудников нет, бот подсказывает, как их подключить."""
     h = two_admins
     await h.send_command(MANAGER_TG_ID, "start", first_name="Анна", last_name="Петрова")
-    assert "Вы вошли как руководитель" in h.last_text(MANAGER_TG_ID)
+    assert "Вы вошли как начальник" in h.last_text(MANAGER_TG_ID)
     assert "Сотрудников пока нет" in h.last_text(MANAGER_TG_ID)
     assert "t.me/test_bot" in h.last_text(MANAGER_TG_ID)
     assert h.reply_keyboard(MANAGER_TG_ID) == MANAGER_MENU
 
     await h.send_command(MGR2, "start", first_name="Олег")
-    assert "Вы вошли как руководитель" in h.last_text(MGR2)
+    assert "Вы вошли как начальник" in h.last_text(MGR2)
     assert h.reply_keyboard(MGR2) == MANAGER_MENU
 
     await h.send_command(MANAGER_TG_ID, "start")
@@ -111,16 +111,16 @@ async def test_two_admins_get_manager_menu_without_questionnaire(two_admins):
     assert (anna.full_name, anna.role, anna.status) == ("Анна Петрова", Role.MANAGER, UserStatus.ACTIVE)
     assert (oleg.full_name, oleg.role, oleg.status) == ("Олег", Role.MANAGER, UserStatus.ACTIVE)
 
-    # «👥 Сотрудники»: только два руководителя и подсказка, как подключить сотрудников.
+    # «👥 Сотрудники»: только два начальника и подсказка, как подключить сотрудников.
     await h.press_menu(MGR2, BTN_STAFF)
     text = h.last_text(MGR2)
-    assert "Сотрудников: 0 · Руководителей: 2" in text
+    assert "Сотрудников: 0 · Начальников: 2" in text
     assert "Пока в системе нет сотрудников" in text
     assert h.buttons(MGR2) == ["👔 Анна Петрова", "👔 Олег", "🔄 Обновить"]
 
 
 async def test_admin_card_has_no_demote_or_block_buttons(two_admins):
-    """Руководитель открывает карточку другого руководителя из ADMIN_IDS: кнопок «Сделать
+    """Начальник открывает карточку другого начальника из ADMIN_IDS: кнопок «Сделать
     сотрудником» и «Заблокировать» нет (это всё равно запрещено) — вместо них пояснение.
     Подделанный callback получает понятный отказ, роль не меняется."""
     h = two_admins
@@ -128,16 +128,16 @@ async def test_admin_card_has_no_demote_or_block_buttons(two_admins):
     await h.send_command(MGR2, "start", first_name="Олег")
 
     await open_card(h, MANAGER_TG_ID, "Олег")
-    assert "ADMIN_IDS" in h.last_text(MANAGER_TG_ID)
+    assert "админ бота" in h.last_text(MANAGER_TG_ID)
     assert not h.has_button(MANAGER_TG_ID, "Сделать сотрудником")
     assert not h.has_button(MANAGER_TG_ID, "Заблокировать")
     assert h.has_button(MANAGER_TG_ID, "К списку сотрудников")
 
     oleg = await h.get_user(MGR2)
     log = await h.press(MANAGER_TG_ID, UserCB(action="role_emp", user_id=oleg.id))
-    assert "ADMIN_IDS" in log.alert
+    assert "админ бота" in log.alert
     log = await h.press(MANAGER_TG_ID, UserCB(action="block", user_id=oleg.id))
-    assert "ADMIN_IDS" in log.alert
+    assert "админ бота" in log.alert
     oleg = await h.get_user(MGR2)
     assert (oleg.role, oleg.status) == (Role.MANAGER, UserStatus.ACTIVE)
     assert not log.to(MGR2).texts  # Олегу ничего не пришло
@@ -149,7 +149,7 @@ async def test_admin_card_has_no_demote_or_block_buttons(two_admins):
 async def test_full_name_validation_then_position_and_request_to_both_managers(two_admins):
     """Сотрудник нажимает /start и заполняет анкету. Бот терпеливо объясняет ошибки в ФИО
     (одно слово, цифры, слишком коротко/длинно, стикер вместо текста) и в должности.
-    После анкеты оба руководителя получают заявку с кнопками «Подтвердить»/«Отклонить»,
+    После анкеты оба начальника получают заявку с кнопками «Подтвердить»/«Отклонить»,
     сотрудник — «Заявка отправлена», меню у него пока нет."""
     h = two_admins
     await h.send_command(MANAGER_TG_ID, "start", first_name="Анна")
@@ -189,7 +189,7 @@ async def test_full_name_validation_then_position_and_request_to_both_managers(t
     assert await h.get_state(EMP) == "RegistrationSG:position"
 
     log = await h.send_text(EMP, "Ведущий   специалист")
-    assert "Заявка отправлена руководителю" in log.to(EMP).text
+    assert "Заявка отправлена начальнику" in log.to(EMP).text
     assert "Ведущий специалист" in log.to(EMP).text
     assert h.reply_keyboard(EMP) is None
     assert await h.get_state(EMP) is None
@@ -209,7 +209,7 @@ async def test_full_name_validation_then_position_and_request_to_both_managers(t
 
 
 async def test_special_characters_in_name_and_position_are_shown_as_is(app):
-    """ФИО с апострофом и должность с «<», «&» доходят до руководителя без искажений
+    """ФИО с апострофом и должность с «<», «&» доходят до начальника без искажений
     (HTML экранирован, Telegram не ругается) — и в заявке, и в карточке, и в списке."""
     h = app
     await h.send_command(MANAGER_TG_ID, "start", first_name="Анна")
@@ -224,8 +224,8 @@ async def test_special_characters_in_name_and_position_are_shown_as_is(app):
 
 
 async def test_registration_without_any_manager_explains_who_must_start_bot(no_admins, monkeypatch):
-    """В боте ещё нет ни одного руководителя (ADMIN_IDS пуст). Сотрудник заполняет анкету —
-    бот честно говорит, что заявку некому подтвердить и что нужно руководителю."""
+    """В боте ещё нет ни одного начальника (ADMIN_IDS пуст). Сотрудник заполняет анкету —
+    бот честно говорит, что заявку некому подтвердить и что нужно начальнику."""
     h = no_admins
     log = await h.send_command(EMP, "start")
     assert "Шаг 1 из 2" in log.text
@@ -233,11 +233,11 @@ async def test_registration_without_any_manager_explains_who_must_start_bot(no_a
     await h.press_button(EMP, "Пропустить")
     text = h.last_text(EMP)
     assert "Анкета сохранена" in text
-    assert "нет ни одного руководителя" in text
+    assert "нет ни одного начальника" in text
     assert "ADMIN_IDS" in text
     assert (await h.get_user(EMP)).status == UserStatus.PENDING
 
-    # Позже руководитель (его ID добавили в ADMIN_IDS) запускает бота — видит ждущую заявку.
+    # Позже начальник (его ID добавили в ADMIN_IDS) запускает бота — видит ждущую заявку.
     _set_admins(monkeypatch, str(MANAGER_TG_ID))
     log = await h.send_command(MANAGER_TG_ID, "start", first_name="Анна")
     assert "Новых заявок на доступ: 1" in log.text
@@ -248,22 +248,22 @@ async def test_registration_without_any_manager_explains_who_must_start_bot(no_a
 
 
 async def test_request_reaches_manager_even_if_another_manager_blocked_the_bot(two_admins):
-    """Один из руководителей заблокировал бота в Telegram. Заявка всё равно доходит до
-    второго руководителя, а сотрудник видит «Заявка отправлена»."""
+    """Один из начальников заблокировал бота в Telegram. Заявка всё равно доходит до
+    второго начальника, а сотрудник видит «Заявка отправлена»."""
     h = two_admins
     await h.send_command(MANAGER_TG_ID, "start", first_name="Анна")
     await h.send_command(MGR2, "start", first_name="Олег")
     h.api.blocked_chats.add(MANAGER_TG_ID)
 
     await register(h, EMP, "Иванов Иван")
-    assert "Заявка отправлена руководителю" in h.last_text(EMP)
+    assert "Заявка отправлена начальнику" in h.last_text(EMP)
     assert "Новая заявка на доступ" in h.last_text(MGR2)
     log = await h.press_button(MGR2, "Подтвердить")
     assert "Доступ к боту открыт" in log.to(EMP).text
 
 
 async def test_approved_user_who_blocked_the_bot_is_still_approved(app):
-    """Сотрудник подал заявку и заблокировал бота. Руководитель подтверждает — действие
+    """Сотрудник подал заявку и заблокировал бота. Начальник подтверждает — действие
     выполняется (без ошибок), доступ открыт; меню сотрудник увидит, когда вернётся (/start)."""
     h = app
     await h.send_command(MANAGER_TG_ID, "start", first_name="Анна")
@@ -281,7 +281,7 @@ async def test_approved_user_who_blocked_the_bot_is_still_approved(app):
 
 async def test_manager_is_not_told_notification_was_sent_when_it_was_not(app):
     """Сотрудник подал заявку и заблокировал бота — уведомление о решении до него не дойдёт.
-    Руководитель не читает в карточке «пользователю отправлено уведомление»: карточка честно
+    Начальник не читает в карточке «пользователю отправлено уведомление»: карточка честно
     говорит, что уведомление не доставлено и сообщить нужно лично. Так же — при отклонении.
     Когда сотрудник на связи, карточка по-прежнему подтверждает отправку уведомления."""
     h = app
@@ -369,7 +369,7 @@ async def test_cancel_and_restart_in_the_middle_of_questionnaire(app):
 
 
 async def test_double_press_skip_sends_one_request(app):
-    """Сотрудник дважды быстро нажал «⏭ Пропустить»: заявка отправлена один раз, руководителю
+    """Сотрудник дважды быстро нажал «⏭ Пропустить»: заявка отправлена один раз, начальнику
     приходит одно уведомление, а второе нажатие объясняет статус — «Заявка на рассмотрении»."""
     h = app
     await h.send_command(MANAGER_TG_ID, "start", first_name="Анна")
@@ -386,7 +386,7 @@ async def test_double_press_skip_sends_one_request(app):
 
 
 async def test_admin_with_special_characters_in_telegram_name(two_admins):
-    """Имя руководителя в Telegram с «<», «&» и кавычками: приветствие, список и карточка
+    """Имя начальника в Telegram с «<», «&» и кавычками: приветствие, список и карточка
     показывают его как есть (разметка не ломается)."""
     h = two_admins
     log = await h.send_command(MANAGER_TG_ID, "start", first_name='Анна <b>"&"</b>')
@@ -411,9 +411,9 @@ async def test_help_in_the_middle_of_questionnaire(app):
 
 
 async def test_approve_from_notification_and_second_manager_gets_already_processed(two_admins):
-    """Первый руководитель подтверждает заявку прямо из уведомления: уведомление превращается
+    """Первый начальник подтверждает заявку прямо из уведомления: уведомление превращается
     в карточку сотрудника, сотрудник получает «Доступ открыт» и меню сотрудника.
-    Второй руководитель нажимает «Подтвердить» в своём уведомлении — alert «Заявка уже
+    Второй начальник нажимает «Подтвердить» в своём уведомлении — alert «Заявка уже
     обработана», его уведомление показывает актуальный статус, сотруднику не приходит дубль.
     «Отклонить» после подтверждения тоже ничего не ломает."""
     h = two_admins
@@ -428,7 +428,7 @@ async def test_approve_from_notification_and_second_manager_gets_already_process
     assert "Заявка подтверждена" in card
     assert "Статус: ✅ Активен" in card
     assert h.buttons(MANAGER_TG_ID) == [
-        "📊 Карточка", "👔 Сделать руководителем", "⛔ Заблокировать", "◀ К списку сотрудников",
+        "📊 Карточка", "👔 Сделать начальником", "⛔ Заблокировать", "◀ К списку сотрудников",
     ]
     assert "Доступ к боту открыт" in log.to(EMP).text
     assert "Ваша роль: сотрудник" in log.to(EMP).text
@@ -452,7 +452,7 @@ async def test_approve_from_notification_and_second_manager_gets_already_process
 
 
 async def test_approve_from_staff_list(app):
-    """Руководитель открывает «👥 Сотрудники»: новая заявка сверху, с пометкой. Открывает
+    """Начальник открывает «👥 Сотрудники»: новая заявка сверху, с пометкой. Открывает
     карточку, подтверждает, возвращается к списку — человек уже среди сотрудников."""
     h = app
     await h.send_command(MANAGER_TG_ID, "start", first_name="Анна")
@@ -464,9 +464,9 @@ async def test_approve_from_staff_list(app):
 
     await h.press_menu(MANAGER_TG_ID, BTN_STAFF)
     text = h.last_text(MANAGER_TG_ID)
-    assert "Заявок: 1 · Сотрудников: 0 · Руководителей: 1" in text
+    assert "Заявок: 1 · Сотрудников: 0 · Начальников: 1" in text
     assert "Есть новые заявки" in text
-    assert text.index("Заявки на доступ") < text.index("Руководители")
+    assert text.index("Заявки на доступ") < text.index("Начальники")
     assert "1 чел. начали регистрацию, но пока не указали ФИО" in text
     assert h.buttons(MANAGER_TG_ID) == ["⏳ Петров Пётр", "👔 Анна", "🔄 Обновить"]
 
@@ -489,8 +489,8 @@ async def test_approve_from_staff_list(app):
 
 
 async def test_reject_request_then_unblock_later(app):
-    """Руководитель отклоняет заявку: сотрудник узнаёт об этом, меню у него нет, на /start,
-    /menu и любой текст бот отвечает «Доступ закрыт». Позже руководитель передумал и
+    """Начальник отклоняет заявку: сотрудник узнаёт об этом, меню у него нет, на /start,
+    /menu и любой текст бот отвечает «Доступ закрыт». Позже начальник передумал и
     разблокировал — сотрудник получает доступ и меню."""
     h = app
     await h.send_command(MANAGER_TG_ID, "start", first_name="Анна")
@@ -573,7 +573,7 @@ async def test_unknown_user_without_start(app):
 
 
 async def test_block_and_unblock_employee(app):
-    """Руководитель блокирует сотрудника из карточки: тому приходит «Доступ закрыт», меню
+    """Начальник блокирует сотрудника из карточки: тому приходит «Доступ закрыт», меню
     исчезает; старые кнопки меню и /start больше не работают. После разблокировки —
     снова меню сотрудника и рабочие кнопки."""
     h = app
@@ -589,7 +589,7 @@ async def test_block_and_unblock_employee(app):
     assert "Статус: 🚫 Заблокирован" in h.last_text(MANAGER_TG_ID)
     # Карточка эффективности ушедшего сотрудника остаётся доступной: история оценок не пропадает.
     assert h.buttons(MANAGER_TG_ID) == ["📊 Карточка", "🔓 Разблокировать", "◀ К списку сотрудников"]
-    assert "Доступ к боту закрыт руководителем" in log.to(EMP).text
+    assert "Доступ к боту закрыт начальником" in log.to(EMP).text
     assert h.reply_keyboard(EMP) is None
     assert (await h.get_user(EMP)).status == UserStatus.BLOCKED
 
@@ -615,7 +615,7 @@ async def test_block_and_unblock_employee(app):
 
 
 async def test_employee_blocked_in_the_middle_of_a_dialog_is_stopped(app):
-    """Сотрудник начал вносить поручение, и в этот момент руководитель его заблокировал.
+    """Сотрудник начал вносить поручение, и в этот момент начальник его заблокировал.
     Следующее сообщение и кнопка диалога не продолжают диалог, а отвечают «Доступ закрыт»;
     поручение не создаётся."""
     h = app
@@ -667,7 +667,7 @@ async def test_inactive_user_with_unfinished_dialog_is_stopped_by_start_router(a
 
 
 async def test_promoted_employee_loses_unfinished_employee_dialog_with_explanation(app):
-    """Сотрудник вносит поручение, и в этот момент его назначают руководителем. Начатый диалог
+    """Сотрудник вносит поручение, и в этот момент его назначают начальником. Начатый диалог
     сотрудника сбрасывается, в уведомлении о новой роли сказано, что действие отменено, —
     следующий текст не попадает в старый диалог."""
     h = app
@@ -678,7 +678,7 @@ async def test_promoted_employee_loses_unfinished_employee_dialog_with_explanati
     await h.send_text(EMP, "Анализ договоров поставщиков")
 
     log = await h.press(MANAGER_TG_ID, UserCB(action="role_mgr", user_id=emp.id))
-    assert "назначена роль руководителя" in log.to(EMP).text
+    assert "назначена роль начальника" in log.to(EMP).text
     assert "Незавершённое действие в боте отменено" in log.to(EMP).text
     assert await h.get_state(EMP) is None
     assert h.reply_keyboard(EMP) == MANAGER_MENU
@@ -693,7 +693,7 @@ async def test_promoted_employee_loses_unfinished_employee_dialog_with_explanati
 
 
 async def test_demoted_manager_loses_task_creation_dialog(no_admins):
-    """Второй руководитель ставит задачу, и в этот момент его переводят в сотрудники.
+    """Второй начальник ставит задачу, и в этот момент его переводят в сотрудники.
     Его диалог постановки задачи сброшен: следующий текст не становится названием задачи,
     старые кнопки диалога не работают, задача не создаётся."""
     h = no_admins
@@ -719,24 +719,24 @@ async def test_demoted_manager_loses_task_creation_dialog(no_admins):
 
 
 async def test_promote_to_manager_and_demote_back(app):
-    """Руководитель назначает сотрудника руководителем: тот получает уведомление и меню
-    руководителя и может открыть «👥 Сотрудники». Затем роль возвращают — снова меню
+    """Начальник назначает сотрудника начальником: тот получает уведомление и меню
+    начальника и может открыть «👥 Сотрудники». Затем роль возвращают — снова меню
     сотрудника, а старые кнопки управления сотрудниками ему уже недоступны."""
     h = app
     await h.send_command(MANAGER_TG_ID, "start", first_name="Анна")
     await h.seed_user(EMP, "Иванов Иван Иванович")
 
     await open_card(h, MANAGER_TG_ID, "Иванов")
-    log = await h.press_button(MANAGER_TG_ID, "Сделать руководителем")
-    assert log.alert == "👔 Назначен руководителем"
-    assert "Роль: 👔 Руководитель" in h.last_text(MANAGER_TG_ID)
+    log = await h.press_button(MANAGER_TG_ID, "Сделать начальником")
+    assert log.alert == "👔 Назначен начальником"
+    assert "Роль: 👔 Начальник" in h.last_text(MANAGER_TG_ID)
     assert h.buttons(MANAGER_TG_ID) == ["👤 Сделать сотрудником", "⛔ Заблокировать", "◀ К списку сотрудников"]
-    assert "назначена роль руководителя" in log.to(EMP).text
+    assert "назначена роль начальника" in log.to(EMP).text
     assert h.reply_keyboard(EMP) == MANAGER_MENU
     assert (await h.get_user(EMP)).role == Role.MANAGER
 
     await h.press_menu(EMP, BTN_STAFF)
-    assert "Руководителей: 2" in h.last_text(EMP)
+    assert "Начальников: 2" in h.last_text(EMP)
     staff_list = h.last_message(EMP).message_id
 
     log = await h.press_button(MANAGER_TG_ID, "Сделать сотрудником")
@@ -745,7 +745,7 @@ async def test_promote_to_manager_and_demote_back(app):
     assert h.reply_keyboard(EMP) == EMPLOYEE_MENU
     assert (await h.get_user(EMP)).role == Role.EMPLOYEE
 
-    # Список сотрудников, открытый, пока он был руководителем, больше не работает.
+    # Список сотрудников, открытый, пока он был начальником, больше не работает.
     log = await h.press_button(EMP, "Анна", staff_list)
     assert NO_RIGHTS in log.alert
     log = await h.press_button(EMP, "Обновить", staff_list)
@@ -755,10 +755,10 @@ async def test_promote_to_manager_and_demote_back(app):
 
 
 async def test_last_manager_cannot_demote_or_block_himself(no_admins):
-    """Руководителей двое (оба назначены в боте, ADMIN_IDS пуст). Первый переводит второго в
+    """Начальников двое (оба назначены в боте, ADMIN_IDS пуст). Первый переводит второго в
     сотрудники — теперь он единственный. В своей карточке он видит «Это вы.» без кнопок
     понижения и блокировки, а подделанные callback'и получают понятный отказ. Бывший
-    руководитель старыми кнопками ничего сделать не может. Руководитель в системе остаётся."""
+    начальник старыми кнопками ничего сделать не может. Начальник в системе остаётся."""
     h = no_admins
     anna = await h.seed_user(MANAGER_TG_ID, "Петрова Анна", role="manager")
     boris = await h.seed_user(3001, "Борисов Борис", role="manager")
@@ -787,9 +787,9 @@ async def test_last_manager_cannot_demote_or_block_himself(no_admins):
 
 
 async def test_two_managers_demote_each_other_at_the_same_moment(no_admins):
-    """Два руководителя одновременно нажимают «Сделать сотрудником» друг на друге. Бот
+    """Два начальника одновременно нажимают «Сделать сотрудником» друг на друге. Бот
     выполняет действия по очереди: один становится сотрудником, второй получает отказ —
-    в системе остаётся ровно один руководитель."""
+    в системе остаётся ровно один начальник."""
     h = no_admins
     anna = await h.seed_user(MANAGER_TG_ID, "Петрова Анна", role="manager")
     boris = await h.seed_user(3001, "Борисов Борис", role="manager")
@@ -809,7 +809,7 @@ async def test_two_managers_demote_each_other_at_the_same_moment(no_admins):
     assert {winner.id} <= {anna.id, boris.id}
     assert h.alerts_for(winner.tg_id)[-1] == "👤 Роль изменена на «Сотрудник»"
     refusal = h.alerts_for(loser_tg)[-1]
-    assert "последний активный руководитель" in refusal or NO_RIGHTS in refusal
+    assert "последний активный начальник" in refusal or NO_RIGHTS in refusal
     assert h.reply_keyboard(loser_tg) == EMPLOYEE_MENU
 
 
@@ -842,7 +842,7 @@ async def test_manager_demoted_while_his_click_waits_cannot_approve(no_admins):
 
 
 async def test_concurrent_approve_and_reject_of_one_request(two_admins):
-    """Два руководителя одновременно: один нажимает «Подтвердить», другой «Отклонить».
+    """Два начальника одновременно: один нажимает «Подтвердить», другой «Отклонить».
     Срабатывает только первое решение, второй получает «Заявка уже обработана»,
     сотрудник получает ровно одно уведомление."""
     h = two_admins
@@ -867,7 +867,7 @@ async def test_concurrent_approve_and_reject_of_one_request(two_admins):
 
 
 async def test_help_menu_cancel_for_active_users(app):
-    """Руководитель и сотрудник: /help и «❓ Помощь» — справка по своей роли, /menu — главное
+    """Начальник и сотрудник: /help и «❓ Помощь» — справка по своей роли, /menu — главное
     меню, /cancel без диалога — просто «Действие отменено» с меню."""
     h = app
     await h.send_command(MANAGER_TG_ID, "start", first_name="Анна")
@@ -899,7 +899,7 @@ async def test_help_menu_cancel_for_active_users(app):
 
 
 async def test_cancel_in_the_middle_of_task_creation(app):
-    """Руководитель начал ставить задачу и передумал: /cancel и кнопка «✖️ Отмена» сбрасывают
+    """Начальник начал ставить задачу и передумал: /cancel и кнопка «✖️ Отмена» сбрасывают
     диалог, следующий текст уже не считается названием задачи."""
     h = app
     await h.send_command(MANAGER_TG_ID, "start", first_name="Анна")
@@ -933,7 +933,7 @@ async def test_cancel_in_the_middle_of_task_creation(app):
 
 
 async def test_menu_button_in_the_middle_of_dialog_resets_it(app):
-    """Руководитель посреди постановки задачи нажимает «👥 Сотрудники» — открывается список,
+    """Начальник посреди постановки задачи нажимает «👥 Сотрудники» — открывается список,
     диалог сброшен. Затем «❓ Помощь» посреди нового диалога — справка, диалог снова сброшен.
     Сотрудник посреди внесения поручения нажимает «❓ Помощь» — то же самое."""
     h = app
@@ -967,7 +967,7 @@ async def test_menu_button_in_the_middle_of_dialog_resets_it(app):
 
 
 async def test_start_in_the_middle_of_dialog_shows_welcome(app):
-    """Руководитель посреди постановки задачи нажимает /start: приветствие с меню,
+    """Начальник посреди постановки задачи нажимает /start: приветствие с меню,
     диалог сброшен, у вопроса «кому поставить задачу» кнопки убраны, а если старый клиент
     ещё показывает кнопку сотрудника — она больше не продолжает диалог."""
     h = app
@@ -978,7 +978,7 @@ async def test_start_in_the_middle_of_dialog_shows_welcome(app):
     ivanov = h.find_button(MANAGER_TG_ID, "Иванов", choose)
 
     log = await h.send_command(MANAGER_TG_ID, "start")
-    assert "Вы вошли как руководитель" in log.text
+    assert "Вы вошли как начальник" in log.text
     assert await h.get_state(MANAGER_TG_ID) is None
     assert h.buttons(MANAGER_TG_ID, choose) == []
     log = await h.press(MANAGER_TG_ID, ivanov, choose)
@@ -990,7 +990,7 @@ async def test_start_in_the_middle_of_dialog_shows_welcome(app):
 
 
 async def test_staff_list_pagination_with_25_employees(app):
-    """В системе 25 сотрудников и руководитель. Список «👥 Сотрудники» листается по 20:
+    """В системе 25 сотрудников и начальник. Список «👥 Сотрудники» листается по 20:
     на второй странице нумерация продолжается, кнопка «◀ К списку» из карточки и действие
     в карточке возвращают на ту же страницу."""
     h = app
@@ -1000,7 +1000,7 @@ async def test_staff_list_pagination_with_25_employees(app):
 
     await h.press_menu(MANAGER_TG_ID, BTN_STAFF)
     text = h.last_text(MANAGER_TG_ID)
-    assert "Сотрудников: 25 · Руководителей: 1" in text
+    assert "Сотрудников: 25 · Начальников: 1" in text
     assert "Страница 1 из 2" in text
     buttons = h.buttons(MANAGER_TG_ID)
     assert len(buttons) == 22  # 20 человек + «🔄 1/2» и «▶»

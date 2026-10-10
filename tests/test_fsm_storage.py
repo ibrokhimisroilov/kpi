@@ -721,7 +721,7 @@ async def test_stale_read_does_not_overwrite_a_change(
     db: Db, storage_factory: StorageFactory, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Два первых обращения к ключу читают базу одновременно (апдейт человека и сброс его диалога
-    руководителем); второе успело изменить значение — запоздавший результат первого чтения его не затрёт."""
+    начальником); второе успело изменить значение — запоздавший результат первого чтения его не затрёт."""
     storage = storage_factory(db)
     gates: list[asyncio.Event] = []
     original = storage._read
@@ -1119,8 +1119,8 @@ async def test_registration_dialog_continues_after_restart(
 async def test_deploy_overlap_new_instance_rechecks_ai_busy(
     backend: str, tmp_path: Path, set_env: Callable[..., None], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Обновление на хостинге: старый экземпляр (A) ждёт ответа AI для черновика руководителя, а следующий
-    апдейт руководителя уже приходит на новый (B). B читает диалог из базы — там ai_busy — и честно отвечает
+    """Обновление на хостинге: старый экземпляр (A) ждёт ответа AI для черновика начальника, а следующий
+    апдейт начальника уже приходит на новый (B). B читает диалог из базы — там ai_busy — и честно отвечает
     «подождите». A получает ответ AI, показывает его с кнопками, снимает флаг и останавливается. «✅ Принять»
     на B: в памяти B флаг ещё стоит, но перед ответом «подождите» B сверяется с базой — принят вариант AI
     (раньше B отвечал «подождите» до cache_ttl, а через ~1,5 мин затирал ответ AI вариантом по правилам)."""
@@ -1255,7 +1255,7 @@ async def test_deploy_overlap_new_instance_rechecks_sending(
         await old.close()
         log = await h.press_button(EMP, "Отправить")
         assert "📤 Отправлено" in [answer.text for answer in log.answers]
-        assert "Результат отправлен руководителю" in (h.last_text(EMP) or "")
+        assert "Результат отправлен начальнику" in (h.last_text(EMP) or "")
         async with h.db() as session:
             assert len(list(await session.scalars(select(Submission).where(Submission.task_id == task_id)))) == 1
         assert await h.get_state(EMP) is None

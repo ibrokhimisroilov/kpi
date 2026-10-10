@@ -69,7 +69,7 @@
 
     async def test_employee_registration(app):
         h = app
-        # Руководитель: tg_id 1001 указан в ADMIN_IDS -> сразу активный руководитель.
+        # Начальник: tg_id 1001 указан в ADMIN_IDS -> сразу активный начальник.
         await h.send_command(MANAGER_TG_ID, "start", first_name="Анна")
         assert BTN_NEW_TASK in h.reply_keyboard(MANAGER_TG_ID)
 
@@ -80,7 +80,7 @@
         await h.press_button(emp, "Пропустить")          # ищет кнопку по подстроке текста
         assert "заявк" in h.last_text(emp).lower()
 
-        # Руководителю пришла заявка с inline-кнопками -> подтверждаем.
+        # Начальнику пришла заявка с inline-кнопками -> подтверждаем.
         log = await h.press_button(MANAGER_TG_ID, "Подтвердить")
         assert log.answers                                 # callback.answer() был
         assert log.to(emp).texts                           # сотруднику пришло уведомление
@@ -166,7 +166,7 @@ __all__ = [
     "parse_html",
 ]
 
-# Совпадает с ADMIN_IDS в tests/e2e/conftest.py: этот пользователь после /start — руководитель.
+# Совпадает с ADMIN_IDS в tests/e2e/conftest.py: этот пользователь после /start — начальник.
 MANAGER_TG_ID = 1001
 
 TEXT_LIMIT = 4096

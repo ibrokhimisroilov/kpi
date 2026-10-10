@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from datetime import date, timedelta
 from typing import Any
 
 from aiohttp import FormData
@@ -37,7 +38,7 @@ async def test_full_cycle_app_and_chat(ma: MiniApp, frozen: Any) -> None:
     _, emp = await start_both(ma)
     h = ma.h
 
-    # 1. Руководитель ставит задачу в приложении -> сотруднику в чат пришла карточка.
+    # 1. Начальник ставит задачу в приложении -> сотруднику в чат пришла карточка.
     created = await ma.post("/api/tasks", as_=MGR, json={
         "assignee_id": emp.id, "title": "Анализ договоров", "expected_result": "Проверить 100 договоров",
         "plan_value": 100, "plan_unit": "договоров", "deadline": "2026-10-03", "weight": 20,
@@ -52,7 +53,7 @@ async def test_full_cycle_app_and_chat(ma: MiniApp, frozen: Any) -> None:
     assert card["task"]["accepted"] is True and card["task"]["actions"]["accept"] is False
     assert "accepted" in [ev["type"] for ev in card["events"]]
 
-    # 3. Сдаёт в приложении (1 файл) -> руководителю в чат пришёл результат с кнопками и файлом.
+    # 3. Сдаёт в приложении (1 файл) -> начальнику в чат пришёл результат с кнопками и файлом.
     submitted = await ma.post(f"/api/tasks/{task_id}/submit", as_=EMP, data=submission_form())
     assert submitted.status == 202
     await ma.drain()
@@ -60,7 +61,7 @@ async def test_full_cycle_app_and_chat(ma: MiniApp, frozen: Any) -> None:
     assert "✅ Подтвердить 110 %" in review.button_texts
     assert [f.file_name for f in h.files_sent(MGR)] == ["Отчёт 0.pdf"]
 
-    # 4. Руководитель подтверждает в приложении -> сотруднику пришла оценка.
+    # 4. Начальник подтверждает в приложении -> сотруднику пришла оценка.
     confirmed = await ma.post(f"/api/submissions/{submitted['submission_id']}/confirm", as_=MGR)
     assert confirmed.status == 200 and confirmed["task"]["final_score"] == 110
     assert f"🏁 Результат по задаче #{task_id} оценён" in h.last_text(EMP)
@@ -129,7 +130,8 @@ async def test_proposal_from_app_approved_in_chat(ma: MiniApp, frozen: Any) -> N
     await start_both(ma)
     h = ma.h
     created = await ma.post("/api/proposals", as_=EMP, json={
-        "title": "Подготовить справку", "expected_result": "Справка по 5 договорам", "deadline": "2026-10-09",
+        "title": "Подготовить справку", "expected_result": "Справка по 5 договорам",
+        "deadline": (date.today() + timedelta(days=7)).isoformat(),
     })
     assert created.status == 201 and created["notified"] == 1
     await h.press_button(MGR, "Подтвердить")
@@ -139,4 +141,4 @@ async def test_proposal_from_app_approved_in_chat(ma: MiniApp, frozen: Any) -> N
     assert task.status == TaskStatus.ACTIVE and task.weight == 20
     card = await ma.get(f"/api/tasks/{task.id}", as_=EMP)
     assert card["task"]["status"] == "active" and card["task"]["actions"]["submit"] is True
-    assert "✅ Руководитель подтвердил ваше поручение" in h.last_text(EMP)
+    assert "✅ Начальник подтвердил ваше поручение" in h.last_text(EMP)

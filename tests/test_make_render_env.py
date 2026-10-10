@@ -261,7 +261,7 @@ def test_risky_password_is_warned(tmp_path: Path, env_file: Path, capsys: pytest
 ENV_TEXT = (
     "﻿# comment\n"
     f'export BOT_TOKEN="{TOKEN}"\n'
-    "ADMIN_IDS='1,2' # руководители\n"
+    "ADMIN_IDS='1,2' # начальники\n"
     f"gemini_api_key={GEMINI}   # ключ\n"
     "BROKEN LINE\n"
     "EMPTY=\n"

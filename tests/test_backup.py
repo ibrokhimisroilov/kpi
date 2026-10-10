@@ -1,11 +1,11 @@
-"""Ежедневная резервная копия базы руководителям в Telegram (bot/scheduler/backup.py, SPEC §8, §10.8).
+"""Ежедневная резервная копия базы начальникам в Telegram (bot/scheduler/backup.py, SPEC §8, §10.8).
 
 * снимок файловой базы (online backup API SQLite) содержит все таблицы и строки и открывается ботом;
 * база не в файле (PostgreSQL) — выгрузка всех таблиц во временный файл SQLite с той же схемой:
   строка в строку как в базе, открывается ботом, временные файлы не остаются, предел размера;
-* send_backup отправляет по одному документу каждому активному руководителю и ничего — сотрудникам,
-  неактивным руководителям и заблокировавшим бота; никогда не бросает исключений;
-* база больше предела Telegram — файл не отправляется, руководителей предупреждают один раз;
+* send_backup отправляет по одному документу каждому активному начальнику и ничего — сотрудникам,
+  неактивным начальникам и заблокировавшим бота; никогда не бросает исключений;
+* база больше предела Telegram — файл не отправляется, начальников предупреждают один раз;
 * BACKUP_ENABLED=false — задание в планировщике не регистрируется.
 
 Telegram — фейковый (tests/e2e/fakebot.py FakeSession): настоящий aiogram Bot без сети.
@@ -77,7 +77,7 @@ class FileDb:
 
 @pytest.fixture(autouse=True)
 def _fresh_warnings(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Каждый тест начинает с чистого «руководителей уже предупредили о размере»."""
+    """Каждый тест начинает с чистого «начальников уже предупредили о размере»."""
     monkeypatch.setattr(backup, "_too_big_warned", set())
 
 
@@ -95,7 +95,7 @@ async def file_db(tmp_path: Path) -> AsyncIterator[FileDb]:
 
 
 async def seed(db: FileDb) -> None:
-    """Два активных руководителя, заблокированный и ожидающий руководители, два сотрудника и задача."""
+    """Два активных начальника, заблокированный и ожидающий начальники, два сотрудника и задача."""
     async with db.sessionmaker() as session:
         people = [
             User(tg_id=MGR, full_name="Петрова Анна Сергеевна", role=Role.MANAGER, status=UserStatus.ACTIVE),
@@ -183,7 +183,7 @@ def table_rows(conn: sqlite3.Connection, table: str) -> list[tuple[object, ...]]
 
 
 def restore(data: bytes, path: Path) -> sqlite3.Connection:
-    """Записать файл копии на диск (как его скачает руководитель) и открыть."""
+    """Записать файл копии на диск (как его скачает начальник) и открыть."""
     path.write_bytes(data)
     return sqlite3.connect(path)
 
@@ -378,12 +378,12 @@ def test_backup_filename_uses_local_date() -> None:
     assert backup.backup_filename(datetime(2026, 10, 2, 19, 30)) == "kpi_backup_2026-10-03.db"
 
 
-# --- Отправка руководителям ---------------------------------------------------------------------------
+# --- Отправка начальникам ---------------------------------------------------------------------------
 
 
 async def test_send_backup_one_document_per_active_manager(file_db: FileDb, bot: Bot, tmp_path: Path) -> None:
-    """Каждому активному руководителю — один документ (имя с датой, подпись, без звука);
-    сотрудникам, заблокированному и не подтверждённому руководителю — ничего."""
+    """Каждому активному начальнику — один документ (имя с датой, подпись, без звука);
+    сотрудникам, заблокированному и не подтверждённому начальнику — ничего."""
     await seed(file_db)
     sent = await backup.send_backup(bot, file_db.sessionmaker, now=BACKUP_AT)
 
@@ -406,13 +406,13 @@ async def test_send_backup_one_document_per_active_manager(file_db: FileDb, bot:
     for chat_id in (EMP, EMP2, MGR_BLOCKED, MGR_PENDING):
         assert not [item for item in session.sent_files if item.chat_id == chat_id]
 
-    # Файл загружается один раз: второму руководителю уходит тот же file_id.
+    # Файл загружается один раз: второму начальнику уходит тот же file_id.
     first, second = documents
     assert not isinstance(first.document, str) and second.document == session.sent_files[0].file_id
 
 
 async def test_send_backup_survives_blocked_manager(file_db: FileDb, bot: Bot) -> None:
-    """Руководитель заблокировал бота — остальным копия всё равно приходит, исключений нет."""
+    """Начальник заблокировал бота — остальным копия всё равно приходит, исключений нет."""
     await seed(file_db)
     api(bot).blocked_chats.add(MGR)
 
@@ -424,7 +424,7 @@ async def test_send_backup_survives_blocked_manager(file_db: FileDb, bot: Bot) -
 async def test_send_backup_too_big_warns_managers_once(
     file_db: FileDb, bot: Bot, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """База больше предела Telegram: файл не отправляется, в лог — предупреждение, руководителям —
+    """База больше предела Telegram: файл не отправляется, в лог — предупреждение, начальникам —
     одно сообщение (на следующий день не повторяется). Удачная копия снимает отметку."""
     await seed(file_db)
     monkeypatch.setattr(backup, "MAX_BACKUP_BYTES", 1024)
@@ -452,7 +452,7 @@ async def test_send_backup_server_database_sends_export(
     file_db: FileDb, bot: Bot, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """База не в файле (PostgreSQL): копия читается через движок бота (без нового подключения) и уходит
-    руководителям тем же документом — файлом SQLite, из которого восстанавливаются все задачи."""
+    начальникам тем же документом — файлом SQLite, из которого восстанавливаются все задачи."""
     await seed_everything(file_db)
     sources: list[object] = []
 

@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "miniapp-dev",
+      "runtimeExecutable": ".venv/Scripts/python.exe",
+      "runtimeArgs": ["-m", "bot.webapp.dev", "--port", "8081", "--seed-demo"],
+      "port": 8081
+    }
+  ]
+}

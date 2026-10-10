@@ -55,12 +55,12 @@ WEBAPP_BUDGETS: dict[str, int] = {
     "M12": 6,  # пользователь, исполнитель, BEGIN, INSERT задачи, INSERT события, COMMIT
 }
 NAMES = {
-    "M01": "GET /api/me (руководитель)",
+    "M01": "GET /api/me (начальник)",
     "M02": "GET /api/tasks scope=all status=open",
     "M03": "GET /api/tasks … counts=1",
     "M04": "GET /api/tasks q=договор",
     "M05": "GET /api/tasks/{id} (доработка: сдача + файл)",
-    "M06": "GET /api/dashboard (руководитель)",
+    "M06": "GET /api/dashboard (начальник)",
     "M07": "GET /api/dashboard (сотрудник)",
     "M08": "GET /api/users/{id}/kpi",
     "M09": "GET /api/review",

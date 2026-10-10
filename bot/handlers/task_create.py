@@ -1,4 +1,4 @@
-"""«➕ Поставить задачу» (/new) — руководитель ставит задачу сотруднику (SPEC 7.3).
+"""«➕ Поставить задачу» (/new) — начальник ставит задачу сотруднику (SPEC 7.3).
 
 Сценарий: сотрудник → название → ожидаемый результат своими словами (+ подсказка AI / правил) →
 плановое число (если не определилось) → срок → приоритет → вес → сводка → создание.
@@ -17,7 +17,7 @@ FSM-данные (только JSON-совместимые значения):
 Состояние диалога хранится в БД и переживает перезапуск бота. Если бот остановили посреди запроса
 к AI (обновление на хостинге, сбой), флаг ai_busy не должен «заморозить» черновик навсегда: при
 мягкой остановке вместо ответа AI сохраняется вариант по правилам, а флаг старше времени, за которое
-AI обязан ответить (_ai_busy_stale_sec), считается брошенным — руководитель получает вариант по правилам.
+AI обязан ответить (_ai_busy_stale_sec), считается брошенным — начальник получает вариант по правилам.
 """
 
 from __future__ import annotations
@@ -209,7 +209,7 @@ async def on_result_raw(message: Message, state: FSMContext, session: AsyncSessi
         await _show_step(message, state, session, "result",
                          notice=f"⚠️ Слишком длинно ({len(raw)} симв.). Опишите результат короче — до {RESULT_MAX} символов.")
         return
-    # «⏳» — сразу, до обращений к базе и к AI: руководитель видит, что бот уже работает.
+    # «⏳» — сразу, до обращений к базе и к AI: начальник видит, что бот уже работает.
     wait = await message.answer("⏳ Формулирую измеримый результат…")
     await session.commit()  # перед долгим запросом к AI не держим транзакцию
     data = await state.get_data()
@@ -505,7 +505,7 @@ async def on_confirm(
         await session.commit()
     except DomainError as exc:
         await state.update_data(creating=False)
-        if deadline <= utcnow():  # срок истёк, пока руководитель смотрел на сводку
+        if deadline <= utcnow():  # срок истёк, пока начальник смотрел на сводку
             await _reask_deadline(callback, state, session)
         else:
             await callback.answer(exc.message, show_alert=True)
@@ -802,7 +802,7 @@ async def _run_suggestion(
     Пока идёт запрос, ``ai_busy`` блокирует кнопки выбора, а в чате — «печатает…». Если за это время
     диалог отменили или начали заново, результат молча отбрасывается. Бот останавливается посреди запроса
     (обновление на хостинге) — вместо ответа AI сохраняется вариант по правилам (его покажет
-    следующее сообщение руководителя); жёсткую остановку покрывает ai_busy_since (_ai_busy_stale).
+    следующее сообщение начальника); жёсткую остановку покрывает ai_busy_since (_ai_busy_stale).
 
     ``saved`` — значения диалога, которые записываются вместе с ai_busy (одной операцией с хранилищем);
     ``set_state=False`` — диалог уже в result_choice.
@@ -828,7 +828,7 @@ async def _run_suggestion(
 
     notice = None
     if retry and suggestion.source != "ai":
-        # Правила взяли бы текст вместе с «Предыдущий вариант: …» — берём исходные слова руководителя.
+        # Правила взяли бы текст вместе с «Предыдущий вариант: …» — берём исходные слова начальника.
         suggestion = formulate.rules_suggestion(title, raw)
         notice = (
             "⚠️ AI сейчас недоступен — другой вариант предложить не получилось. "
@@ -875,7 +875,7 @@ def _ai_busy_stale(data: dict[str, Any]) -> bool:
 async def _reread_busy(callback: CallbackQuery, state: FSMContext, expected: State) -> dict[str, Any] | None:
     """Флаг «занято» (ai_busy, creating) — перед ответом «подождите» сверить диалог с базой (1 обмен, только
     в этом редком случае). При обновлении бота на хостинге флаг мог уже снять другой экземпляр (ответ AI
-    готов), а в памяти этого экземпляра он ещё стоит (bot.fsm_storage): без сверки руководитель минуты
+    готов), а в памяти этого экземпляра он ещё стоит (bot.fsm_storage): без сверки начальник минуты
     получал бы «подождите», а потом ответ AI затёрся бы вариантом по правилам (_unstick_ai).
     -> свежие данные диалога; None — диалог тем временем ушёл с этого шага или кнопка уже не из последнего
     вопроса (ответ «кнопка неактуальна» дан)."""
@@ -889,7 +889,7 @@ async def _reread_busy(callback: CallbackQuery, state: FSMContext, expected: Sta
 
 
 async def _unstick_ai(state: FSMContext, data: dict[str, Any]) -> dict[str, Any]:
-    """Снять брошенный ai_busy: вариант по правилам из исходных слов руководителя. -> новые данные диалога."""
+    """Снять брошенный ai_busy: вариант по правилам из исходных слов начальника. -> новые данные диалога."""
     suggestion = formulate.rules_suggestion(data.get("title") or "", data.get("raw_result") or "")
     await state.update_data(
         ai_busy=False, ai_busy_since=None, ai_lost=None, suggestion=_suggestion_dict(suggestion)
@@ -899,7 +899,7 @@ async def _unstick_ai(state: FSMContext, data: dict[str, Any]) -> dict[str, Any]
 
 async def _settle_cancelled(state: FSMContext, token: int, title: str, raw: str) -> None:
     """Остановка бота посреди запроса к AI: сохранить вариант по правилам, если диалог всё тот же
-    (ai_lost — следующее сообщение руководителя покажет его с пояснением, что AI не ответил)."""
+    (ai_lost — следующее сообщение начальника покажет его с пояснением, что AI не ответил)."""
     data = await state.get_data()
     if await state.get_state() != CreateTaskSG.result_choice.state or data.get("prompt_id") != token:
         return
@@ -966,7 +966,7 @@ async def _set_result(
     same = " ".join(raw.split()).casefold() == " ".join(expected.split()).casefold()
     await state.update_data(
         expected_result=expected,
-        description=None if not raw or same else raw,  # исходные слова руководителя, если отличаются
+        description=None if not raw or same else raw,  # исходные слова начальника, если отличаются
         plan_value=value,
         plan_unit=unit,
     )
@@ -1078,7 +1078,7 @@ def _current_value(step: str, data: dict[str, Any]) -> str | None:
 
 
 async def _guard_msg(message: Message, state: FSMContext, user: User | None) -> bool:
-    """Ставить задачи может только активный руководитель (роль могли снять посреди диалога)."""
+    """Ставить задачи может только активный начальник (роль могли снять посреди диалога)."""
     if common.is_manager(user):
         return True
     await state.clear()

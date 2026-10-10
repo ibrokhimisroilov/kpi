@@ -1,6 +1,6 @@
 """Списки задач, карточка задачи, принятие в работу, история, правка и отмена (SPEC 7.5).
 
-* «📋 Мои задачи» /my (сотрудник) и «📋 Задачи» /tasks (руководитель) -> ListCB("my"|"all", "open").
+* «📋 Мои задачи» /my (сотрудник) и «📋 Задачи» /tasks (начальник) -> ListCB("my"|"all", "open").
 * ListCB scope my | all | emp, статусы open | overdue | review | done | all, по 8 задач на страницу.
 * TaskCB open | accept | history | edit | cancel.
 * Правка задачи — FSM EditTaskSG, отмена задачи — FSM CancelTaskSG.
@@ -56,7 +56,7 @@ _STATUS_TITLES = {
     "done": "Выполнены",
     "all": "Все",
 }
-# «Все» для сотрудника — без отклонённых и отменённых; руководитель видит и отменённые.
+# «Все» для сотрудника — без отклонённых и отменённых; начальник видит и отменённые.
 _ALL_FOR_EMPLOYEE = (
     TaskStatus.PROPOSED,
     TaskStatus.ACTIVE,
@@ -198,7 +198,7 @@ def _is_active(user: User | None) -> bool:
 
 
 def _can_view(task: Task, user: User | None) -> bool:
-    """Руководитель видит любые задачи, сотрудник — только свои."""
+    """Начальник видит любые задачи, сотрудник — только свои."""
     if user is None or not user.is_active:
         return False
     return user.is_manager or task.assignee_id == user.id
@@ -268,7 +268,7 @@ def _task_header(task: Task) -> str:
 def _back_cb(user: User, saved: object) -> ListCB:
     """Куда ведёт «◀ К списку задач»: последний открытый список (вкладка, страница) или «В работе».
 
-    Очереди руководителя «📥 Предложения» и «📝 На проверке» (их ведут task_propose / task_review)
+    Очереди начальника «📥 Предложения» и «📝 На проверке» (их ведут task_propose / task_review)
     сами запоминают себя под тем же ключом K_BACK — карточка из очереди возвращает в очередь.
     """
     allowed = (*_LIST_SCOPES, "proposals", "review") if common.is_manager(user) else ("my",)
@@ -394,7 +394,7 @@ async def _render_list(
 @router.message(F.text.in_({BTN_TASKS, BTN_MY_TASKS}), IsActiveUser())
 @router.message(Command("tasks", "my"), IsActiveUser())
 async def menu_tasks(message: Message, state: FSMContext, session: AsyncSession, user: User) -> None:
-    """«📋 Задачи» (руководитель — все задачи) / «📋 Мои задачи» (сотрудник — свои)."""
+    """«📋 Задачи» (начальник — все задачи) / «📋 Мои задачи» (сотрудник — свои)."""
     await _leave_own_dialog(message, state)
     await state.clear()
     scope = "all" if user.is_manager else "my"
@@ -434,7 +434,7 @@ async def list_page(
 
 
 def _visible_events(task: Task, events: list[TaskEvent], viewer: User) -> list[TaskEvent]:
-    """Исполнитель не видит предварительную оценку AI, пока руководитель не принял решение (SPEC 7.6).
+    """Исполнитель не видит предварительную оценку AI, пока начальник не принял решение (SPEC 7.6).
 
     Скрываются события AI_EVALUATED после последней сдачи, если по ней ещё нет решения
     (так же, как в карточке задачи для исполнителя).
@@ -576,7 +576,7 @@ async def _dialog_task(
     user: User | None,
     statuses: tuple[TaskStatus, ...],
 ) -> Task | None:
-    """Задача текущего диалога, если пользователь — руководитель и статус ещё подходит."""
+    """Задача текущего диалога, если пользователь — начальник и статус ещё подходит."""
     if not common.is_manager(user):
         return None
     task_id = (await state.get_data()).get(K_TASK)
@@ -588,7 +588,7 @@ async def _dialog_task(
     return task
 
 
-# --- Правка задачи (руководитель) -------------------------------------------------------------
+# --- Правка задачи (начальник) -------------------------------------------------------------
 
 
 def _plan_label(task: Task) -> str:
@@ -1023,7 +1023,7 @@ async def edit_weight_text(
     await _apply_edit(message, session, bot, state, user, task, "weight", {"weight": weight})
 
 
-# --- Отмена задачи (руководитель) -------------------------------------------------------------
+# --- Отмена задачи (начальник) -------------------------------------------------------------
 
 
 def _cancel_confirm_kb() -> InlineKeyboardMarkup:

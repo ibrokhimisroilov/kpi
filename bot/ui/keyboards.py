@@ -18,6 +18,7 @@ from aiogram.types import (
 
 from bot.config import get_settings
 from bot.db.models import OPEN_STATUSES, Priority, Role, Submission, Task, TaskStatus, User, UserStatus
+from bot.services import auto
 from bot.ui import texts
 from bot.ui.callbacks import ListCB, PeriodCB, PickCB, SubCB, TaskCB, UserCB
 from bot.ui.render import PRIORITY_LABELS, status_label
@@ -167,12 +168,18 @@ def priority_kb() -> InlineKeyboardMarkup:
     return _markup([buttons, _cancel_row()])
 
 
-def weight_kb(load: int | None = None) -> InlineKeyboardMarkup:
-    """Вес задачи. load — уже набранный вес на неделе: варианты сверх 100 % помечаются «⚠️»."""
+def weight_kb(load: int | None = None, suggested: int | None = None) -> InlineKeyboardMarkup:
+    """Вес задачи. load — уже набранный вес на неделе: варианты сверх 100 % помечаются «⚠️».
+    suggested — предложенный вес поручения (AI или по умолчанию): отмечен «💡» и добавляется, если его
+    нет среди вариантов."""
+    options = list(_WEIGHT_OPTIONS)
+    if suggested is not None and 1 <= suggested <= 100 and suggested not in options:
+        options = sorted([*options, suggested])
     buttons = []
-    for weight in _WEIGHT_OPTIONS:
+    for weight in options:
         warn = " ⚠️" if load is not None and load + weight > 100 else ""
-        buttons.append(_pick(f"{weight} %{warn}", "weight", str(weight)))
+        mark = "💡 " if weight == suggested else ""
+        buttons.append(_pick(f"{mark}{weight} %{warn}", "weight", str(weight)))
     return _markup([*_chunk(buttons, 4), _cancel_row()])
 
 
@@ -237,6 +244,10 @@ def _manager_task_rows(task: Task) -> list[_Row]:
         return [[_task_btn("✏️ Изменить", "edit", task), _task_btn("🚫 Отменить", "cancel", task)]]
     if task.status == TaskStatus.SUBMITTED:
         return [[_task_btn("🔍 Проверить", "review", task)]]
+    last = task.last_submission
+    if last is not None and auto.can_revise(task, last):
+        # Оценку подтвердил бот: начальник ещё может её изменить (AUTO_REVISE_DAYS).
+        return [[_btn("✏️ Изменить оценку", SubCB(action="revise", sub_id=last.id))]]
     return []
 
 
@@ -266,6 +277,14 @@ def new_task_kb(task: Task) -> InlineKeyboardMarkup:
 
 def submit_kb(task: Task) -> InlineKeyboardMarkup:
     return _markup([[_task_btn("📤 Сдать результат", "submit", task), _task_btn("📋 Открыть", "open", task)]])
+
+
+def auto_confirmed_kb(task: Task, sub: Submission) -> InlineKeyboardMarkup:
+    """Начальнику под сообщением «оценка подтверждена автоматически»: [✏️ Изменить оценку] [📋 Открыть]."""
+    return _markup([[
+        _btn("✏️ Изменить оценку", SubCB(action="revise", sub_id=sub.id)),
+        _task_btn("📋 Открыть", "open", task),
+    ]])
 
 
 def proposal_kb(task: Task) -> InlineKeyboardMarkup:
@@ -312,7 +331,7 @@ def user_manage_kb(target: User, viewer: User) -> InlineKeyboardMarkup:
     rows: list[_Row] = []
     if target.role == Role.EMPLOYEE:
         rows.append([_user_btn("📊 Карточка", "card", target)])
-        rows.append([_user_btn("👔 Сделать руководителем", "role_mgr", target)])
+        rows.append([_user_btn("👔 Сделать начальником", "role_mgr", target)])
     elif not is_self:
         rows.append([_user_btn("👤 Сделать сотрудником", "role_emp", target)])
     if not is_self:

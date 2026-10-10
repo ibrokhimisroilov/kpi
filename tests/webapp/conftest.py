@@ -66,7 +66,7 @@ get_settings.cache_clear()
 from e2e.fakebot import BotHarness, FakeSession  # noqa: E402
 
 TOKEN = "42:TEST"
-MGR = 1001  # руководитель из ADMIN_IDS
+MGR = 1001  # начальник из ADMIN_IDS
 MGR2 = 1002
 EMP = 2001
 EMP2 = 2002
@@ -212,7 +212,7 @@ class MiniApp:
         return user
 
     async def seed_team(self, employees: int = 2) -> tuple[Any, list[Any]]:
-        """Руководитель Петрова (1001) и сотрудники Иванов (2001), Сидоров (2002), Кузнецова (2003)."""
+        """Начальник Петрова (1001) и сотрудники Иванов (2001), Сидоров (2002), Кузнецова (2003)."""
         mgr = await self.seed_user(MGR, "Петрова Анна Сергеевна", role="manager")
         people = [
             (EMP, "Иванов Иван Иванович", "Юрист"),

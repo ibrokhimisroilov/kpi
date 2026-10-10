@@ -98,7 +98,7 @@ async def test_submit_with_photo_and_document(ma: MiniApp, frozen: Any, monkeypa
                          "status": "submitted", "evaluation": "pending"}
     assert len(temp_files) == 2
 
-    # 202 — до окончания оценки: руководителю ещё ничего не пришло.
+    # 202 — до окончания оценки: начальнику ещё ничего не пришло.
     assert not any("Результат по задаче" in text for text in ma.h.sent_to(MGR))
     uploads = [r for r in ma.api.requests if isinstance(r, m.SendPhoto | m.SendDocument) and r.chat_id == EMP]
     assert sorted(type(r).__name__ for r in uploads) == ["SendDocument", "SendPhoto"]
@@ -200,10 +200,10 @@ async def test_not_multipart_and_wrong_task_states(ma: MiniApp, frozen: Any) -> 
     submitted = await ma.seed_task(emp, mgr, kind="submitted", title="Уже сдана")
     resp = await ma.post(f"/api/tasks/{submitted}/submit", as_=EMP, data=form())
     assert resp.status == 400 and resp.code == "domain"
-    assert resp.error == "📝 Результат уже отправлен и ждёт проверки руководителя."
+    assert resp.error == "📝 Результат уже отправлен и ждёт проверки начальника."
     cancelled = await ma.seed_task(emp, mgr, kind="cancelled", title="Отменена")
     resp = await ma.post(f"/api/tasks/{cancelled}/submit", as_=EMP, data=form())
-    assert resp.error == "🚫 Задача отменена руководителем — сдавать результат не нужно."
+    assert resp.error == "🚫 Задача отменена начальником — сдавать результат не нужно."
     assert await submissions_count(ma) == 1  # только засеянная сдача
 
 
@@ -265,7 +265,7 @@ async def test_task_cancelled_while_uploading(ma: MiniApp, frozen: Any, monkeypa
     monkeypatch.setattr(api, "_upload_files", cancel_meanwhile)
     resp = await ma.post(f"/api/tasks/{task_id}/submit", as_=EMP, data=form(files=[("a.pdf", PDF, None)]))
     assert resp.status == 400 and resp.code == "domain"
-    assert resp.error == "🚫 Задача отменена руководителем — сдавать результат не нужно."
+    assert resp.error == "🚫 Задача отменена начальником — сдавать результат не нужно."
     assert await submissions_count(ma) == 0
     assert len(ma.h.files_sent(EMP)) == 1  # уже загруженный файл остался в чате
     assert not ma.ctx.gate.busy("submit", EMP)

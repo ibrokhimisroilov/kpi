@@ -190,7 +190,7 @@ async def test_refuses_database_with_users(backup_file: Path, target: Path) -> N
     engine = await open_db(sqlite_url(target))
     try:
         async with make_sessionmaker(engine)() as session:
-            session.add(User(tg_id=1001, full_name="Действующий Руководитель", role=Role.MANAGER,
+            session.add(User(tg_id=1001, full_name="Действующий Начальник", role=Role.MANAGER,
                              status=UserStatus.ACTIVE))
             await session.commit()
     finally:
@@ -199,7 +199,7 @@ async def test_refuses_database_with_users(backup_file: Path, target: Path) -> N
 
     with pytest.raises(RestoreError, match="--force") as caught:
         await restore_tool.restore(backup_file, sqlite_url(target))
-    assert "сотрудников и руководителей — 1" in str(caught.value)
+    assert "сотрудников и начальников — 1" in str(caught.value)
     assert rows_by_table(target) == before
 
 
@@ -207,7 +207,7 @@ async def test_force_replaces_existing_data(source: Path, backup_file: Path, tar
     engine = await open_db(sqlite_url(target))
     try:
         async with make_sessionmaker(engine)() as session:
-            boss = User(tg_id=9001, full_name="Другой Руководитель", role=Role.MANAGER, status=UserStatus.ACTIVE)
+            boss = User(tg_id=9001, full_name="Другой Начальник", role=Role.MANAGER, status=UserStatus.ACTIVE)
             session.add(boss)
             await session.flush()
             session.add(Task(title="Чужая задача", expected_result="—", deadline=DEADLINE,
@@ -246,7 +246,7 @@ async def test_error_midway_leaves_database_unchanged(
     engine = await open_db(sqlite_url(target))
     try:
         async with make_sessionmaker(engine)() as session:
-            session.add(User(tg_id=9001, full_name="Другой Руководитель", role=Role.MANAGER, status=UserStatus.ACTIVE))
+            session.add(User(tg_id=9001, full_name="Другой Начальник", role=Role.MANAGER, status=UserStatus.ACTIVE))
             await session.commit()
     finally:
         await engine.dispose()
@@ -397,7 +397,7 @@ async def test_cli_postgres_with_separate_password(
     set_env: Callable[..., None],
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """Как у руководителя: DATABASE_URL — строка Supabase с «[YOUR-PASSWORD]», пароль — в DATABASE_PASSWORD."""
+    """Как у начальника: DATABASE_URL — строка Supabase с «[YOUR-PASSWORD]», пароль — в DATABASE_PASSWORD."""
     from urllib.parse import quote
 
     from bot.db.base import describe_url, normalize_url
@@ -446,7 +446,7 @@ async def test_cli_restores_and_prints_summary(
     assert await run_cli([str(backup_file)]) == 0
     out = capsys.readouterr().out
     assert "Готово: копия kpi_backup_2026-10-02.db загружена" in out
-    assert "задачи (tasks): 2" in out and "сотрудники и руководители (users): 3" in out
+    assert "задачи (tasks): 2" in out and "сотрудники и начальники (users): 3" in out
     assert "Всего: 13." in out
 
     assert await run_cli([str(backup_file)]) == 1  # второй раз — база уже не пустая

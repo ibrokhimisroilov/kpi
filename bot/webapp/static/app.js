@@ -52,6 +52,7 @@
     review: ['GET', '/api/review'],
     confirm: ['POST', '/api/submissions/{sub_id}/confirm'],
     setScore: ['POST', '/api/submissions/{sub_id}/score'],
+    reviseScore: ['POST', '/api/submissions/{sub_id}/revise'],
     rework: ['POST', '/api/submissions/{sub_id}/rework'],
     sendFiles: ['POST', '/api/submissions/{sub_id}/files'],
     proposals: ['GET', '/api/proposals'],
@@ -104,11 +105,11 @@
     { value: 'low', label: '🟢 Низкий' },
   ];
   const NOT_OPEN_TEXTS = {
-    submitted: '📝 Результат уже отправлен и ждёт проверки руководителя.',
+    submitted: '📝 Результат уже отправлен и ждёт проверки начальника.',
     done: '✅ Задача уже выполнена и оценена — сдавать результат не нужно.',
-    cancelled: '🚫 Задача отменена руководителем — сдавать результат не нужно.',
-    proposed: '📥 Поручение ещё не подтверждено руководителем — сдать результат можно после подтверждения.',
-    rejected: '❌ Поручение отклонено руководителем — сдавать результат не нужно.',
+    cancelled: '🚫 Задача отменена начальником — сдавать результат не нужно.',
+    proposed: '📥 Поручение ещё не подтверждено начальником — сдать результат можно после подтверждения.',
+    rejected: '❌ Поручение отклонено начальником — сдавать результат не нужно.',
   };
   const KIND_ICONS = { document: '📄', photo: '🖼️', video: '🎬', other: '📎' };
   const MONTHS_GEN = ['января', 'февраля', 'марта', 'апреля', 'мая', 'июня', 'июля', 'августа',
@@ -1921,7 +1922,7 @@
     const meta = [];
     if (opts.assignee && t.assignee) meta.push(t.assignee.short_name);
     if (t.status !== 'proposed') meta.push(t.priority_label, 'вес ' + t.weight + ' %');
-    else meta.push('ждёт подтверждения руководителя');
+    else meta.push('ждёт подтверждения начальника');
     const warn = unaccepted ? h('span', { class: 'warn' }, ' · не принята') : null;
     const tailClass = 'row-tail' + (t.overdue ? ' is-bad' : '') + (t.status === 'done' ? ' is-score' : '');
     const li = h('li', null, h('button', { type: 'button', class: 'row-main', onclick: () => go('#/task/' + t.id) },
@@ -2140,7 +2141,7 @@
   }
 
   // ---------------------------------------------------------------------------------------------
-  // 11. Экраны руководителя: команда и карточка сотрудника
+  // 11. Экраны начальника: команда и карточка сотрудника
   // ---------------------------------------------------------------------------------------------
 
   const teamPeriod = { kind: 'week', offset: 0 };
@@ -2278,7 +2279,7 @@
     kpiView(scr, state.me.user.id, myPeriod, true);
   }
 
-  /** Общий вид KPI (§11.6.1): карточка сотрудника у руководителя и «Мой KPI» у сотрудника. */
+  /** Общий вид KPI (§11.6.1): карточка сотрудника у начальника и «Мой KPI» у сотрудника. */
   function kpiView(scr, userId, ps, self) {
     const head = screenHead(self ? 'Мой KPI' : 'Сотрудник', self ? state.me.user.full_name : null);
     const pc = periodControl(ps, () => {
@@ -2411,7 +2412,7 @@
   }
 
   // ---------------------------------------------------------------------------------------------
-  // 12. Списки задач: руководитель (#/tasks) и сотрудник (#/my, #/submit)
+  // 12. Списки задач: начальник (#/tasks) и сотрудник (#/my, #/submit)
   // ---------------------------------------------------------------------------------------------
 
   const tasksFilter = { status: 'open', q: '', userId: '' };
@@ -2564,7 +2565,8 @@
           pill(t.status_label, statusTone(t)),
           t.status === 'done' && t.final_score_text ? pill('🏁 ' + t.final_score_text, 'good') : null),
         h('p', { class: 'deadline-line' }, '📅 ', t.deadline_label),
-        acceptanceLine(t, isM)));
+        acceptanceLine(t, isM),
+        t.auto_note ? h('p', { class: 'line small muted' }, t.auto_note) : null));
       out.push(actionsBlock(card, isM));
       out.push(h('section', { class: 'card' },
         kvBlock('🎯 Ожидаемый результат', t.expected_result),
@@ -2573,7 +2575,7 @@
       out.push(h('section', { class: 'card' },
         peopleLines(t, isM).map((p) => line(p[0], p[1])),
         t.weight_pending
-          ? line('⚖️', 'Вес и приоритет: назначит руководитель при подтверждении')
+          ? line('⚖️', 'Вес и приоритет: назначит начальник при подтверждении')
           : [line('⚡ Приоритет:', t.priority_label), line('⚖️ Вес:', t.weight + ' %')],
         t.rework_count ? line('↩️ Возвратов на доработку:', String(t.rework_count)) : null));
       out.push(submissionsBlock(card, isM));
@@ -2593,6 +2595,15 @@
       if (a.submit) main.push(button('📤 Сдать результат', () => go('#/submit/' + t.id), (a.accept ? '' : 'btn-primary ') + 'btn-block'));
       if (a.review) main.push(button('🔍 Проверить результат', () => go('#/review/' + t.id), 'btn-primary btn-block'));
       if (a.approve) main.push(button('✅ Подтвердить', () => go('#/proposal/' + t.id), 'btn-primary btn-block'));
+      if (a.revise) {
+        // Оценку подтвердил бот (начальник не ответил вовремя) — её ещё можно изменить.
+        const subs = card.submissions || [];
+        const last = subs.length ? subs[subs.length - 1] : null;
+        if (last && last.id === a.revise_submission_id) {
+          main.push(button('✏️ Изменить оценку' + (a.revise_until_text ? ' (до ' + a.revise_until_text + ')' : ''),
+            () => scoreSheet(scr, last, { revise: true, onDone: () => load(true) }), 'btn-block'));
+        }
+      }
       if (a.edit) extra.push(button('✏️ Изменить', () => go('#/task/' + t.id + '/edit')));
       if (a.reject) extra.push(button('❌ Отклонить', () => rejectSheet(scr, t, () => go('#/review?tab=proposals', { force: true, reset: true })), 'btn-danger'));
       if (a.cancel) extra.push(button('🚫 Отменить', () => cancelSheet(scr, t, (task) => {
@@ -2656,10 +2667,10 @@
     if (isM && t.assignee) out.push(['👤 Исполнитель:', t.assignee.short_name + (t.assignee.position ? ', ' + t.assignee.position : '')]);
     if (t.source === 'employee') {
       out.push(['✋', 'Внесена сотрудником (устное поручение)']);
-      if (t.manager) out.push(['🧑‍💼 Ответственный руководитель:', t.manager.short_name]);
+      if (t.manager) out.push(['🧑‍💼 Ответственный начальник:', t.manager.short_name]);
     } else {
       if (t.created_by) out.push(['🧑‍💼 Постановщик:', t.created_by.short_name]);
-      if (t.manager && t.created_by && t.manager.id !== t.created_by.id) out.push(['🧑‍💼 Ответственный руководитель:', t.manager.short_name]);
+      if (t.manager && t.created_by && t.manager.id !== t.created_by.id) out.push(['🧑‍💼 Ответственный начальник:', t.manager.short_name]);
     }
     return out;
   }
@@ -2736,7 +2747,7 @@
       }
       return null;
     }
-    if (sb.ai_hidden) return note('📝 Результат на проверке у руководителя. Решение придёт в чат с ботом.', 'info');
+    if (sb.ai_hidden) return note('📝 Результат на проверке у начальника. Решение придёт в чат с ботом.', 'info');
     if (sb.ai) return h('p', { class: 'line muted' }, sb.ai.label + ': ' + sb.ai.score_text);
     return null;
   }
@@ -2753,7 +2764,7 @@
     if (sb.reviewer) {
       out.push(h('p', { class: 'line small muted' }, '🧑‍💼 Проверка: ' + sb.reviewer.short_name + (sb.reviewed_at ? ', ' + fmtDmHm(sb.reviewed_at) : '')));
     }
-    if (sb.review_comment) out.push(kvBlock('💬 Комментарий руководителя', sb.review_comment));
+    if (sb.review_comment) out.push(kvBlock('💬 Комментарий начальника', sb.review_comment));
     return h('div', { class: 'decision' }, out);
   }
 
@@ -2949,7 +2960,8 @@
           h('p', { class: 'line' }, h('span', { class: 'muted' }, '📤 Сдано: '), sb.created_local + ' — ', h('span', { class: sb.is_late ? 'tone-bad' : 'tone-good' }, sb.late_text)),
           filesBlock(sb, true)),
         aiReviewCard(sb),
-        h('p', { class: 'muted small center' }, 'Окончательное решение — за руководителем.'),
+        h('p', { class: 'muted small center' }, 'Окончательное решение — за начальником.'),
+        t.auto_note ? h('p', { class: 'muted small center' }, t.auto_note) : null,
         h('div', { class: 'btn-row' },
           button('✏️ Изменить оценку', () => scoreSheet(scr, sb)),
           button('↩ На доработку', () => reworkSheet(scr, t, sb))),
@@ -3000,7 +3012,9 @@
     return h('section', { class: 'card ai-card' }, h('div', { class: 'ai-label' }, '🤖 Предварительной оценки нет — выставьте оценку сами.'));
   }
 
-  function scoreSheet(scr, sb) {
+  /** Лист оценки. o.revise — изменить оценку, подтверждённую автоматически (o.onDone — что сделать после). */
+  function scoreSheet(scr, sb, o) {
+    const revise = Boolean(o && o.revise);
     const maxScore = cfg().max_score || 150;
     const options = (cfg().score_options || []).slice();
     let marked = null;
@@ -3051,6 +3065,7 @@
     sheet.show({
       title: '✏️ Изменить оценку',
       body: h('div', null,
+        revise ? h('p', { class: 'muted' }, '🏁 Сейчас: ', h('b', { class: 'num' }, sb.final_score_text || pct(sb.final_score)), ' — подтверждена автоматически') : null,
         sb.ai ? h('p', { class: 'muted' }, sb.ai.label + ': ', h('b', { class: 'num' }, sb.ai.score_text)) : h('p', { class: 'muted' }, '🤖 Предварительной оценки AI нет.'),
         chipsBox, custom.el, comment.el),
       dirty: () => value !== null || comment.get().trim() !== '',
@@ -3065,14 +3080,27 @@
           if (!comment.validate()) return;
           primary.update({ progress: true }, 'sheet');
           try {
-            const r = await api(EP.setScore, { params: { sub_id: sb.id }, body: { score: value, comment: comment.get().trim() || null } });
+            const r = await api(revise ? EP.reviseScore : EP.setScore, { params: { sub_id: sb.id }, body: { score: value, comment: comment.get().trim() || null } });
             sheet.close(true);
             haptic.ok();
             toast(withNotice('✅ Оценка: ' + fmtNum(value) + ' %', r.notice));
             afterMutation();
-            backToQueue('results');
+            if (revise) {
+              if (o.onDone) o.onDone();
+            } else {
+              backToQueue('results');
+            }
           } catch (err) {
             primary.update({ progress: false }, 'sheet');
+            if (revise) {
+              // Срок вышел или оценку уже изменил другой начальник: показать причину и обновить карточку.
+              reportError(err);
+              if (err.status === 400) {
+                sheet.close(true);
+                if (o.onDone) o.onDone();
+              }
+              return;
+            }
             if (isAlreadyProcessed(err)) sheet.close(true);
             reviewFailed(err);
           }
@@ -3186,6 +3214,9 @@
       }
       const expired = Date.parse(t.deadline) <= serverNow();
       const formErr = h('div', { class: 'form-error', role: 'alert' });
+      // Вес у поручения пока временный — это подсказка (AI или по умолчанию): он выбран заранее.
+      const suggested = isNum(t.weight) && t.weight >= 1 && t.weight <= 100 ? t.weight : null;
+      if (model.weight === null && suggested !== null) model.weight = suggested;
       const wp = weightPicker(model, { onChange: () => primary.update({ enabled: wp.filled() }) });
       const pr = segmented(PRIORITIES, model.priority, (v) => {
         model.priority = v;
@@ -3243,7 +3274,9 @@
         sec('Подтвердить'),
         h('section', { class: 'card' },
           h('div', { class: 'field' }, h('div', { class: 'label' }, 'Приоритет'), pr.el),
-          wp.el),
+          wp.el,
+          suggested !== null ? h('p', { class: 'field-hint' }, '💡 Предлагаемый вес: ' + suggested + ' %') : null),
+        t.auto_note && !expired ? h('p', { class: 'muted small center' }, t.auto_note) : null,
         formErr,
         h('div', { class: 'btn-row' },
           button('✏️ Изменить', () => go('#/task/' + t.id + '/edit')),
@@ -3425,7 +3458,7 @@
   function ProposeView(scr) {
     if (!drafts.propose) drafts.propose = newDraft();
     const d = drafts.propose;
-    const head = screenHead('Поручение', 'Внесите поручение, полученное устно: руководитель подтвердит его.');
+    const head = screenHead('Поручение', 'Внесите поручение, полученное устно: начальник подтвердит его.');
     scr.el.append(head.el);
     scr.dirty = () => draftDirty(d);
     const formErr = h('div', { class: 'form-error', role: 'alert' });
@@ -3483,7 +3516,7 @@
         const r = await api(EP.propose, { body });
         drafts.propose = null;
         haptic.ok();
-        toast(r.notice || '📤 Поручение #' + r.task.id + ' отправлено руководителю на подтверждение');
+        toast(r.notice || '📤 Поручение #' + r.task.id + ' отправлено начальнику на подтверждение');
         afterMutation();
         syncClosing();
         go('#/task/' + r.task.id, { force: true });
@@ -3498,7 +3531,7 @@
       }
     }
 
-    primary.set({ text: '📤 Отправить руководителю', enabled: filled(), onClick: submit });
+    primary.set({ text: '📤 Отправить начальнику', enabled: filled(), onClick: submit });
     scr.el.append(h('form', { class: 'form', novalidate: true, onsubmit: (e) => e.preventDefault() },
       formErr, title.el, result.el, plan.el, deadline.el));
   }
@@ -3863,7 +3896,7 @@
         afterMutation();
         syncClosing();
         if (!scr.alive) {
-          toast('✅ Результат по задаче #' + t.id + ' отправлен руководителю на проверку.');
+          toast('✅ Результат по задаче #' + t.id + ' отправлен начальнику на проверку.');
           return;
         }
         primary.hide();
@@ -3871,7 +3904,7 @@
         box.replaceChildren(h('div', { class: 'done-screen', role: 'status' },
           h('div', { class: 'big', 'aria-hidden': 'true' }, '✅'),
           doneHead,
-          h('p', null, '✅ Результат отправлен руководителю на проверку. Решение придёт в чат с ботом.'),
+          h('p', null, '✅ Результат отправлен начальнику на проверку. Решение придёт в чат с ботом.'),
           r.files ? h('p', null, '📎 Файлы сохранены в чате с ботом') : null,
           button('📋 К моим задачам', () => go('#/my', { reset: true }), 'btn-primary btn-block mt12')));
         safely(() => doneHead.focus({ preventScroll: true }));
@@ -3903,7 +3936,7 @@
       line('⏳ Срок:', t.deadline_label),
       t.attempts > 0 ? line('🔁', 'Попытка сдачи №' + (t.attempts + 1)) : null);
     const reworkNote = t.status === 'rework'
-      ? note('↩️ Задача возвращена на доработку', 'warn', t.rework_comment ? h('p', { class: 'line pre mt8' }, '💬 Комментарий руководителя: ' + t.rework_comment) : null)
+      ? note('↩️ Задача возвращена на доработку', 'warn', t.rework_comment ? h('p', { class: 'line pre mt8' }, '💬 Комментарий начальника: ' + t.rework_comment) : null)
       : null;
     const lateNote = t.overdue ? note('⚠️ Срок уже прошёл — результат будет отмечен как сданный с опозданием.', 'bad') : null;
 

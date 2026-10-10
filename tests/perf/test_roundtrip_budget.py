@@ -20,7 +20,7 @@ PostgreSQL+asyncpg — отдельно те, что ждёт пользоват
 ``PERF_SQL=1`` — журнал SQL каждого замера (с ``-s``), ``PERF_REPORT=perf.json`` — замеры в JSON,
 ``PERF_LATENCY_MS=…`` — своя задержка. С TEST_DATABASE_URL — то же на PostgreSQL.
 
-Сценарии: S1 /start руководителя; S2 регистрация сотрудника; S3 «📋 Задачи» (10 задач);
+Сценарии: S1 /start начальника; S2 регистрация сотрудника; S3 «📋 Задачи» (10 задач);
 S4 карточка задачи; S5 мастер «➕ Поставить задачу» по шагам (AI выключен); S6 «✅ Сдать результат»
 по шагам (AI выключен); S7 подтверждение оценки (SubCB ok); S8 «📊 Команда» (5 сотрудников × 10 задач);
 S9 обычный текст без диалога (+ S9c — то же после пересоздания соединений пулов, S9i — после простоя
@@ -85,7 +85,7 @@ DASHBOARD_MIX = ["done", "done", "done", "done", "active", "active", "active", "
 # Замер -> (обменов, которые ждёт пользователь; обменов фоновой записи хранилища диалогов) — столько
 # было после ускорения 07.10.2026 (до него, для сравнения, в комментарии). Шаг сценария — «сценарий / шаг».
 BUDGETS: dict[str, tuple[int, int]] = {
-    "S1 /start руководителя": (3, 0),  # было 33
+    "S1 /start начальника": (3, 0),  # было 33
     "S2 регистрация: /start + ФИО + должность": (14, 11),  # было 133
     "S2 регистрация: /start + ФИО + должность / /start нового": (6, 4),  # было 48
     "S2 регистрация: /start + ФИО + должность / ФИО": (1, 3),  # было 38
@@ -116,8 +116,10 @@ BUDGETS: dict[str, tuple[int, int]] = {
     "S9c текст после pool_recycle": (9, 0),  # было 29
     "S9i текст после простоя >10 мин": (4, 0),  # новый замер
     "S9r первый апдейт после перезапуска": (4, 0),  # новый замер
-    "S10 run_due_jobs: 20 напоминаний": (131, 0),  # было 268
-    "S10b run_due_jobs: отправлять нечего": (4, 0),  # было 18
+    # +9: шаг «автоподтверждение» — первый запуск пишет отметку в JobLog и ищет кандидатов.
+    "S10 run_due_jobs: 20 напоминаний": (140, 0),  # было 268
+    # +1: шаг «автоподтверждение» — один запрос кандидатов (время первого запуска — из памяти процесса).
+    "S10b run_due_jobs: отправлять нечего": (5, 0),  # было 18
 }
 
 
@@ -148,7 +150,7 @@ def check_budget(measurement: Measurement) -> None:
 
 
 async def seed_team(h: BotHarness, employees: int, *, start: bool = True) -> tuple[User, list[User]]:
-    """Активный руководитель MGR и ``employees`` активных сотрудников; все открыли бота (/start)."""
+    """Активный начальник MGR и ``employees`` активных сотрудников; все открыли бота (/start)."""
     mgr = await h.seed_user(MGR, "Петрова Анна Сергеевна", role="manager")
     staff = [await h.seed_user(tg, name, position="Юрист") for tg, name in EMPLOYEES[:employees]]
     if start:
@@ -367,7 +369,7 @@ async def test_probe_counts_like_asyncpg(perf: PerfApp) -> None:
 async def test_s1_start_of_active_manager(perf: PerfApp) -> None:
     h = perf.h
     await seed_team(h, 1)
-    async with perf.probe.measure("S1 /start руководителя") as m:
+    async with perf.probe.measure("S1 /start начальника") as m:
         log = await h.send_command(MGR, "start")
     assert log.to(MGR).texts
     check_budget(perf.record(m))

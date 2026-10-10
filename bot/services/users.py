@@ -4,10 +4,14 @@
 новый сотрудник создаётся с пустым ``full_name`` (``""``), ФИО заполняет
 ``complete_registration``. Поэтому заявка считается поданной, когда пользователь
 в статусе PENDING и ``full_name`` не пустой (см. ``list_pending``).
-Руководители из ``settings.admin_ids`` сразу получают имя из Telegram.
+Начальники из ``settings.admin_ids`` сразу получают имя из Telegram.
+
+Админ бота — начальник со всеми правами, которого нельзя понизить или заблокировать: Telegram ID из
+настройки ADMIN_IDS или пользователь с отметкой ``users.is_admin`` (``grant_admin`` — команда
+``python -m bot.tools.admin``; так админа назначают без правки настроек хостинга). ``is_admin`` — проверка.
 
 Смена статуса (подтвердить/отклонить заявку, заблокировать/разблокировать) — атомарный условный
-UPDATE ``… WHERE id=? AND status=<ожидаемый>``: если два руководителя решают одновременно,
+UPDATE ``… WHERE id=? AND status=<ожидаемый>``: если два начальника решают одновременно,
 сработает только первое решение, второй получит DomainError («Заявка уже обработана»).
 
 PostgreSQL: строки обрезаются по длине колонок, NUL-символы убираются (bot.services.dbsafe),
@@ -35,12 +39,13 @@ _STATUS_ORDER = {UserStatus.PENDING: 0, UserStatus.ACTIVE: 1, UserStatus.BLOCKED
 _ROLE_ORDER = {Role.MANAGER: 0, Role.EMPLOYEE: 1}
 _ALREADY_PROCESSED = "Заявка уже обработана"
 _CHANGED_MEANWHILE = "Статус пользователя только что изменился — откройте карточку заново"
+ADMIN_PROTECTED = "Это админ бота — понизить или заблокировать его нельзя"
 
 
 def require_manager(actor: User | None) -> None:
-    """Проверить, что действие выполняет активный руководитель (используется и в tasks)."""
+    """Проверить, что действие выполняет активный начальник (используется и в tasks)."""
     if actor is None or not actor.is_manager:
-        raise DomainError("Действие доступно только руководителю")
+        raise DomainError("Действие доступно только начальнику")
 
 
 # --- Чтение ---------------------------------------------------------------------------------
@@ -82,7 +87,7 @@ async def list_employees(session: AsyncSession) -> list[User]:
 
 
 async def list_managers(session: AsyncSession) -> list[User]:
-    """Активные руководители, по ФИО."""
+    """Активные начальники, по ФИО."""
     return await _list_sorted(session, User.status == UserStatus.ACTIVE, User.role == Role.MANAGER)
 
 
@@ -97,7 +102,7 @@ async def list_pending(session: AsyncSession) -> list[User]:
 
 
 async def list_all(session: AsyncSession) -> list[User]:
-    """Все пользователи: сначала заявки, затем активные, затем заблокированные; руководители выше."""
+    """Все пользователи: сначала заявки, затем активные, затем заблокированные; начальники выше."""
     users = await session.scalars(select(User))
     return sorted(users, key=lambda u: (_STATUS_ORDER[u.status], _ROLE_ORDER[u.role], _name_key(u)))
 
@@ -111,8 +116,8 @@ async def register_or_get(
     """Найти пользователя по tg_id или создать при первом /start. Возвращает (user, created).
 
     Новый пользователь — сотрудник в статусе PENDING с пустым full_name (ФИО он введёт сам).
-    Telegram ID из settings.admin_ids сразу (и при каждом повторном /start) становится
-    активным руководителем; пустое ФИО у него заполняется именем из Telegram.
+    Админ (Telegram ID из settings.admin_ids или отметка users.is_admin) сразу (и при каждом повторном
+    /start) становится активным начальником; пустое ФИО у него заполняется именем из Telegram.
     """
     user = await get_by_tg(session, tg_id)
     created = user is None
@@ -129,7 +134,7 @@ async def register_or_get(
     else:
         user.username = username
 
-    if _is_admin(tg_id):
+    if is_admin(user):
         _promote_admin(user, tg_full_name)
 
     await session.flush()
@@ -139,9 +144,9 @@ async def register_or_get(
 async def complete_registration(
     session: AsyncSession, user: User, full_name: str, position: str | None
 ) -> User:
-    """Сохранить ФИО и должность. Статус не меняется: заявка ждёт решения руководителя."""
+    """Сохранить ФИО и должность. Статус не меняется: заявка ждёт решения начальника."""
     if user.status == UserStatus.BLOCKED:
-        raise DomainError("Доступ закрыт. Обратитесь к руководителю")
+        raise DomainError("Доступ закрыт. Обратитесь к начальнику")
     name = _clean_name(full_name, "ФИО")
     if not name:
         raise DomainError("Укажите фамилию и имя")
@@ -151,7 +156,50 @@ async def complete_registration(
     return user
 
 
-# --- Решения руководителя -------------------------------------------------------------------
+# --- Админы ---------------------------------------------------------------------------------
+
+
+def is_admin(user: User | None) -> bool:
+    """Админ бота: отмечен в базе (users.is_admin) или его Telegram ID указан в настройке ADMIN_IDS."""
+    return user is not None and (bool(user.is_admin) or user.tg_id in get_settings().admin_ids)
+
+
+async def grant_admin(session: AsyncSession, tg_id: int) -> User:
+    """Сделать человека с этим Telegram ID админом бота (отметка users.is_admin).
+
+    Он уже зарегистрирован (есть ФИО) — сразу становится активным начальником. Ещё не писал боту или не
+    закончил анкету — запись ждёт его /start: ``register_or_get`` выдаст права и возьмёт имя из Telegram
+    (до тех пор его нет ни среди начальников, ни среди заявок).
+    """
+    if isinstance(tg_id, bool) or not isinstance(tg_id, int) or tg_id <= 0 or not is_db_id(tg_id, big=True):
+        raise DomainError("Telegram ID — положительное число, например 123456789")
+    user = await get_by_tg(session, tg_id)
+    if user is None:
+        user = User(tg_id=tg_id, username=None, full_name="", role=Role.EMPLOYEE, status=UserStatus.PENDING)
+        session.add(user)
+    user.is_admin = True
+    if user.full_name:
+        _promote_admin(user, user.full_name)
+    await session.flush()
+    return user
+
+
+async def revoke_admin(session: AsyncSession, tg_id: int) -> User:
+    """Снять отметку админа. Роль не меняется: человек остаётся обычным начальником."""
+    user = await get_by_tg(session, tg_id)
+    if user is None or not user.is_admin:
+        raise DomainError("Среди админов бота такого Telegram ID нет")
+    user.is_admin = False
+    await session.flush()
+    return user
+
+
+async def list_admins(session: AsyncSession) -> list[User]:
+    """Админы, отмеченные в базе (без тех, кто указан только в настройке ADMIN_IDS), по ФИО."""
+    return await _list_sorted(session, User.is_admin.is_(True))
+
+
+# --- Решения начальника -------------------------------------------------------------------
 
 
 async def approve_user(session: AsyncSession, user_id: int, actor: User) -> User:
@@ -177,7 +225,7 @@ async def reject_user(session: AsyncSession, user_id: int, actor: User) -> User:
 
 
 async def block_user(session: AsyncSession, user_id: int, actor: User) -> User:
-    """Заблокировать пользователя. Нельзя себя, админа из настроек и последнего руководителя."""
+    """Заблокировать пользователя. Нельзя себя, админа и последнего начальника."""
     require_manager(actor)
     target = await _target_or_error(session, user_id)
     if target.id == actor.id:
@@ -186,7 +234,7 @@ async def block_user(session: AsyncSession, user_id: int, actor: User) -> User:
     _protect_admin(target)
     await _ensure_not_last_manager(session, target)
     if not await _set_status(session, target, target.status, UserStatus.BLOCKED, actor):
-        _ensure_not_blocked(target)  # уже перечитан: заблокировал другой руководитель
+        _ensure_not_blocked(target)  # уже перечитан: заблокировал другой начальник
         raise DomainError(_CHANGED_MEANWHILE)
     return target
 
@@ -197,13 +245,13 @@ async def unblock_user(session: AsyncSession, user_id: int, actor: User) -> User
     target = await _target_or_error(session, user_id)
     _ensure_blocked(target)
     if not await _set_status(session, target, UserStatus.BLOCKED, UserStatus.ACTIVE, actor):
-        _ensure_blocked(target)  # уже перечитан: разблокировал другой руководитель
+        _ensure_blocked(target)  # уже перечитан: разблокировал другой начальник
         raise DomainError(_CHANGED_MEANWHILE)
     return target
 
 
 async def set_role(session: AsyncSession, user_id: int, role: Role, actor: User) -> User:
-    """Сменить роль. Нельзя понизить себя, админа из настроек и последнего руководителя."""
+    """Сменить роль. Нельзя понизить себя, админа и последнего начальника."""
     require_manager(actor)
     role = Role(role)
     target = await _target_or_error(session, user_id)
@@ -216,26 +264,22 @@ async def set_role(session: AsyncSession, user_id: int, role: Role, actor: User)
         await _ensure_not_last_manager(session, target)
     target.role = role
     await session.flush()
-    logger.info("Роль пользователя %s изменена на %s (руководитель %s)", target.id, role.value, actor.id)
+    logger.info("Роль пользователя %s изменена на %s (начальник %s)", target.id, role.value, actor.id)
     return target
 
 
 # --- Приватные хелперы ----------------------------------------------------------------------
 
 
-def _is_admin(tg_id: int) -> bool:
-    return tg_id in get_settings().admin_ids
-
-
 def _promote_admin(user: User, tg_full_name: str) -> None:
-    """Сделать пользователя из admin_ids активным руководителем."""
+    """Сделать админа активным начальником."""
     if not user.is_manager:
-        logger.info("Telegram ID %s из ADMIN_IDS назначен руководителем", user.tg_id)
+        logger.info("Админ (Telegram ID %s) назначен начальником", user.tg_id)
     user.role = Role.MANAGER
     user.status = UserStatus.ACTIVE
     if not user.full_name:
         name = " ".join(clean_text(tg_full_name or "").split())[:_MAX_NAME_LEN]
-        user.full_name = name or f"Руководитель {user.tg_id}"
+        user.full_name = name or f"Начальник {user.tg_id}"
 
 
 def _clean_name(value: str | None, label: str) -> str:
@@ -279,13 +323,13 @@ def _ensure_blocked(target: User) -> None:
 
 
 def _protect_admin(target: User) -> None:
-    """Руководителя из ADMIN_IDS нельзя заблокировать или понизить: /start всё равно вернёт права."""
-    if _is_admin(target.tg_id):
-        raise DomainError("Этот руководитель указан в настройках бота (ADMIN_IDS) — изменить его доступ нельзя")
+    """Админа нельзя заблокировать или понизить: /start всё равно вернёт ему права."""
+    if is_admin(target):
+        raise DomainError(ADMIN_PROTECTED)
 
 
 async def _ensure_not_last_manager(session: AsyncSession, target: User) -> None:
-    """Не дать оставить систему без активного руководителя."""
+    """Не дать оставить систему без активного начальника."""
     if not target.is_manager:
         return
     managers = await session.scalar(
@@ -294,7 +338,7 @@ async def _ensure_not_last_manager(session: AsyncSession, target: User) -> None:
         .where(User.role == Role.MANAGER, User.status == UserStatus.ACTIVE)
     )
     if (managers or 0) <= 1:
-        raise DomainError("Это последний активный руководитель — сначала назначьте другого")
+        raise DomainError("Это последний активный начальник — сначала назначьте другого")
 
 
 async def _set_status(
@@ -302,7 +346,7 @@ async def _set_status(
 ) -> bool:
     """Атомарно сменить статус: ``UPDATE users SET status=… WHERE id=? AND status=expected``.
 
-    False — статус уже изменили в другой сессии (решение другого руководителя): объект target
+    False — статус уже изменили в другой сессии (решение другого начальника): объект target
     перечитан из БД, вызывающий код объясняет отказ по актуальному статусу.
     """
     result = await session.execute(
@@ -317,5 +361,5 @@ async def _set_status(
         )
         return False
     set_committed_value(target, "status", status)
-    logger.info("Статус пользователя %s: %s (руководитель %s)", target.id, status.value, actor.id)
+    logger.info("Статус пользователя %s: %s (начальник %s)", target.id, status.value, actor.id)
     return True
