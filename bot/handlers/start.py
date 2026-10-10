@@ -40,6 +40,7 @@ from bot.ui.texts import (
     BTN_SUBMIT,
     BTN_TASKS,
     BTN_TEAM,
+    TXT_CHOOSE_LANG,
 )
 from bot.utils.text import esc
 
@@ -300,7 +301,7 @@ async def cmd_start(message: Message, session: AsyncSession, state: FSMContext, 
     if tg is None:
         return
     # UserMiddleware загрузил пользователя ДО регистрации — берём то, что вернул сервис.
-    user, _created = await users.register_or_get(session, tg.id, tg.username, tg.full_name)
+    user, created = await users.register_or_get(session, tg.id, tg.username, tg.full_name)
 
     if user.is_active:
         await _send_welcome(message, session, bot, user)
@@ -312,6 +313,9 @@ async def cmd_start(message: Message, session: AsyncSession, state: FSMContext, 
         await message.answer(TXT_PENDING, reply_markup=keyboards.main_menu(user))
         return
 
+    if created:
+        # Первый запуск: язык можно выбрать сразу (по умолчанию — язык Telegram); анкета не ждёт выбора.
+        await message.answer(TXT_CHOOSE_LANG, reply_markup=keyboards.language_kb())
     await state.set_state(RegistrationSG.full_name)
     question = await message.answer(TXT_ASK_NAME, reply_markup=keyboards.cancel_kb())
     await state.update_data(q_msg_id=question.message_id)

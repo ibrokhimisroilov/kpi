@@ -95,6 +95,7 @@ async def app(e2e_env: None, engine: AsyncEngine, storage_engine: AsyncEngine | 
     диалогов, как в bot.main.main, работает через свой пул (фикстура ``storage_engine``).
     """
     from bot.db.base import make_sessionmaker
+    from bot.i18n.telegram import install as install_i18n
     from bot.main import build_dispatcher, default_storage  # импорт здесь: сбор тестов не зависит от main.py
 
     sessionmaker = make_sessionmaker(engine)
@@ -102,6 +103,7 @@ async def app(e2e_env: None, engine: AsyncEngine, storage_engine: AsyncEngine | 
     release_bot_routers()
     dp = build_dispatcher(sessionmaker, storage)
     bot = Bot("42:TEST", session=FakeSession(), default=DefaultBotProperties(parse_mode="HTML"))
+    install_i18n(bot)  # как в bot.main: тексты исходящих сообщений — на языке получателя, без меток
     harness = BotHarness(dp, bot, sessionmaker)
     try:
         yield harness

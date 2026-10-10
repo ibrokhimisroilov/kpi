@@ -15,6 +15,7 @@ from .conftest import EMP, EMP2, MGR, MiniApp
 # M — начальник; E — сотрудник; A — исполнитель задачи.
 ROLES: dict[tuple[str, str], str] = {
     ("GET", "/api/me"): "all",
+    ("POST", "/api/lang"): "all",
     ("GET", "/api/tasks"): "ME",
     ("POST", "/api/tasks"): "M",
     ("GET", "/api/tasks/{task_id}"): "ME",
@@ -107,6 +108,8 @@ async def test_inactive_users(ma: MiniApp, tg_id: int, code: str) -> None:
             assert resp.status == 200
             assert resp["access"] == ("unregistered" if code == "not_registered" else code)
             assert resp["message"] and resp["role"] is None and resp["counts"] is None
+        elif template == "/api/lang":
+            assert resp.status == 400  # язык выбирают и до подтверждения; пустое тело — просто неверный запрос
         else:
             assert resp.status == 403, (method, template, resp.status)
             assert resp.code == code

@@ -1,0 +1,645 @@
+<title>Памятка KPI-бота</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Golos+Text:wght@400;500;600;700&family=Unbounded:wght@500;700&family=JetBrains+Mono:wght@400;600&display=swap">
+<style>
+/* Layout: одна «листовка» на языке читателя — шапка, лента цикла задачи, две колонки ролей, KPI и напоминания,
+   затем два ряда коротких справок. Переключатель языка — над листом; на печати виден только выбранный язык. */
+:root {
+  --bg: #f4f6f8;
+  --paper: #ffffff;
+  --ink: #17212c;
+  --muted: #586472;
+  --line: #dde2e8;
+  --accent: #2253c4;
+  --accent-soft: #e9effc;
+  --deadline: #a85410;
+  --deadline-soft: #fbf0e6;
+  --ok: #1d7a4b;
+  --ok-soft: #e7f4ec;
+  --ai: #6a4bd1;
+  --font-display: "Unbounded", "Golos Text", system-ui, sans-serif;
+  --font-body: "Golos Text", "Segoe UI", system-ui, -apple-system, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "Cascadia Mono", Consolas, monospace;
+  --radius: 10px;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0f141a; --paper: #161d25; --ink: #e8edf2; --muted: #9aa6b2; --line: #2a3440;
+    --accent: #7ea2ff; --accent-soft: #1b2741; --deadline: #f0a46a; --deadline-soft: #33241a;
+    --ok: #6fd19d; --ok-soft: #173025; --ai: #b7a5ff; color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0f141a; --paper: #161d25; --ink: #e8edf2; --muted: #9aa6b2; --line: #2a3440;
+  --accent: #7ea2ff; --accent-soft: #1b2741; --deadline: #f0a46a; --deadline-soft: #33241a;
+  --ok: #6fd19d; --ok-soft: #173025; --ai: #b7a5ff; color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+body {
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--font-body);
+  font-size: 15px;
+  line-height: 1.55;
+  padding-inline: 16px;
+  padding-block: 20px 48px;
+}
+.page { max-width: 1060px; margin-inline: auto; display: grid; gap: 12px; }
+.sheet {
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  padding: clamp(20px, 4vw, 44px);
+  display: grid;
+  gap: 34px;
+}
+h1, h2, h3 { margin: 0; text-wrap: balance; }
+h1 { font-family: var(--font-display); font-weight: 700; font-size: clamp(26px, 4.4vw, 40px); line-height: 1.1; letter-spacing: -0.01em; }
+h2 { font-family: var(--font-display); font-weight: 500; font-size: 19px; line-height: 1.25; }
+h3 { font-size: 15px; font-weight: 700; }
+p { margin: 0; }
+.muted { color: var(--muted); }
+.label { font-size: 11.5px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+code, .mono { font-family: var(--font-mono); font-size: 0.92em; }
+
+/* --- Переключатель языка --- */
+.lang-switch { justify-self: end; display: inline-flex; gap: 4px; padding: 4px; background: var(--paper); border: 1px solid var(--line); border-radius: 999px; }
+.lang-switch button {
+  font: inherit; font-size: 13.5px; font-weight: 600; color: var(--muted);
+  background: none; border: 0; border-radius: 999px; padding: 6px 14px; cursor: pointer;
+}
+.lang-switch button[aria-pressed="true"] { background: var(--accent); color: var(--paper); }
+.lang-switch button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* --- Шапка --- */
+header { display: grid; gap: 14px; }
+.head-row { display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between; gap: 16px; }
+.lead { max-width: 64ch; font-size: 16px; color: var(--muted); }
+.handle {
+  display: inline-flex; align-items: center; gap: 8px;
+  font-family: var(--font-mono); font-size: 14px;
+  background: var(--accent-soft); color: var(--accent);
+  border-radius: 999px; padding: 7px 14px; white-space: nowrap;
+}
+.handle svg { width: 16px; height: 16px; flex: none; }
+
+/* --- Цикл задачи: процесс с узлами на линии; цвет узла = кто делает шаг --- */
+.cycle { display: grid; gap: 18px; }
+.cycle-head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 10px 20px; }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 12.5px; color: var(--muted); }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+.legend i { width: 10px; height: 10px; border-radius: 50%; background: var(--who); display: inline-block; }
+
+.process {
+  list-style: none; margin: 0; padding: 0; position: relative;
+  display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); column-gap: 12px; row-gap: 0;
+}
+.process::before {            /* линия процесса: от центра первого узла до центра последнего */
+  content: ""; position: absolute; top: 19px; height: 2px;
+  left: calc(100% / 14); right: calc(100% / 14);
+  background: linear-gradient(to right, var(--line), var(--accent));
+}
+.step { position: relative; display: grid; justify-items: center; text-align: center; gap: 6px; align-content: start; min-width: 0; }
+.node {
+  width: 40px; height: 40px; border-radius: 50%; display: grid; place-items: center;
+  background: var(--paper); border: 2px solid var(--who); color: var(--who);
+  font-family: var(--font-mono); font-weight: 600; font-size: 15px; position: relative; z-index: 1;
+}
+.step.final .node { background: var(--who); color: var(--paper); box-shadow: 0 0 0 5px var(--accent-soft); }
+.who {
+  font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase;
+  color: var(--who); margin-top: 4px;
+}
+.step b { font-size: 14px; line-height: 1.25; }
+.step p { font-size: 12.5px; color: var(--muted); line-height: 1.4; }
+.mgr  { --who: var(--accent); }
+.emp  { --who: var(--ok); }
+.ai   { --who: var(--ai); }
+.auto { --who: var(--ink); }
+
+.loop {                        /* петля доработки: из шага 6 обратно в шаг 4 */
+  grid-column: 4 / span 3; grid-row: 2; margin-top: 14px; position: relative;
+  height: 22px; border: 2px dashed var(--deadline); border-top: 0; border-radius: 0 0 14px 14px;
+  margin-inline: calc((100% / 3) / 2 - 1px);
+}
+.loop::before {                /* стрелка вверх, в шаг 4 */
+  content: ""; position: absolute; left: -7px; top: -2px;
+  border: 6px solid transparent; border-bottom: 8px solid var(--deadline); border-top: 0;
+}
+.loop span {
+  position: absolute; left: 50%; bottom: -11px; transform: translateX(-50%);
+  background: var(--paper); padding: 0 8px; white-space: nowrap;
+  font-size: 12.5px; font-weight: 600; color: var(--deadline);
+}
+
+/* --- Роли --- */
+.roles { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; }
+.role { border: 1px solid var(--line); border-radius: var(--radius); padding: 20px; display: grid; gap: 14px; align-content: start; min-width: 0; }
+.role-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+.btns { display: flex; flex-wrap: wrap; gap: 6px; }
+.btn {
+  font-size: 13px; padding: 5px 10px; border-radius: 7px;
+  background: var(--bg); border: 1px solid var(--line); white-space: nowrap;
+}
+.steps { margin: 0; padding-left: 20px; display: grid; gap: 8px; }
+.steps li::marker { color: var(--accent); font-weight: 700; }
+.steps li b { font-weight: 600; }
+.note {
+  border-radius: 8px; padding: 10px 12px; font-size: 13.5px;
+  background: var(--ok-soft); color: var(--ink);
+}
+.note b { color: var(--ok); }
+
+/* --- KPI + напоминания --- */
+.duo { display: grid; grid-template-columns: minmax(0, 1.05fr) minmax(0, 1fr); gap: 18px; }
+.panel { border: 1px solid var(--line); border-radius: var(--radius); padding: 20px; display: grid; gap: 14px; align-content: start; min-width: 0; }
+.formula {
+  font-family: var(--font-mono); font-size: 14px; background: var(--accent-soft); color: var(--ink);
+  border-radius: 8px; padding: 12px 14px; overflow-x: auto; white-space: nowrap;
+}
+.table-wrap { overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; font-size: 13.5px; font-variant-numeric: tabular-nums; }
+th, td { text-align: left; padding: 7px 8px; border-bottom: 1px solid var(--line); }
+th { font-size: 11.5px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); font-weight: 600; }
+td.num, th.num { text-align: right; }
+tfoot td { border-bottom: 0; font-weight: 700; }
+tfoot td.result { color: var(--accent); font-size: 16px; }
+.rules { margin: 0; padding-left: 18px; display: grid; gap: 6px; font-size: 13.5px; }
+
+.timeline { list-style: none; margin: 0; padding: 0; display: grid; gap: 0; }
+.timeline li { display: grid; grid-template-columns: 92px minmax(0, 1fr); gap: 12px; padding: 9px 0; border-bottom: 1px solid var(--line); }
+.timeline li:last-child { border-bottom: 0; }
+.when { font-family: var(--font-mono); font-size: 13px; font-weight: 600; color: var(--deadline); }
+.timeline li.due .when { color: var(--ink); background: var(--deadline-soft); border-radius: 6px; padding: 1px 6px; justify-self: start; }
+.timeline p { font-size: 13.5px; }
+.quiet { font-size: 13px; background: var(--deadline-soft); border-radius: 8px; padding: 9px 12px; }
+
+/* --- Ряды коротких справок --- */
+.trio { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 18px; }
+.trio .panel { padding: 18px; }
+.trio ul, .trio ol { margin: 0; padding-left: 18px; display: grid; gap: 6px; font-size: 13.5px; }
+.cmds { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 6px 12px; font-size: 13.5px; }
+.cmds code { color: var(--accent); }
+.small { font-size: 13px; }
+footer { border-top: 1px solid var(--line); padding-top: 16px; font-size: 12.5px; color: var(--muted); display: flex; flex-wrap: wrap; gap: 6px 18px; }
+
+@media screen and (max-width: 900px) {
+  .process { grid-template-columns: minmax(0, 1fr); row-gap: 16px; }
+  .process::before { left: 19px; right: auto; top: 20px; bottom: 20px; width: 2px; height: auto;
+    background: linear-gradient(to bottom, var(--line), var(--accent)); }
+  .step { grid-template-columns: 40px minmax(0, 1fr); justify-items: start; text-align: left; column-gap: 14px; row-gap: 2px; }
+  .step .node { grid-row: 1 / span 3; }
+  .step .who { margin-top: 0; }
+  .loop { grid-column: 1; grid-row: auto; height: auto; margin: 0 0 0 54px; border: 2px dashed var(--deadline);
+    border-radius: 10px; padding: 8px 12px; }
+  .loop::before { display: none; }
+  .step.final { order: 2; }
+  .loop { order: 1; }
+  .loop span { position: static; transform: none; padding: 0; white-space: normal; background: none; }
+  .roles, .duo, .trio { grid-template-columns: minmax(0, 1fr); }
+}
+@media screen and (max-width: 520px) {
+  body { font-size: 14.5px; }
+  .timeline li { grid-template-columns: 78px minmax(0, 1fr); }
+}
+
+/* --- Печать / PDF: A4, широкая раскладка, компактно, с цветами --- */
+@page { size: A4; margin: 8mm 10mm; }
+@media print {
+  :root { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  body { background: #fff; padding: 0; font-size: 10.2px; line-height: 1.38; }
+  .lang-switch { display: none; }
+  .page { max-width: none; gap: 0; }
+  .sheet { border: 0; border-radius: 0; padding: 0; gap: 10px; }
+  h1 { font-size: 23px; }
+  h2 { font-size: 12.5px; }
+  h3 { font-size: 11px; }
+  .lead { font-size: 11px; max-width: none; }
+  .handle { font-size: 10.5px; padding: 4px 10px; }
+  .label { font-size: 8px; }
+  .cycle { gap: 8px; }
+  .legend { font-size: 9px; }
+  .process { column-gap: 6px; }
+  .process::before { top: 13px; }
+  .node { width: 28px; height: 28px; font-size: 11.5px; }
+  .step.final .node { box-shadow: 0 0 0 3px var(--accent-soft); }
+  .who { font-size: 7.6px; margin-top: 1px; }
+  .step { gap: 3px; }
+  .step b { font-size: 10px; }
+  .step p { font-size: 8.8px; }
+  .loop { margin-top: 6px; height: 13px; }
+  .loop span { font-size: 9px; bottom: -8px; }
+  .roles, .duo, .trio { gap: 8px; }
+  .role, .panel { padding: 9px 11px; gap: 6px; break-inside: avoid; }
+  .trio .panel { padding: 8px 10px; }
+  .btn { font-size: 9px; padding: 1px 6px; }
+  .btns { gap: 3px; }
+  .steps { gap: 3px; padding-left: 15px; }
+  .note, .quiet { font-size: 9.3px; padding: 5px 8px; }
+  .formula { font-size: 10.5px; padding: 6px 9px; }
+  table { font-size: 9.5px; }
+  th, td { padding: 3px 6px; }
+  th { font-size: 8px; }
+  tfoot td.result { font-size: 12px; }
+  .rules, .trio ul, .trio ol, .cmds, .timeline p, .small { font-size: 9.3px; }
+  .rules, .trio ul, .trio ol { gap: 2px; }
+  .timeline li { grid-template-columns: 58px minmax(0, 1fr); gap: 8px; padding: 2.5px 0; }
+  .when { font-size: 9.3px; }
+  footer { padding-top: 6px; font-size: 9px; }
+}
+</style>
+
+<div class="page">
+<div class="lang-switch" role="group" aria-label="Язык / Til">
+  <button type="button" id="lang-ru" data-lang="ru" aria-pressed="true">Русский</button>
+  <button type="button" id="lang-uz" data-lang="uz" aria-pressed="false">Oʻzbekcha</button>
+</div>
+
+<!-- ============================== Русский ============================== -->
+<main class="sheet" data-lang="ru" lang="ru">
+  <header>
+    <span class="label">Памятка · начальнику и сотрудникам</span>
+    <div class="head-row">
+      <h1>Бот «Эффективность»</h1>
+      <span class="handle" aria-label="Адрес бота в Telegram">
+        <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M21.5 4.2 2.9 11.4c-.9.4-.9 1.6.1 1.9l4.6 1.5 1.8 5.6c.3.8 1.3 1 1.9.4l2.6-2.5 4.9 3.6c.7.5 1.7.1 1.9-.8l3.2-15.4c.2-1-.8-1.8-1.7-1.5Z" fill="currentColor"/></svg>
+        @UzAuto_Administration_bot
+      </span>
+    </div>
+    <p class="lead">Бот в Telegram для постановки задач, сдачи результатов и подсчёта эффективности каждого сотрудника за неделю, месяц, квартал и год. Оценивается конечный результат, а не часы и сообщения. Работает на русском и узбекском, понимает голосовые сообщения.</p>
+  </header>
+
+  <section class="cycle" aria-labelledby="cycle-h-ru">
+    <div class="cycle-head">
+      <h2 id="cycle-h-ru">Каждая задача проходит один и тот же путь</h2>
+      <div class="legend" aria-label="Кто делает шаг">
+        <span class="mgr"><i></i>Начальник</span>
+        <span class="emp"><i></i>Сотрудник</span>
+        <span class="ai"><i></i>AI</span>
+        <span class="auto"><i></i>Бот сам</span>
+      </div>
+    </div>
+    <ol class="process">
+      <li class="step mgr"><span class="node">1</span><span class="who">Начальник</span><b>Поручение</b><p>Ставит задачу. Устное поручение может внести и сотрудник</p></li>
+      <li class="step ai"><span class="node">2</span><span class="who">AI + начальник</span><b>Плановый результат</b><p>AI делает его измеримым: что, сколько, в каком виде</p></li>
+      <li class="step mgr"><span class="node">3</span><span class="who">Начальник</span><b>Срок, приоритет, вес</b><p>Вес — доля задачи в KPI недели</p></li>
+      <li class="step emp"><span class="node">4</span><span class="who">Сотрудник</span><b>Фактический результат</b><p>Что сделано, цифра по плану, файлы</p></li>
+      <li class="step ai"><span class="node">5</span><span class="who">AI</span><b>Сравнение план ↔ факт</b><p>Предлагает оценку в %</p></li>
+      <li class="step mgr"><span class="node">6</span><span class="who">Начальник</span><b>Решение</b><p>Подтвердить или изменить оценку. Нет ответа 24 часа — бот подтвердит сам</p></li>
+      <li class="step auto final"><span class="node">7</span><span class="who">Бот сам</span><b>KPI сотрудника</b><p>Неделя · месяц · квартал · год</p></li>
+      <li class="loop" aria-label="Возврат на доработку"><span>↩ На доработку — снова шаг 4</span></li>
+    </ol>
+  </section>
+
+  <section class="roles">
+    <article class="role" aria-labelledby="mgr-h-ru">
+      <div class="role-head">
+        <h2 id="mgr-h-ru">Начальнику</h2>
+        <span class="label">меню внизу чата</span>
+      </div>
+      <div class="btns">
+        <span class="btn">➕ Поставить задачу</span><span class="btn">📊 Команда</span>
+        <span class="btn">📝 На проверке</span><span class="btn">📥 Предложения</span>
+        <span class="btn">📋 Задачи</span><span class="btn">👥 Сотрудники</span><span class="btn">📤 Экспорт</span><span class="btn">🌐 Til / Язык</span>
+      </div>
+      <ol class="steps">
+        <li><b>Поставить задачу.</b> Выберите сотрудника, напишите задачу и ожидаемый результат своими словами — или просто отправьте голосовое сообщение. Бот предложит измеримую формулировку, например «проверить 100 договоров и сдать отчёт». Затем срок («завтра», «5 октября», «05.10 18:00»), приоритет и вес.</li>
+        <li><b>Проверить результат.</b> Когда сотрудник сдаёт работу, приходит сообщение: план, факт, файлы и «AI предлагает: 110 %». Кнопки: <b>✅ Подтвердить</b>, <b>✏️ Изменить оценку</b>, <b>↩ На доработку</b> с комментарием и новым сроком.</li>
+        <li><b>Подтвердить поручения.</b> Устные поручения, которые сотрудники внесли сами, приходят в «📥 Предложения». Бот подсказывает вес. Укажите вес и приоритет, поправьте текст или отклоните.</li>
+        <li><b>Смотреть эффективность.</b> «📊 Команда» — KPI каждого за неделю, месяц, квартал или год, просрочки, задачи в работе. Нажмите на сотрудника — откроется его карточка и история оценок.</li>
+        <li><b>Выгрузить отчёт.</b> «📤 Экспорт» — файл Excel: сводка по сотрудникам, все задачи с планом и фактом, журнал изменений.</li>
+      </ol>
+      <p class="note"><b>Окончательная оценка всегда за вами.</b> AI только предлагает. Каждое изменение сохраняется в истории задачи.</p>
+    </article>
+
+    <article class="role" aria-labelledby="emp-h-ru">
+      <div class="role-head">
+        <h2 id="emp-h-ru">Сотруднику</h2>
+        <span class="label">меню внизу чата</span>
+      </div>
+      <div class="btns">
+        <span class="btn">📋 Мои задачи</span><span class="btn">✅ Сдать результат</span>
+        <span class="btn">➕ Добавить поручение</span><span class="btn">📈 Моя эффективность</span><span class="btn">🌐 Til / Язык</span>
+      </div>
+      <ol class="steps">
+        <li><b>Получить задачу.</b> Бот присылает карточку: что сделать, какой результат ожидается, срок и вес. Нажмите <b>✅ Принял в работу</b>.</li>
+        <li><b>Сдать результат.</b> «✅ Сдать результат» → выберите задачу и ответьте на вопросы: что фактически сделано, какой получен результат, цифра по плану (например, 110 из 100). Отвечать можно текстом или голосом. Приложите файлы или фото, которые подтверждают работу, затем нажмите «Отправить».</li>
+        <li><b>Дождаться решения.</b> Оценку ставит начальник, бот пришлёт итог. Если задачу вернули на доработку, исправьте по комментарию и сдайте снова.</li>
+        <li><b>Внести устное поручение.</b> Дали задачу на словах? «➕ Добавить поручение» — она уйдёт начальнику на подтверждение и тоже будет учтена.</li>
+        <li><b>Следить за своим KPI.</b> «📈 Моя эффективность» — неделя, месяц, выполнено в срок, просрочки, история оценок.</li>
+      </ol>
+      <p class="note"><b>Сдавайте вовремя и с подтверждением.</b> Файл или фото помогают получить полную оценку. Просрочка снижает оценку.</p>
+    </article>
+  </section>
+
+  <section class="duo">
+    <article class="panel" aria-labelledby="kpi-h-ru">
+      <h2 id="kpi-h-ru">Как считается коэффициент эффективности</h2>
+      <p class="formula">KPI = Σ (вес × оценка) ÷ Σ весов</p>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Задача недели</th><th class="num">Вес</th><th class="num">Оценка</th></tr></thead>
+          <tbody>
+            <tr><td>Подготовка ТЗ</td><td class="num">30 %</td><td class="num">100 %</td></tr>
+            <tr><td>Анализ договоров</td><td class="num">20 %</td><td class="num">110 %</td></tr>
+            <tr><td>Отчёт</td><td class="num">20 %</td><td class="num">90 %</td></tr>
+            <tr><td>Работа с поставщиками</td><td class="num">30 %</td><td class="num">105 %</td></tr>
+          </tbody>
+          <tfoot><tr><td>Эффективность за неделю</td><td></td><td class="num result">102 %</td></tr></tfoot>
+        </table>
+      </div>
+      <ul class="rules">
+        <li>Задача попадает в тот период, на который приходится её срок.</li>
+        <li>Оценка от 0 до 150 %. Больше 100 % — только за измеримое перевыполнение.</li>
+        <li>Подсказка за просрочку: −2 % за каждый день, но не больше −20 %.</li>
+        <li>Срок прошёл, а результат не сдан — задача считается как 0 %, пока его не сдадут.</li>
+        <li>Задачи «на проверке» в KPI не входят, пока оценка не подтверждена.</li>
+      </ul>
+    </article>
+
+    <article class="panel" aria-labelledby="rem-h-ru">
+      <h2 id="rem-h-ru">Когда бот напоминает сам</h2>
+      <ol class="timeline">
+        <li><span class="when">−3 дня</span><p>Сотруднику: скоро срок задачи.</p></li>
+        <li><span class="when">−1 день</span><p>Сотруднику: срок завтра.</p></li>
+        <li><span class="when">−3 часа</span><p>Сотруднику: срок сегодня.</p></li>
+        <li class="due"><span class="when">Срок</span><p>Сотруднику: «Что фактически сделано? Какой получен результат? Какие документы подтверждают выполнение?» Начальнику — уведомление о просрочке.</p></li>
+        <li><span class="when">10:00</span><p>Каждое утро, пока просроченная задача не сдана.</p></li>
+        <li><span class="when">+21 час</span><p>Начальнику: через 3 часа оценка AI подтвердится сама.</p></li>
+        <li><span class="when">+2 дня</span><p>Начальнику: результат всё ещё ждёт проверки.</p></li>
+        <li><span class="when">Пн 9:00</span><p>Начальнику: сводка KPI команды за прошлую неделю.</p></li>
+        <li><span class="when">23:00</span><p>Начальнику: файл с резервной копией всех данных.</p></li>
+      </ol>
+      <p class="quiet">С 21:00 до 8:00 бот не беспокоит: напоминания придут утром. Время — ташкентское. Если указана только дата, срок — 18:00 этого дня.</p>
+    </article>
+  </section>
+
+  <section class="trio">
+    <article class="panel" aria-labelledby="voice-h-ru">
+      <h3 id="voice-h-ru">Голосом — по-узбекски и по-русски</h3>
+      <ul>
+        <li>На любой вопрос бота о задаче можно ответить голосовым сообщением — бот запишет текст сам.</li>
+        <li>Голосовое без кнопок: начальнику бот соберёт задачу целиком (кому, что, результат, срок), сотрудника спросит — это поручение или результат.</li>
+        <li>В приложении — кнопка 🎤 у полей и «Надиктовать задачу целиком».</li>
+        <li>Запись до 2 минут. ФИО при регистрации — только текстом.</li>
+      </ul>
+    </article>
+    <article class="panel" aria-labelledby="auto-h-ru">
+      <h3 id="auto-h-ru">Если начальник не успел ответить</h3>
+      <ul>
+        <li>Через 24 часа оценка AI подтверждается сама, а поручение сотрудника принимается с предложенным весом. За 3 часа до этого бот напомнит.</li>
+        <li>Всегда ждут начальника: оценка выше 100 %, оценка без AI (по формуле) и заявки на доступ.</li>
+        <li>Автоматически подтверждённую оценку можно изменить в течение 7 дней.</li>
+      </ul>
+    </article>
+    <article class="panel" aria-labelledby="lang-h-ru">
+      <h3 id="lang-h-ru">Два языка</h3>
+      <ul>
+        <li>Каждый выбирает сам: Русский или Oʻzbekcha. Кнопка «🌐 Til / Язык» в меню или команда <code>/lang</code>; в приложении — кнопка у заголовка.</li>
+        <li>Начальник и сотрудник могут работать на разных языках: каждому бот пишет на его языке.</li>
+        <li>Тексты задач и комментарии не переводятся — остаются как написаны.</li>
+      </ul>
+    </article>
+  </section>
+
+  <section class="trio">
+    <article class="panel" aria-labelledby="join-h-ru">
+      <h3 id="join-h-ru">Как подключить сотрудника</h3>
+      <ol>
+        <li>Сотрудник открывает бота и нажимает <code>/start</code>.</li>
+        <li>Выбирает язык, вводит ФИО и должность — заявка уходит начальнику.</li>
+        <li>Начальник нажимает <b>✅ Подтвердить</b> в уведомлении или в «👥 Сотрудники». У сотрудника появляется меню.</li>
+      </ol>
+    </article>
+    <article class="panel" aria-labelledby="cmd-h-ru">
+      <h3 id="cmd-h-ru">Команды на всякий случай</h3>
+      <div class="cmds">
+        <code>/start</code><span>начать, вернуть меню</span>
+        <code>/menu</code><span>показать меню</span>
+        <code>/lang</code><span>сменить язык</span>
+        <code>/help</code><span>краткая справка</span>
+        <code>/cancel</code><span>отменить текущий шаг</span>
+      </div>
+      <p class="muted small">Нажали кнопку меню посреди диалога — бот просто начнёт новое действие.</p>
+    </article>
+    <article class="panel" aria-labelledby="how-h-ru">
+      <h3 id="how-h-ru">Приложение и как это устроено</h3>
+      <ul>
+        <li>Кнопка «Открыть» в чате запускает приложение: команда, задачи, проверка и сдача результата в одном окне.</li>
+        <li>Бот работает в облаке круглосуточно, компьютер включать не нужно. Каждый вечер начальник получает копию данных.</li>
+        <li>Подсказки и оценки даёт бесплатный AI Google Gemini. Если он недоступен, оценка считается по формуле «факт ÷ план».</li>
+      </ul>
+    </article>
+  </section>
+
+  <footer>
+    <span>Вопросы и ошибки — начальнику или админу бота.</span>
+    <span>Октябрь 2026</span>
+  </footer>
+</main>
+
+<!-- ============================== Oʻzbekcha ============================== -->
+<main class="sheet" data-lang="uz" lang="uz" hidden>
+  <header>
+    <span class="label">Eslatma · boshliq va xodimlar uchun</span>
+    <div class="head-row">
+      <h1>«Samaradorlik» boti</h1>
+      <span class="handle" aria-label="Botning Telegramdagi manzili">
+        <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M21.5 4.2 2.9 11.4c-.9.4-.9 1.6.1 1.9l4.6 1.5 1.8 5.6c.3.8 1.3 1 1.9.4l2.6-2.5 4.9 3.6c.7.5 1.7.1 1.9-.8l3.2-15.4c.2-1-.8-1.8-1.7-1.5Z" fill="currentColor"/></svg>
+        @UzAuto_Administration_bot
+      </span>
+    </div>
+    <p class="lead">Telegramdagi bot: vazifa qoʻyish, natijani topshirish va har bir xodimning hafta, oy, chorak va yil boʻyicha samaradorligini hisoblash uchun. Soatlar yoki xabarlar soni emas, yakuniy natija baholanadi. Oʻzbek va rus tillarida ishlaydi, ovozli xabarlarni tushunadi.</p>
+  </header>
+
+  <section class="cycle" aria-labelledby="cycle-h-uz">
+    <div class="cycle-head">
+      <h2 id="cycle-h-uz">Har bir vazifa bir xil yoʻldan oʻtadi</h2>
+      <div class="legend" aria-label="Qadamni kim bajaradi">
+        <span class="mgr"><i></i>Boshliq</span>
+        <span class="emp"><i></i>Xodim</span>
+        <span class="ai"><i></i>AI</span>
+        <span class="auto"><i></i>Bot oʻzi</span>
+      </div>
+    </div>
+    <ol class="process">
+      <li class="step mgr"><span class="node">1</span><span class="who">Boshliq</span><b>Topshiriq</b><p>Vazifa qoʻyadi. Ogʻzaki topshiriqni xodim ham kirita oladi</p></li>
+      <li class="step ai"><span class="node">2</span><span class="who">AI + boshliq</span><b>Rejadagi natija</b><p>AI uni oʻlchanadigan qiladi: nima, qancha, qanday koʻrinishda</p></li>
+      <li class="step mgr"><span class="node">3</span><span class="who">Boshliq</span><b>Muddat, ustuvorlik, vazn</b><p>Vazn — vazifaning haftalik KPIdagi ulushi</p></li>
+      <li class="step emp"><span class="node">4</span><span class="who">Xodim</span><b>Amaldagi natija</b><p>Nima qilindi, reja boʻyicha son, fayllar</p></li>
+      <li class="step ai"><span class="node">5</span><span class="who">AI</span><b>Reja ↔ fakt taqqoslash</b><p>Bahoni % da taklif qiladi</p></li>
+      <li class="step mgr"><span class="node">6</span><span class="who">Boshliq</span><b>Qaror</b><p>Bahoni tasdiqlaydi yoki oʻzgartiradi. 24 soat javob boʻlmasa — bot oʻzi tasdiqlaydi</p></li>
+      <li class="step auto final"><span class="node">7</span><span class="who">Bot oʻzi</span><b>Xodim KPIsi</b><p>Hafta · oy · chorak · yil</p></li>
+      <li class="loop" aria-label="Qayta ishlashga qaytarish"><span>↩ Qayta ishlashga — yana 4-qadam</span></li>
+    </ol>
+  </section>
+
+  <section class="roles">
+    <article class="role" aria-labelledby="mgr-h-uz">
+      <div class="role-head">
+        <h2 id="mgr-h-uz">Boshliqqa</h2>
+        <span class="label">chat pastidagi menyu</span>
+      </div>
+      <div class="btns">
+        <span class="btn">➕ Vazifa qoʻyish</span><span class="btn">📊 Jamoa</span>
+        <span class="btn">📝 Tekshiruvda</span><span class="btn">📥 Takliflar</span>
+        <span class="btn">📋 Vazifalar</span><span class="btn">👥 Xodimlar</span><span class="btn">📤 Eksport</span><span class="btn">🌐 Til / Язык</span>
+      </div>
+      <ol class="steps">
+        <li><b>Vazifa qoʻyish.</b> Xodimni tanlang, vazifani va kutilayotgan natijani oʻz soʻzlaringiz bilan yozing — yoki shunchaki ovozli xabar yuboring. Bot oʻlchanadigan taʼrifni taklif qiladi, masalan «100 ta shartnomani tekshirib, hisobot topshirish». Keyin muddat («ertaga», «5-oktabr», «05.10 18:00»), ustuvorlik va vazn.</li>
+        <li><b>Natijani tekshirish.</b> Xodim ishni topshirganda xabar keladi: reja, fakt, fayllar va «AI taklifi: 110 %». Tugmalar: <b>✅ Tasdiqlash</b>, <b>✏️ Bahoni oʻzgartirish</b>, <b>↩ Qayta ishlashga</b> — izoh va yangi muddat bilan.</li>
+        <li><b>Topshiriqlarni tasdiqlash.</b> Xodimlar oʻzi kiritgan ogʻzaki topshiriqlar «📥 Takliflar»ga keladi. Bot vaznni taklif qiladi. Vazn va ustuvorlikni belgilang, matnni tuzating yoki rad eting.</li>
+        <li><b>Samaradorlikni kuzatish.</b> «📊 Jamoa» — har bir xodimning hafta, oy, chorak yoki yil boʻyicha KPIsi, muddati oʻtganlar, bajarilayotgan vazifalar. Xodimni bossangiz — uning kartochkasi va baholar tarixi ochiladi.</li>
+        <li><b>Hisobotni olish.</b> «📤 Eksport» — Excel fayli: xodimlar boʻyicha xulosa, reja va fakt bilan barcha vazifalar, oʻzgarishlar jurnali.</li>
+      </ol>
+      <p class="note"><b>Yakuniy baho doim sizda.</b> AI faqat taklif qiladi. Har bir oʻzgarish vazifa tarixida saqlanadi.</p>
+    </article>
+
+    <article class="role" aria-labelledby="emp-h-uz">
+      <div class="role-head">
+        <h2 id="emp-h-uz">Xodimga</h2>
+        <span class="label">chat pastidagi menyu</span>
+      </div>
+      <div class="btns">
+        <span class="btn">📋 Mening vazifalarim</span><span class="btn">✅ Natijani topshirish</span>
+        <span class="btn">➕ Topshiriq qoʻshish</span><span class="btn">📈 Mening samaradorligim</span><span class="btn">🌐 Til / Язык</span>
+      </div>
+      <ol class="steps">
+        <li><b>Vazifani olish.</b> Bot kartochka yuboradi: nima qilish kerak, qanday natija kutilmoqda, muddat va vazn. <b>✅ Ishga qabul qildim</b> tugmasini bosing.</li>
+        <li><b>Natijani topshirish.</b> «✅ Natijani topshirish» → vazifani tanlang va savollarga javob bering: amalda nima qilindi, qanday natija olindi, reja boʻyicha son (masalan, 100 tadan 110 ta). Matn bilan ham, ovoz bilan ham javob berish mumkin. Ishni tasdiqlovchi fayl yoki rasmlarni biriktiring, soʻng «Yuborish»ni bosing.</li>
+        <li><b>Qarorni kutish.</b> Bahoni boshliq qoʻyadi, bot yakunni yuboradi. Vazifa qayta ishlashga qaytarilsa, izoh boʻyicha tuzatib, qayta topshiring.</li>
+        <li><b>Ogʻzaki topshiriqni kiritish.</b> Vazifa ogʻzaki berildimi? «➕ Topshiriq qoʻshish» — u boshliqqa tasdiqlash uchun ketadi va hisobga olinadi.</li>
+        <li><b>Oʻz KPIingizni kuzatish.</b> «📈 Mening samaradorligim» — hafta, oy, muddatida bajarilganlar, kechikishlar, baholar tarixi.</li>
+      </ol>
+      <p class="note"><b>Oʻz vaqtida va tasdiq bilan topshiring.</b> Fayl yoki rasm toʻliq baho olishga yordam beradi. Kechikish bahoni pasaytiradi.</p>
+    </article>
+  </section>
+
+  <section class="duo">
+    <article class="panel" aria-labelledby="kpi-h-uz">
+      <h2 id="kpi-h-uz">Samaradorlik koeffitsiyenti qanday hisoblanadi</h2>
+      <p class="formula">KPI = Σ (vazn × baho) ÷ Σ vaznlar</p>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Hafta vazifasi</th><th class="num">Vazn</th><th class="num">Baho</th></tr></thead>
+          <tbody>
+            <tr><td>Texnik topshiriq tayyorlash</td><td class="num">30 %</td><td class="num">100 %</td></tr>
+            <tr><td>Shartnomalar tahlili</td><td class="num">20 %</td><td class="num">110 %</td></tr>
+            <tr><td>Hisobot</td><td class="num">20 %</td><td class="num">90 %</td></tr>
+            <tr><td>Yetkazib beruvchilar bilan ishlash</td><td class="num">30 %</td><td class="num">105 %</td></tr>
+          </tbody>
+          <tfoot><tr><td>Haftalik samaradorlik</td><td></td><td class="num result">102 %</td></tr></tfoot>
+        </table>
+      </div>
+      <ul class="rules">
+        <li>Vazifa muddati toʻgʻri kelgan davrga kiradi.</li>
+        <li>Baho 0 dan 150 % gacha. 100 % dan yuqori — faqat oʻlchanadigan ortigʻi bilan bajarish uchun.</li>
+        <li>Kechikish uchun: har bir kunga −2 %, lekin −20 % dan koʻp emas.</li>
+        <li>Muddat oʻtgan, natija topshirilmagan — topshirilgunga qadar vazifa 0 % deb hisoblanadi.</li>
+        <li>«Tekshiruvda»gi vazifalar baho tasdiqlanmaguncha KPIga kirmaydi.</li>
+      </ul>
+    </article>
+
+    <article class="panel" aria-labelledby="rem-h-uz">
+      <h2 id="rem-h-uz">Bot qachon oʻzi eslatadi</h2>
+      <ol class="timeline">
+        <li><span class="when">−3 kun</span><p>Xodimga: vazifa muddati yaqin.</p></li>
+        <li><span class="when">−1 kun</span><p>Xodimga: muddat ertaga.</p></li>
+        <li><span class="when">−3 soat</span><p>Xodimga: muddat bugun.</p></li>
+        <li class="due"><span class="when">Muddat</span><p>Xodimga: «Amalda nima qilindi? Qanday natija olindi? Bajarilganini qaysi hujjatlar tasdiqlaydi?» Boshliqqa — kechikish haqida xabar.</p></li>
+        <li><span class="when">10:00</span><p>Har kuni ertalab, muddati oʻtgan vazifa topshirilmaguncha.</p></li>
+        <li><span class="when">+21 soat</span><p>Boshliqqa: 3 soatdan keyin AI bahosi oʻzi tasdiqlanadi.</p></li>
+        <li><span class="when">+2 kun</span><p>Boshliqqa: natija hali ham tekshiruvni kutmoqda.</p></li>
+        <li><span class="when">Du 9:00</span><p>Boshliqqa: oʻtgan hafta uchun jamoa KPI xulosasi.</p></li>
+        <li><span class="when">23:00</span><p>Boshliqqa: barcha maʼlumotlarning zaxira nusxasi.</p></li>
+      </ol>
+      <p class="quiet">21:00 dan 8:00 gacha bot bezovta qilmaydi: eslatmalar ertalab keladi. Vaqt — Toshkent vaqti. Faqat sana koʻrsatilsa, muddat — shu kuni 18:00.</p>
+    </article>
+  </section>
+
+  <section class="trio">
+    <article class="panel" aria-labelledby="voice-h-uz">
+      <h3 id="voice-h-uz">Ovoz bilan — oʻzbekcha va ruscha</h3>
+      <ul>
+        <li>Botning vazifa haqidagi har qanday savoliga ovozli xabar bilan javob berish mumkin — bot matnni oʻzi yozib oladi.</li>
+        <li>Tugmasiz ovozli xabar: boshliqqa bot vazifani toʻliq tuzib beradi (kimga, nima, natija, muddat), xodimdan esa soʻraydi — bu topshiriqmi yoki natijami.</li>
+        <li>Ilovada — maydonlar yonidagi 🎤 tugmasi va «Vazifani toʻliq aytib yozdirish».</li>
+        <li>Yozuv 2 daqiqagacha. Roʻyxatdan oʻtishda F.I.Sh. — faqat matn bilan.</li>
+      </ul>
+    </article>
+    <article class="panel" aria-labelledby="auto-h-uz">
+      <h3 id="auto-h-uz">Boshliq javob berishga ulgurmasa</h3>
+      <ul>
+        <li>24 soatdan keyin AI bahosi oʻzi tasdiqlanadi, xodimning topshirigʻi esa taklif qilingan vazn bilan qabul qilinadi. Bundan 3 soat oldin bot eslatadi.</li>
+        <li>Doim boshliqni kutadi: 100 % dan yuqori baho, AIsiz (formula boʻyicha) hisoblangan baho va kirish uchun arizalar.</li>
+        <li>Avtomatik tasdiqlangan bahoni 7 kun ichida oʻzgartirish mumkin.</li>
+      </ul>
+    </article>
+    <article class="panel" aria-labelledby="lang-h-uz">
+      <h3 id="lang-h-uz">Ikki til</h3>
+      <ul>
+        <li>Har kim oʻzi tanlaydi: Oʻzbekcha yoki Русский. Menyudagi «🌐 Til / Язык» tugmasi yoki <code>/lang</code> buyrugʻi; ilovada — sarlavha yonidagi tugma.</li>
+        <li>Boshliq va xodim turli tillarda ishlashi mumkin: bot har kimga oʻz tilida yozadi.</li>
+        <li>Vazifa matnlari va izohlar tarjima qilinmaydi — qanday yozilgan boʻlsa, shunday qoladi.</li>
+      </ul>
+    </article>
+  </section>
+
+  <section class="trio">
+    <article class="panel" aria-labelledby="join-h-uz">
+      <h3 id="join-h-uz">Xodimni qanday ulash mumkin</h3>
+      <ol>
+        <li>Xodim botni ochib, <code>/start</code> ni bosadi.</li>
+        <li>Tilni tanlaydi, F.I.Sh. va lavozimini kiritadi — ariza boshliqqa ketadi.</li>
+        <li>Boshliq xabardagi yoki «👥 Xodimlar»dagi <b>✅ Tasdiqlash</b> tugmasini bosadi. Xodimda menyu paydo boʻladi.</li>
+      </ol>
+    </article>
+    <article class="panel" aria-labelledby="cmd-h-uz">
+      <h3 id="cmd-h-uz">Har ehtimolga qarshi buyruqlar</h3>
+      <div class="cmds">
+        <code>/start</code><span>boshlash, menyuni qaytarish</span>
+        <code>/menu</code><span>menyuni koʻrsatish</span>
+        <code>/lang</code><span>tilni almashtirish</span>
+        <code>/help</code><span>qisqa yordam</span>
+        <code>/cancel</code><span>joriy qadamni bekor qilish</span>
+      </div>
+      <p class="muted small">Muloqot oʻrtasida menyu tugmasini bossangiz — bot shunchaki yangi amalni boshlaydi.</p>
+    </article>
+    <article class="panel" aria-labelledby="how-h-uz">
+      <h3 id="how-h-uz">Ilova va bot qanday ishlaydi</h3>
+      <ul>
+        <li>Chatdagi «Ochish» tugmasi ilovani ochadi: jamoa, vazifalar, tekshiruv va natijani topshirish — bitta oynada.</li>
+        <li>Bot bulutda kecha-yu kunduz ishlaydi, kompyuterni yoqish shart emas. Har oqshom boshliq maʼlumotlar nusxasini oladi.</li>
+        <li>Maslahat va baholarni bepul Google Gemini AI beradi. U ishlamasa, baho «fakt ÷ reja» formulasi boʻyicha hisoblanadi.</li>
+      </ul>
+    </article>
+  </section>
+
+  <footer>
+    <span>Savol va xatolar boʻyicha — boshliqqa yoki bot adminiga.</span>
+    <span>2026-yil oktabr</span>
+  </footer>
+</main>
+</div>
+
+<script>
+(function () {
+  var sheets = document.querySelectorAll('main[data-lang]');
+  var buttons = document.querySelectorAll('.lang-switch button');
+  function show(lang, remember) {
+    sheets.forEach(function (sheet) { sheet.hidden = sheet.getAttribute('data-lang') !== lang; });
+    buttons.forEach(function (button) { button.setAttribute('aria-pressed', String(button.getAttribute('data-lang') === lang)); });
+    document.documentElement.lang = lang;
+    if (remember) { try { localStorage.setItem('memo-lang', lang); } catch (e) { /* без памяти тоже работает */ } }
+  }
+  var initial = location.hash === '#uz' ? 'uz' : location.hash === '#ru' ? 'ru' : '';
+  if (!initial) { try { initial = localStorage.getItem('memo-lang') || ''; } catch (e) { initial = ''; } }
+  if (initial !== 'uz' && initial !== 'ru') initial = (navigator.language || '').toLowerCase().indexOf('uz') === 0 ? 'uz' : 'ru';
+  show(initial, false);
+  buttons.forEach(function (button) {
+    button.addEventListener('click', function () { show(button.getAttribute('data-lang'), true); });
+  });
+}());
+</script>

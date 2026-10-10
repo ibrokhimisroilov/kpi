@@ -29,7 +29,7 @@ TELEGRAM_JS = "https://telegram.org/js/telegram-web-app.js"
 # Идентификатор пространства имён для document.createElementNS, а не сетевой адрес: браузер по нему не ходит.
 SVG_NAMESPACE = "http://www.w3.org/2000/svg"
 STATIC_WHITELIST = {"app.js", "app.css"}  # pages.py отдаёт из /app/static/ только эти файлы (§4.3)
-SIZE_LIMITS = {"index.html": 4 * 1024, "app.css": 40 * 1024, "app.js": 200 * 1024}
+SIZE_LIMITS = {"index.html": 4 * 1024, "app.css": 40 * 1024, "app.js": 256 * 1024}
 
 TAB_LABELS = ("Команда", "Задачи", "Проверка", "Новая", "Мои задачи", "Сдать", "Мой KPI", "Поручение")
 TAB_ROOTS = ("#/team", "#/tasks", "#/review", "#/new", "#/my", "#/submit", "#/kpi", "#/propose")

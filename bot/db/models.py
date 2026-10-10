@@ -138,6 +138,9 @@ class User(Base):
     # Админ бота: начальник со всеми правами, которого нельзя понизить или заблокировать. Назначается
     # командой ``python -m bot.tools.admin`` (bot.services.users.grant_admin), а не настройкой хостинга.
     is_admin: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())
+    # Язык интерфейса: «ru» | «uz» (bot.i18n). None — не выбран: русский, а если Telegram человека на
+    # узбекском — узбекский (и это записывается при первом же его сообщении).
+    lang: Mapped[str | None] = mapped_column(String(8))
 
     @property
     def is_manager(self) -> bool:

@@ -306,7 +306,7 @@ async def export_report(
     await callback.answer()
 
     chat_id = _chat_id(callback)
-    progress = await bot.send_message(chat_id, f"⏳ Готовлю отчёт: {esc(period.label)}…")
+    progress = await bot.send_message(chat_id, f"⏳ Готовлю отчёт: {period.label}…")
     with suppress(TelegramAPIError):
         await bot.send_chat_action(chat_id, ChatAction.UPLOAD_DOCUMENT)
 
@@ -327,7 +327,7 @@ async def export_report(
         await bot.send_document(
             chat_id,
             BufferedInputFile(data, filename=filename),
-            caption=f"📊 Отчёт: {esc(period.label)}",
+            caption=f"📊 Отчёт: {period.label}",
         )
     except TelegramAPIError:
         log.exception("Не удалось отправить Excel-отчёт %s", filename)

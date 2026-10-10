@@ -39,6 +39,7 @@
   /** Все маршруты API: [метод, шаблон пути] — имена параметров как в bot.webapp.api.ROUTES. */
   const EP = Object.freeze({
     me: ['GET', '/api/me'],
+    setLang: ['POST', '/api/lang'],
     tasks: ['GET', '/api/tasks'],
     task: ['GET', '/api/tasks/{task_id}'],
     createTask: ['POST', '/api/tasks'],
@@ -116,6 +117,101 @@
   const MONTHS_GEN = ['января', 'февраля', 'марта', 'апреля', 'мая', 'июня', 'июля', 'августа',
     'сентября', 'октября', 'ноября', 'декабря'];
   const WEEKDAYS = ['вс', 'пн', 'вт', 'ср', 'чт', 'пт', 'сб'];
+  const MONTHS_UZ = ['yanvar', 'fevral', 'mart', 'aprel', 'may', 'iyun', 'iyul', 'avgust',
+    'sentabr', 'oktabr', 'noyabr', 'dekabr'];
+  const WEEKDAYS_UZ = ['yak', 'du', 'se', 'chor', 'pay', 'ju', 'shan'];
+
+  // ---------------------------------------------------------------------------------------------
+  // 0a. Язык интерфейса (SPEC.md §14, MINIAPP_SPEC.md §11.12)
+  // ---------------------------------------------------------------------------------------------
+
+  /*
+   * Тексты приложения написаны по-русски. Для узбекского они переводятся в одном месте — на выходе:
+   * текстовые узлы и подписи-атрибуты (appendKids, setProps, setText), кнопка MainButton, диалоги.
+   * Строка превращается в «скелет»: числа -> {}, слова пользователя, обёрнутые в own(), -> {u};
+   * скелет ищется в словаре UZ (в конце файла). Чего в словаре нет, остаётся как есть.
+   * Подписи с сервера (статус, срок, журнал, ошибки) приходят уже на языке пользователя.
+   */
+  const U0 = String.fromCharCode(0x2062);  // невидимые метки слов пользователя — как bot.i18n на сервере
+  const U1 = String.fromCharCode(0x2063);
+  const MARKS_RE = new RegExp('[' + U0 + U1 + ']', 'g');
+  const USER_RE = new RegExp(U0 + '([^' + U0 + U1 + ']*)' + U1, 'g');
+  const CYR_RE = /[А-Яа-яЁё]/;
+  const NUM_RE = /\d{1,3}(?:[   ]\d{3})+(?:,\d+)?|\d+(?:,\d+)?/g;
+  const SLOT_RE = /\{(u?)(\d*)\}/g;
+  const HOLE = String.fromCharCode(0xE000);  // место слов пользователя в строке, пока она переводится
+  const HOLES_RE = new RegExp(HOLE, 'g');
+  const i18n = { lang: 'ru', misses: new Set() };
+  if (CONFIG.debug) window.kpiI18n = i18n;  // локальная отладка: непереведённые строки — в kpiI18n.misses
+
+  /** Слова пользователя (название задачи, ФИО, комментарий) и готовые подписи с сервера: перевод их не трогает. */
+  function own(value) {
+    return value === null || value === undefined || value === '' ? '' : U0 + String(value) + U1;
+  }
+
+  function plain(text) {
+    return text.indexOf(U0) < 0 && text.indexOf(U1) < 0 ? text : text.replace(MARKS_RE, '');
+  }
+
+  /** Готовый текст -> на язык интерфейса; метки убираются всегда. */
+  function tr(value) {
+    const text = String(value);
+    if (i18n.lang !== 'uz' || !CYR_RE.test(text)) return plain(text);
+    const users = [];
+    const masked = plain(text.replace(USER_RE, (_, words) => {
+      users.push(words);
+      return HOLE;
+    }));
+    return masked.split('\n').map((line) => trLine(line, users)).join('\n');
+  }
+
+  function trLine(line, users) {
+    const mine = users.splice(0, (line.match(HOLES_RE) || []).length);
+    const restore = (text) => {
+      let i = 0;
+      return text.replace(HOLES_RE, () => {
+        i += 1;
+        return mine[i - 1] || '';
+      });
+    };
+    const core = line.trim();
+    if (!core || !CYR_RE.test(core)) return restore(line);  // переводить нечего: только слова пользователя
+    const nums = [];
+    const key = core.replace(NUM_RE, (n) => {
+      nums.push(n);
+      return '{}';
+    }).replace(HOLES_RE, '{u}');
+    const template = UZ[key];
+    if (template === undefined) {
+      i18n.misses.add(key);
+      return restore(line);
+    }
+    const seq = { u: 0, n: 0 };
+    const out = template.replace(SLOT_RE, (_, kind, index) => {
+      const pool = kind ? mine : nums;
+      let at;
+      if (index) at = Number(index);
+      else if (kind) {
+        at = seq.u;
+        seq.u += 1;
+      } else {
+        at = seq.n;
+        seq.n += 1;
+      }
+      return at < pool.length ? pool[at] : '';
+    });
+    return line.slice(0, line.length - line.trimStart().length) + out + line.slice(line.trimEnd().length);
+  }
+
+  function setLang(lang) {
+    i18n.lang = lang === 'uz' ? 'uz' : 'ru';
+    document.documentElement.lang = i18n.lang;
+  }
+
+  /** Текст элемента — через перевод (вместо прямого el.textContent = …). */
+  function setText(el, text) {
+    el.textContent = tr(text === null || text === undefined ? '' : text);
+  }
 
   function readConfig() {
     const fallback = { version: '', debug: false };
@@ -134,6 +230,7 @@
   // ---------------------------------------------------------------------------------------------
 
   const PROP_KEYS = new Set(['value', 'checked', 'disabled', 'hidden', 'selected', 'multiple', 'readOnly']);
+  const TEXT_ATTRS = new Set(['aria-label', 'placeholder', 'title', 'alt']);  // подписи: переводятся
 
   /** h('button', {class, onclick, 'aria-label': …}, 'текст', узел, [массив]) — строки становятся текстом. */
   function h(tag, props) {
@@ -163,7 +260,8 @@
       if (v === null || v === undefined || v === false) continue;
       if (key === 'class') el.className = v;
       else if (key.slice(0, 2) === 'on' && typeof v === 'function') el.addEventListener(key.slice(2), v);
-      else if (PROP_KEYS.has(key)) el[key] = v;
+      else if (PROP_KEYS.has(key)) el[key] = typeof v === 'string' ? plain(v) : v;
+      else if (TEXT_ATTRS.has(key)) el.setAttribute(key, tr(v));
       else el.setAttribute(key, v === true ? '' : String(v));
     }
   }
@@ -173,7 +271,7 @@
       if (kid === null || kid === undefined || kid === false || kid === '') continue;
       if (Array.isArray(kid)) appendKids(el, kid);
       else if (kid instanceof Node) el.appendChild(kid);
-      else el.appendChild(document.createTextNode(keepTogether(String(kid))));
+      else el.appendChild(document.createTextNode(keepTogether(tr(kid))));
     }
   }
 
@@ -183,6 +281,7 @@
     return text
       .replace(/(\d) (?=%)/g, '$1 ')
       .replace(/(\d) (?=(?:дн|ч|мин)\.)/g, '$1 ')
+      .replace(/(\d) (?=(?:kun|soat|daq)(?![a-z]))/g, '$1 ')
       .replace(/(^|\s)(на|до) (?=\d)/g, '$1$2 ');
   }
 
@@ -239,9 +338,10 @@
 
   function fileSize(bytes) {
     if (!isNum(bytes)) return '';
-    if (bytes < 1024) return bytes + ' Б';
-    if (bytes < MB) return Math.max(1, Math.round(bytes / 1024)) + ' КБ';
-    return fmtNum(Math.round(bytes / MB * 10) / 10) + ' МБ';
+    const units = i18n.lang === 'uz' ? [' B', ' KB', ' MB'] : [' Б', ' КБ', ' МБ'];
+    if (bytes < 1024) return bytes + units[0];
+    if (bytes < MB) return Math.max(1, Math.round(bytes / 1024)) + units[1];
+    return fmtNum(Math.round(bytes / MB * 10) / 10) + units[2];
   }
 
   /** «1 200», «10,5», «110 договоров» -> число (как parse_number в чате, мягче); иначе null. */
@@ -304,6 +404,9 @@
     const day = new Date(Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3])));
     const thisYear = state.me && state.me.today ? state.me.today.slice(0, 4) : '';
     const year = m[1] !== thisYear ? ' ' + m[1] : '';
+    if (i18n.lang === 'uz') {  // «8-oktabr (pay)», год — впереди: «2027-yil 8-oktabr (pay)»
+      return (year ? m[1] + '-yil ' : '') + Number(m[3]) + '-' + MONTHS_UZ[Number(m[2]) - 1] + ' (' + WEEKDAYS_UZ[day.getUTCDay()] + ')';
+    }
     return Number(m[3]) + ' ' + MONTHS_GEN[Number(m[2]) - 1] + year + ' (' + WEEKDAYS[day.getUTCDay()] + ')';
   }
 
@@ -346,6 +449,7 @@
   function applyMe(me) {
     state.me = me;
     state.role = me.role;
+    setLang(me.lang);
     state.cfg = Object.assign({}, DEFAULT_CFG, me.config || {});
     const now = Date.parse(me.now);
     if (!isNaN(now)) state.skew = now - Date.now();
@@ -381,7 +485,8 @@
     primary.refresh();
   }
 
-  function confirmDialog(message) {
+  function confirmDialog(text) {
+    const message = tr(text);
     return new Promise((resolve) => {
       if (tgv('6.2')) {
         try {
@@ -455,7 +560,7 @@
         }
         const tp = tg.themeParams || {};
         const enabled = Boolean(c.enabled && !c.progress);
-        const params = { text: c.progress && c.progressText ? c.progressText : c.text, is_visible: true, is_active: enabled };
+        const params = { text: tr(c.progress && c.progressText ? c.progressText : c.text), is_visible: true, is_active: enabled };
         if (enabled) {
           const color = c.danger ? tp.destructive_text_color : tp.button_color;
           if (color) params.color = color;
@@ -479,7 +584,7 @@
       box.hidden = false;
       box.classList.toggle('over-sheet', Boolean(layers.sheet));
       box.classList.toggle('is-danger', Boolean(c.danger));
-      button.textContent = c.progress && c.progressText ? c.progressText : c.text;
+      setText(button, c.progress && c.progressText ? c.progressText : c.text);
       button.disabled = !c.enabled || Boolean(c.progress);
       button.setAttribute('aria-busy', String(Boolean(c.progress)));
       setCssPx('--primary-h', box.offsetHeight);
@@ -585,9 +690,10 @@
   // ---------------------------------------------------------------------------------------------
 
   class ApiError extends Error {
-    constructor(status, code, message) {
+    constructor(status, code, message, ru) {
       super(message);
       this.name = 'ApiError';
+      this.ru = ru || message;  // тот же текст по-русски: по нему приложение узнаёт вид ошибки
       this.status = status;
       this.code = code;
       this.handled = false;
@@ -678,7 +784,7 @@
       clearTimeout(timer);
     }
     if (!resp.ok || data === null) {
-      throw routeError(new ApiError(resp.status, (data && data.code) || 'internal', (data && data.error) || T.generic));
+      throw routeError(new ApiError(resp.status, (data && data.code) || 'internal', (data && data.error) || T.generic, data && data.ru));
     }
     return data;
   }
@@ -705,7 +811,7 @@
           data = null;
         }
         if (xhr.status >= 200 && xhr.status < 300 && data) resolve(data);
-        else reject(routeError(new ApiError(xhr.status, (data && data.code) || 'internal', (data && data.error) || T.generic)));
+        else reject(routeError(new ApiError(xhr.status, (data && data.code) || 'internal', (data && data.error) || T.generic, data && data.ru)));
       };
       xhr.onerror = () => reject(new ApiError(0, 'network', T.network));
       xhr.ontimeout = () => reject(new ApiError(0, 'timeout', T.uploadTimeout));
@@ -1134,7 +1240,36 @@
   // ---------------------------------------------------------------------------------------------
 
   function setDocTitle(title) {
-    document.title = title ? title + ' · Эффективность' : 'Эффективность';
+    const app = i18n.lang === 'uz' ? 'Samaradorlik' : 'Эффективность';
+    document.title = title ? tr(title) + ' · ' + app : app;
+  }
+
+  /** Кнопка языка на главных экранах вкладок: одно нажатие — другой язык (и в приложении, и в чате). */
+  function langButton() {
+    const next = i18n.lang === 'uz' ? 'ru' : 'uz';
+    const btn = h('button', { type: 'button', class: 'lang-btn', lang: next, 'aria-label': next === 'uz' ? 'Oʻzbek tiliga oʻtish' : 'Перейти на русский язык' },
+      '🌐 ', own(next === 'uz' ? 'Oʻzbekcha' : 'Русский'));
+    btn.addEventListener('click', async () => {
+      if (btn.disabled) return;
+      btn.disabled = true;
+      haptic.sel();
+      try {
+        await api(EP.setLang, { body: { lang: next } });
+        cacheGen += 1;
+        cache.clear();
+        setLang(next);
+        const me = await api(EP.me, { fresh: true });
+        if (me && me.access === 'active') applyMe(me);
+        if (shell && nav.current) {
+          buildShell();
+          render(nav.current);
+        }
+      } catch (err) {
+        btn.disabled = false;
+        reportError(err);
+      }
+    });
+    return btn;
   }
 
   /** Шапка экрана: заголовок h1 (на него переходит фокус), подзаголовок, «‹ Назад» вне Telegram. */
@@ -1145,15 +1280,16 @@
     const subEl = h('p', { class: 'sub', hidden: !sub }, sub || '');
     const el = h('header', { class: 'screen-head' },
       nested && !back.native ? h('button', { type: 'button', class: 'back-link', onclick: () => goBack() }, '‹ Назад') : null,
+      nested ? null : langButton(),
       h1, subEl);
     return {
       el,
       setTitle(text) {
-        h1.textContent = text;
+        setText(h1, text);
         setDocTitle(text);
       },
       setSub(text) {
-        subEl.textContent = text || '';
+        setText(subEl, text || '');
         subEl.hidden = !text;
       },
     };
@@ -1229,7 +1365,8 @@
   }
 
   function kvBlock(label, value, extra) {
-    return h('div', { class: 'kvb' }, h('div', { class: 'kvb-k' }, label), h('div', { class: 'kvb-v pre' }, value), extra || null);
+    // value — слова пользователя (результат, факт, комментарий): перевод их не трогает.
+    return h('div', { class: 'kvb' }, h('div', { class: 'kvb-k' }, label), h('div', { class: 'kvb-v pre' }, typeof value === 'string' ? own(value) : value), extra || null);
   }
 
   function button(text, onClick, cls, attrs) {
@@ -1285,7 +1422,7 @@
       set: (v) => pick(v, false),
       setLabel(v, text) {
         const i = items.findIndex((it) => it.value === v);
-        if (i >= 0) btns[i].textContent = text;
+        if (i >= 0) setText(btns[i], text);
       },
     };
   }
@@ -1306,7 +1443,7 @@
   function kpiBar(kpi, max, text, decorative) {
     const svg = s('svg', decorative
       ? { class: 'kbar', width: '100%', height: '10', 'aria-hidden': 'true', focusable: 'false' }
-      : { class: 'kbar', width: '100%', height: '10', role: 'img', 'aria-label': 'KPI: ' + (text || pct(kpi)) + ', отметка — 100 %', focusable: 'false' });
+      : { class: 'kbar', width: '100%', height: '10', role: 'img', 'aria-label': 'KPI: ' + own(text || pct(kpi)) + ', отметка — 100 %', focusable: 'false' });
     svg.appendChild(s('rect', { class: 'kbar-track', x: 0, y: 0, width: '100%', height: 10, rx: 5 }));
     if (isNum(kpi) && kpi > 0) {
       const width = Math.min(100, kpi / max * 100);
@@ -1341,7 +1478,7 @@
       pen = true;
       lastIndex = i;
     });
-    const label = 'KPI по неделям: ' + points.map((p) => p.label + ' — ' + (isNum(p.kpi) ? pct(p.kpi) : 'нет данных')).join(', ');
+    const label = tr('KPI по неделям:') + ' ' + points.map((p) => p.label + ' — ' + (isNum(p.kpi) ? pct(p.kpi) : tr('нет данных'))).join(', ');
     const y100 = y(100).toFixed(1);
     const svg = s('svg', { class: 'trend', width: '100%', height: '56', role: 'img', 'aria-label': label, focusable: 'false' },
       s('line', { class: 'trend-100', x1: 0, x2: '100%', y1: y100, y2: y100, 'aria-hidden': 'true' }),
@@ -1509,11 +1646,11 @@
       btn.classList.toggle('busy', stage === 'starting' || stage === 'sending');
       btn.disabled = stage === 'starting' || stage === 'sending';
       if (stage === 'rec') {
-        btn.textContent = '⏹ ' + fmtClock(Date.now() - startedAt);
-        btn.setAttribute('aria-label', 'Остановить запись');
+        setText(btn, '⏹ ' + fmtClock(Date.now() - startedAt));
+        btn.setAttribute('aria-label', tr('Остановить запись'));
       } else {
-        btn.textContent = stage === 'sending' ? (o.text ? '⏳ Распознаю…' : '⏳') : idle;
-        btn.setAttribute('aria-label', stage === 'sending' ? 'Распознаю речь' : label);
+        setText(btn, stage === 'sending' ? (o.text ? '⏳ Распознаю…' : '⏳') : idle);
+        btn.setAttribute('aria-label', tr(stage === 'sending' ? 'Распознаю речь' : label));
       }
     }
 
@@ -1643,7 +1780,7 @@
     const labelEl = h('label', { for: id }, h('span', null, o.label, o.required ? h('span', { class: 'req', 'aria-hidden': 'true' }, '*') : null), counter);
     // Текстовые поля можно надиктовать (числа, даты и поиск — с клавиатуры).
     const dictable = o.mic !== false && !o.inputmode && (o.multiline || !o.type || o.type === 'text') && voiceSupported();
-    const mic = dictable ? micButton({ label: 'Надиктовать: ' + o.label, onResult: (data) => appendDictated(input, data.text) }) : null;
+    const mic = dictable ? micButton({ label: tr('Надиктовать:') + ' ' + tr(o.label), onResult: (data) => appendDictated(input, data.text) }) : null;
     const el = h('div', { class: 'field' },
       mic ? h('div', { class: 'field-head' }, labelEl, mic) : labelEl,
       input, hint, err);
@@ -1651,12 +1788,12 @@
     function updateCounter() {
       if (!counter) return;
       const n = input.value.length;
-      counter.textContent = n >= o.max * 0.8 ? n + ' / ' + o.max : '';
+      setText(counter, n >= o.max * 0.8 ? n + ' / ' + o.max : '');
       counter.classList.toggle('over', n > o.max);
     }
 
     function setError(message) {
-      err.textContent = message || '';
+      setText(err, message || '');
       if (message) input.setAttribute('aria-invalid', 'true');
       else input.removeAttribute('aria-invalid');
     }
@@ -1718,7 +1855,7 @@
     o.options.map((opt) => h('option', { value: opt.value, selected: opt.value === o.value }, opt.label)));
     const err = h('p', { class: 'field-error', id: errId, 'aria-live': 'polite' });
     function setError(message) {
-      err.textContent = message || '';
+      setText(err, message || '');
       if (message) select.setAttribute('aria-invalid', 'true');
       else select.removeAttribute('aria-invalid');
     }
@@ -1776,16 +1913,16 @@
     timeInput.addEventListener('input', onTime);
 
     function setError(message) {
-      err.textContent = message || '';
+      setText(err, message || '');
       if (message) dateInput.setAttribute('aria-invalid', 'true');
       else dateInput.removeAttribute('aria-invalid');
     }
 
     function sync(byUser) {
       chips.forEach((c, i) => c.setAttribute('aria-pressed', String(quick[i].date === model.date)));
-      caption.textContent = model.date
-        ? '📅 ' + humanDate(model.date) + ', ' + model.time
-        : 'Выберите дату кнопкой или в календаре';
+      setText(caption, model.date
+        ? '📅 ' + own(humanDate(model.date)) + ', ' + model.time
+        : 'Выберите дату кнопкой или в календаре');
       if (byUser) {
         setError('');
         if (opts.onChange) opts.onChange();
@@ -1844,7 +1981,7 @@
     });
 
     function setError(message) {
-      err.textContent = message || '';
+      setText(err, message || '');
       if (message) custom.setAttribute('aria-invalid', 'true');
       else custom.removeAttribute('aria-invalid');
     }
@@ -1863,15 +2000,15 @@
         over[w] ? w + ' %, неделя сотрудника будет перегружена' : null)));
       const parts = [];
       if (load !== null) {
-        parts.push('Сейчас на неделе: ' + load + ' %. Рекомендуется, чтобы сумма весов за неделю была ≈100 %.');
+        parts.push(tr('Сейчас на неделе: ' + load + ' %. Рекомендуется, чтобы сумма весов за неделю была ≈100 %.'));
         if (isNum(model.weight) && model.weight > 0 && load + model.weight > 100) {
-          parts.push('⚠️ С этой задачей будет ' + (load + model.weight) + ' %.');
+          parts.push(tr('⚠️ С этой задачей будет ' + (load + model.weight) + ' %.'));
         }
-        if (week) parts.push(week);
+        if (week) parts.push(own(week));
       } else {
-        parts.push('Доля задачи в оценке эффективности сотрудника, 1–100 %.');
+        parts.push(tr('Доля задачи в оценке эффективности сотрудника, 1–100 %.'));
       }
-      hint.textContent = parts.join(' ');
+      setText(hint, parts.join(' '));
     }
     paint();
 
@@ -1946,7 +2083,7 @@
     }
 
     function setError(message) {
-      err.textContent = message || '';
+      setText(err, message || '');
       if (message) value.setAttribute('aria-invalid', 'true');
       else value.removeAttribute('aria-invalid');
     }
@@ -2016,7 +2153,7 @@
       if (!title || raw0.length < 3) return;
       busy = true;
       refresh();
-      status.textContent = '⏳ Формулирую измеримый результат…';
+      setText(status, '⏳ Формулирую измеримый результат…');
       try {
         const body = { title, raw_result: raw0 };
         if (previous) body.previous = previous.slice(0, 1000);
@@ -2029,7 +2166,7 @@
         }
       } finally {
         busy = false;
-        status.textContent = '';
+        setText(status, '');
         if (scr.alive) refresh();
       }
     }
@@ -2041,9 +2178,9 @@
         body: h('div', null,
           sg.notice ? note(sg.notice, 'warn') : null,
           h('p', { class: 'muted small' }, 'Вы написали: ', h('i', null, raw0)),
-          h('p', { class: 'suggest' }, sg.expected_result),
-          hasPlan ? line('📊 План:', h('b', { class: 'num' }, fmtNum(sg.plan_value) + (sg.plan_unit ? ' ' + sg.plan_unit : ''))) : null,
-          sg.note ? h('p', { class: 'line' }, h('i', null, '💡 ' + sg.note)) : null,
+          h('p', { class: 'suggest' }, own(sg.expected_result)),
+          hasPlan ? line('📊 План:', h('b', { class: 'num' }, own(fmtNum(sg.plan_value) + (sg.plan_unit ? ' ' + sg.plan_unit : '')))) : null,
+          sg.note ? h('p', { class: 'line' }, h('i', null, '💡 ' + own(sg.note))) : null,
           sg.source === 'rules' ? h('p', { class: 'line' }, h('span', { class: 'tag' }, 'по правилам, без AI')) : null,
           h('div', { class: 'btn-row mt12' },
             button('🔁 Другой вариант', () => {
@@ -2070,7 +2207,7 @@
   /** Сопоставить текст ошибки сервера с полем формы: [[/срок/i, поле], …] -> true, если нашли. */
   function errorToField(err, pairs) {
     for (const pair of pairs) {
-      if (pair[1] && pair[0].test(err.message || '')) {
+      if (pair[1] && pair[0].test(err.ru || '')) {
         pair[1].setError(err.message);
         safely(() => pair[1].focus());
         return true;
@@ -2120,16 +2257,17 @@
     const opts = o || {};
     const unaccepted = t.status === 'active' && !t.accepted;
     const meta = [];
-    if (opts.assignee && t.assignee) meta.push(t.assignee.short_name);
-    if (t.status !== 'proposed') meta.push(t.priority_label, 'вес ' + t.weight + ' %');
-    else meta.push('ждёт подтверждения начальника');
+    // Части подписи переводятся до склейки: рядом с ними — подписи сервера и слова пользователя.
+    if (opts.assignee && t.assignee) meta.push(own(t.assignee.short_name));
+    if (t.status !== 'proposed') meta.push(own(t.priority_label), tr('вес ' + t.weight + ' %'));
+    else meta.push(tr('ждёт подтверждения начальника'));
     const warn = unaccepted ? h('span', { class: 'warn' }, ' · не принята') : null;
     const tailClass = 'row-tail' + (t.overdue ? ' is-bad' : '') + (t.status === 'done' ? ' is-score' : '');
     const li = h('li', null, h('button', { type: 'button', class: 'row-main', onclick: () => go('#/task/' + t.id) },
       h('span', { class: 'ico', 'aria-hidden': 'true' }, statusIcon(t)),
       h('span', { class: 'row-body' },
         h('span', { class: 'row-top' },
-          h('span', { class: 'row-title' }, h('span', { class: 'id' }, '#' + t.id), t.title),
+          h('span', { class: 'row-title' }, h('span', { class: 'id' }, '#' + t.id), own(t.title)),
           h('span', { class: tailClass }, t.tail)),
         h('span', { class: 'row-sub' }, h('span', { class: 'sr-only' }, statusText(t) + '. '), meta.join(' · '), warn))));
     if (opts.onAccept && unaccepted) {
@@ -2192,7 +2330,7 @@
       setCounts(c) {
         items.forEach((x, i) => {
           const n = c ? c[STATUS_FILTERS[i].value] : undefined;
-          x.cnt.textContent = isNum(n) ? String(n) : '';
+          setText(x.cnt, isNum(n) ? String(n) : '');
         });
         // Счётчики расширили чипы — выбранный (например, «Все» из карточки сотрудника) мог уехать за край.
         requestAnimationFrame(revealSelected);
@@ -2214,7 +2352,7 @@
         box.dataset.state = 'ok';
         if (!data.items.length) {
           box.replaceChildren.apply(box, nodes([
-            emptyState(q ? 'По запросу «' + q + '» ничего не найдено.' : spec.emptyText || 'Задач нет.', q ? '🔍' : '🗂️'),
+            emptyState(q ? 'По запросу «' + own(q) + '» ничего не найдено.' : spec.emptyText || 'Задач нет.', q ? '🔍' : '🗂️'),
             notes]));
           return;
         }
@@ -2258,7 +2396,7 @@
     async function loadMore(more) {
       const my = seq;
       more.disabled = true;
-      more.textContent = 'Загрузка…';
+      setText(more, 'Загрузка…');
       try {
         const data = await api(EP.tasks, { query: spec.query(page + 1) });
         if (!scr.alive || my !== seq) return;
@@ -2267,7 +2405,7 @@
         paint(data, true);
       } catch (err) {
         more.disabled = false;
-        more.textContent = 'Показать ещё';
+        setText(more, 'Показать ещё');
         reportError(err);
       }
     }
@@ -2326,14 +2464,14 @@
     const seg = segmented(PERIOD_KINDS, ps.kind, (kind) => {
       ps.kind = kind;
       ps.offset = 0;
-      label.textContent = '…';
+      setText(label, '…');
       onChange();
     }, 'Период');
     return {
       el: h('div', null, seg.el, h('div', { class: 'period-nav' }, prev, label, next)),
       update(period) {
         if (!period) return;
-        label.textContent = period.label;
+        setText(label, period.label);
         prev.disabled = !period.has_prev;
         next.disabled = !period.has_next;
       },
@@ -2365,7 +2503,7 @@
 
     async function exportReport() {
       exportBtn.disabled = true;
-      exportBtn.textContent = '⏳ Готовлю отчёт…';
+      setText(exportBtn, '⏳ Готовлю отчёт…');
       try {
         const r = await api(EP.exportReport, { query: { kind: teamPeriod.kind, offset: teamPeriod.offset } });
         haptic.ok();
@@ -2374,7 +2512,7 @@
         reportError(err);
       } finally {
         exportBtn.disabled = false;
-        exportBtn.textContent = '📤 Excel-отчёт в чат';
+        setText(exportBtn, '📤 Excel-отчёт в чат');
       }
     }
 
@@ -2443,9 +2581,9 @@
     return h('li', null, h('button', { type: 'button', class: 'row-main kpi-row', onclick: () => go(hash) },
       h('span', { class: 'row-body' },
         h('span', { class: 'row-top' },
-          h('span', { class: 'row-title' }, u.short_name),
+          h('span', { class: 'row-title' }, own(u.short_name)),
           h('span', { class: 'kpi-val' + (isNum(r.kpi) ? '' : ' is-empty') }, r.kpi_text)),
-        u.position ? h('span', { class: 'row-sub' }, u.position) : null,
+        u.position ? h('span', { class: 'row-sub' }, own(u.position)) : null,
         kpiBar(r.kpi, max, r.kpi_text, true),
         h('span', { class: 'meta' },
           h('span', { 'aria-hidden': 'true' }, statsLine(r.stats)),
@@ -2481,7 +2619,7 @@
 
   /** Общий вид KPI (§11.6.1): карточка сотрудника у начальника и «Мой KPI» у сотрудника. */
   function kpiView(scr, userId, ps, self) {
-    const head = screenHead(self ? 'Мой KPI' : 'Сотрудник', self ? state.me.user.full_name : null);
+    const head = screenHead(self ? 'Мой KPI' : 'Сотрудник', self ? own(state.me.user.full_name) : null);
     const pc = periodControl(ps, () => {
       if (!self) replaceQuery({ kind: ps.kind, offset: ps.offset });
       load();
@@ -2494,8 +2632,8 @@
       render(d) {
         pc.update(d.period);
         if (!self && d.user) {
-          head.setTitle(d.user.full_name);
-          head.setSub([d.user.position, d.user.status === 'blocked' ? '⛔ заблокирован' : null].filter(Boolean).join(' · '));
+          head.setTitle(own(d.user.full_name));
+          head.setSub([own(d.user.position), d.user.status === 'blocked' ? tr('⛔ заблокирован') : null].filter(Boolean).join(' · '));
         }
         return renderKpi(scr, d, ps, self, userId);
       },
@@ -2541,7 +2679,7 @@
         h('button', { type: 'button', class: 'row-main', onclick: () => go('#/task/' + it.task_id) },
           h('span', { class: 'row-body' },
             h('span', { class: 'row-top' },
-              h('span', { class: 'row-title' }, h('span', { class: 'id' }, '#' + it.task_id), it.title),
+              h('span', { class: 'row-title' }, h('span', { class: 'id' }, '#' + it.task_id), own(it.title)),
               h('span', { class: 'row-tail is-score' + (it.zero_overdue ? ' is-bad' : '') }, pct(it.score))),
             h('span', { class: 'row-sub' }, 'вес ' + it.weight + ' % × ' + pct(it.score) + (it.zero_overdue ? ' · ⏰ просрочена' : ''))),
           h('span', { class: 'chev', 'aria-hidden': 'true' }, '›'))))));
@@ -2574,7 +2712,7 @@
     if (page + 1 < pages) {
       const more = button('Показать ещё', async () => {
         more.disabled = true;
-        more.textContent = 'Загрузка…';
+        setText(more, 'Загрузка…');
         try {
           const next = await api(EP.userKpi, { params: { user_id: userId }, query: { kind: ps.kind, offset: ps.offset, page: page + 1 } });
           if (!scr.alive) return;
@@ -2583,11 +2721,11 @@
           if (page + 1 >= next.history.pages) more.remove();
           else {
             more.disabled = false;
-            more.textContent = 'Показать ещё';
+            setText(more, 'Показать ещё');
           }
         } catch (err) {
           more.disabled = false;
-          more.textContent = 'Показать ещё';
+          setText(more, 'Показать ещё');
           reportError(err);
         }
       }, 'more');
@@ -2597,15 +2735,15 @@
   }
 
   function historyRow(it) {
-    const meta = [it.completed_local || '—', 'вес ' + it.weight + ' %'];
-    if (it.is_late) meta.push('⚠️ с опозданием');
-    if (it.rework_count) meta.push('↩️ доработок: ' + it.rework_count);
+    const meta = [it.completed_local || '—', tr('вес ' + it.weight + ' %')];
+    if (it.is_late) meta.push(tr('⚠️ с опозданием'));
+    if (it.rework_count) meta.push(tr('↩️ доработок: ' + it.rework_count));
     let score = '🏁 ' + it.final_score_text;
     if (it.decision === 'changed') score = (isNum(it.ai_score) ? '🤖 ' + pct(it.ai_score) + ' → ' : '') + '🏁 ' + it.final_score_text + ' ✏️ изменена';
     else if (it.decision === 'approved') score = '🏁 ' + it.final_score_text + ' ✅ подтверждена';
     return h('li', null, h('button', { type: 'button', class: 'row-main', onclick: () => go('#/task/' + it.task_id) },
       h('span', { class: 'row-body' },
-        h('span', { class: 'row-title' }, h('span', { class: 'id' }, '#' + it.task_id), it.title),
+        h('span', { class: 'row-title' }, h('span', { class: 'id' }, '#' + it.task_id), own(it.title)),
         h('span', { class: 'hist-line' }, meta.join(' · ')),
         h('span', { class: 'hist-score' }, score)),
       h('span', { class: 'chev', 'aria-hidden': 'true' }, '›')));
@@ -2680,7 +2818,7 @@
     const known = (items || []).some((u) => String(u.id) === selected);
     return nodes([
       h('option', { value: '' }, 'Все сотрудники'),
-      (items || []).map((u) => h('option', { value: String(u.id) }, u.short_name + (u.position ? ' — ' + u.position : ''))),
+      (items || []).map((u) => h('option', { value: String(u.id) }, own(u.short_name + (u.position ? ' — ' + u.position : '')))),
       selected && !known ? h('option', { value: selected }, 'Сотрудник #' + selected) : null,
     ]);
   }
@@ -2726,7 +2864,7 @@
       h('span', { class: 'ico', 'aria-hidden': 'true' }, icon),
       h('span', { class: 'row-body' },
         h('span', { class: 'row-top' },
-          h('span', { class: 'row-title' }, h('span', { class: 'id' }, '#' + t.id), t.title),
+          h('span', { class: 'row-title' }, h('span', { class: 'id' }, '#' + t.id), own(t.title)),
           h('span', { class: 'row-tail' + (t.overdue ? ' is-bad' : '') }, t.tail)),
         h('span', { class: 'row-sub' }, h('span', { class: 'sr-only' }, statusText(t) + '. '), sub)),
       h('span', { class: 'chev', 'aria-hidden': 'true' }, '›')));
@@ -2760,7 +2898,7 @@
       const isM = card.viewer === 'manager';
       const out = [];
       out.push(h('section', { class: 'card' },
-        h('h2', { class: 'task-title' }, t.title),
+        h('h2', { class: 'task-title' }, own(t.title)),
         h('div', { class: 'pills' },
           pill(t.status_label, statusTone(t)),
           t.status === 'done' && t.final_score_text ? pill('🏁 ' + t.final_score_text, 'good') : null),
@@ -2770,7 +2908,7 @@
       out.push(actionsBlock(card, isM));
       out.push(h('section', { class: 'card' },
         kvBlock('🎯 Ожидаемый результат', t.expected_result),
-        t.plan_text ? line('📊 План:', h('b', { class: 'num' }, t.plan_text)) : null,
+        t.plan_text ? line('📊 План:', h('b', { class: 'num' }, own(t.plan_text))) : null,
         t.description ? kvBlock('💬 Описание', t.description) : null));
       out.push(h('section', { class: 'card' },
         peopleLines(t, isM).map((p) => line(p[0], p[1])),
@@ -2815,7 +2953,7 @@
 
       async function acceptOnCard(btn) {
         btn.disabled = true;
-        btn.textContent = '⏳ Принимаю…';
+        setText(btn, '⏳ Принимаю…');
         try {
           const r = await api(EP.acceptTask, { params: { task_id: t.id } });
           haptic.ok();
@@ -2828,7 +2966,7 @@
         } catch (err) {
           if (!scr.alive) return;
           btn.disabled = false;
-          btn.textContent = '✅ Принял в работу';
+          setText(btn, '✅ Принял в работу');
           reportError(err);
         }
       }
@@ -2864,13 +3002,13 @@
 
   function peopleLines(t, isM) {
     const out = [];
-    if (isM && t.assignee) out.push(['👤 Исполнитель:', t.assignee.short_name + (t.assignee.position ? ', ' + t.assignee.position : '')]);
+    if (isM && t.assignee) out.push(['👤 Исполнитель:', own(t.assignee.short_name + (t.assignee.position ? ', ' + t.assignee.position : ''))]);
     if (t.source === 'employee') {
       out.push(['✋', 'Внесена сотрудником (устное поручение)']);
-      if (t.manager) out.push(['🧑‍💼 Ответственный начальник:', t.manager.short_name]);
+      if (t.manager) out.push(['🧑‍💼 Ответственный начальник:', own(t.manager.short_name)]);
     } else {
-      if (t.created_by) out.push(['🧑‍💼 Постановщик:', t.created_by.short_name]);
-      if (t.manager && t.created_by && t.manager.id !== t.created_by.id) out.push(['🧑‍💼 Ответственный начальник:', t.manager.short_name]);
+      if (t.created_by) out.push(['🧑‍💼 Постановщик:', own(t.created_by.short_name)]);
+      if (t.manager && t.created_by && t.manager.id !== t.created_by.id) out.push(['🧑‍💼 Ответственный начальник:', own(t.manager.short_name)]);
     }
     return out;
   }
@@ -2898,7 +3036,7 @@
         pill(sb.late_text, sb.is_late ? 'bad' : 'good')),
       kvBlock('✅ Что сделано', sb.fact_text),
       sb.result_text ? kvBlock('📈 Результат', sb.result_text) : null,
-      sb.fact_line ? h('p', { class: 'line num' }, sb.fact_line) : null,
+      sb.fact_line ? h('p', { class: 'line num' }, own(sb.fact_line)) : null,
       filesBlock(sb, isM),
       aiBlock(sb, isM),
       decisionBlock(sb),
@@ -2910,7 +3048,7 @@
     if (!files.length) return null;
     const list = h('ul', { class: 'files' }, files.map((f) => h('li', { class: 'file' },
       h('span', { class: 'thumb', 'aria-hidden': 'true' }, KIND_ICONS[f.kind] || '📎'),
-      h('span', { class: 'fname' }, f.name),
+      h('span', { class: 'fname' }, own(f.name)),
       isNum(f.size) ? h('span', { class: 'fsize' }, fileSize(f.size)) : null)));
     let send = null;
     if (isM) {
@@ -2938,7 +3076,7 @@
         return h('div', { class: 'ai-box' },
           h('div', { class: 'ai-label' }, sb.ai.label),
           h('div', { class: 'ai-score' }, sb.ai.score_text),
-          sb.ai.rationale ? h('p', { class: 'ai-why' }, sb.ai.rationale) : null);
+          sb.ai.rationale ? h('p', { class: 'ai-why' }, own(sb.ai.rationale)) : null);
       }
       if (sb.ai_pending) {
         return h('div', { class: 'ai-box', role: 'status' },
@@ -2962,7 +3100,7 @@
         sb.decision_label ? ' — ' + sb.decision_label : ''));
     }
     if (sb.reviewer) {
-      out.push(h('p', { class: 'line small muted' }, '🧑‍💼 Проверка: ' + sb.reviewer.short_name + (sb.reviewed_at ? ', ' + fmtDmHm(sb.reviewed_at) : '')));
+      out.push(h('p', { class: 'line small muted' }, '🧑‍💼 Проверка: ' + own(sb.reviewer.short_name) + (sb.reviewed_at ? ', ' + fmtDmHm(sb.reviewed_at) : '')));
     }
     if (sb.review_comment) out.push(kvBlock('💬 Комментарий начальника', sb.review_comment));
     return h('div', { class: 'decision' }, out);
@@ -2973,8 +3111,8 @@
     return h('details', { class: 'fold', 'data-key': 'history' },
       h('summary', null, h('span', null, '📜 История · ' + events.length)),
       h('div', { class: 'fold-body' }, h('ul', { class: 'events' }, events.map((ev) => h('li', null,
-        h('span', { class: 'when' }, ev.at_local + ' — ' + ev.actor_name),
-        ev.text)))));
+        h('span', { class: 'when' }, ev.at_local + ' — ' + own(ev.actor_name)),
+        own(ev.text))))));
   }
 
   // --- Листы действий над задачей -----------------------------------------------------------
@@ -3090,9 +3228,9 @@
     const tail = ai ? (ai.source === 'ai' ? '🤖 ' : '📐 ') + ai.score_text : '⏳';
     return h('li', null, h('button', { type: 'button', class: 'row-main', onclick: () => go('#/review/' + t.id) },
       h('span', { class: 'row-body' },
-        h('span', { class: 'row-sub row-kicker' }, t.assignee ? t.assignee.short_name : ''),
+        h('span', { class: 'row-sub row-kicker' }, own(t.assignee ? t.assignee.short_name : '')),
         h('span', { class: 'row-top' },
-          h('span', { class: 'row-title' }, h('span', { class: 'id' }, '#' + t.id), t.title),
+          h('span', { class: 'row-title' }, h('span', { class: 'id' }, '#' + t.id), own(t.title)),
           h('span', { class: 'row-tail is-score' },
             h('span', { 'aria-hidden': 'true' }, tail),
             h('span', { class: 'sr-only' }, ai ? 'Предварительная оценка ' + ai.score_text : 'Оценка рассчитывается'))),
@@ -3105,9 +3243,9 @@
   function proposalRow(t) {
     return h('li', null, h('button', { type: 'button', class: 'row-main', onclick: () => go('#/proposal/' + t.id) },
       h('span', { class: 'row-body' },
-        h('span', { class: 'row-sub row-kicker' }, t.assignee ? t.assignee.short_name : ''),
-        h('span', { class: 'row-top' }, h('span', { class: 'row-title' }, h('span', { class: 'id' }, '#' + t.id), t.title)),
-        h('span', { class: 'row-sub' + (t.overdue || Date.parse(t.deadline) <= serverNow() ? ' tone-bad' : '') }, 'срок ' + t.deadline_local)),
+        h('span', { class: 'row-sub row-kicker' }, own(t.assignee ? t.assignee.short_name : '')),
+        h('span', { class: 'row-top' }, h('span', { class: 'row-title' }, h('span', { class: 'id' }, '#' + t.id), own(t.title))),
+        h('span', { class: 'row-sub' + (t.overdue || Date.parse(t.deadline) <= serverNow() ? ' tone-bad' : '') }, 'срок ' + own(t.deadline_local))),
       h('span', { class: 'chev', 'aria-hidden': 'true' }, '›')));
   }
 
@@ -3116,7 +3254,7 @@
   }
 
   function isAlreadyProcessed(err) {
-    return err.status === 400 && /уже обработан/i.test(err.message || '');
+    return err.status === 400 && /уже обработан/i.test(err.ru || '');
   }
 
   function ReviewView(scr, args) {
@@ -3139,7 +3277,7 @@
       if (!t.actions || !t.actions.review || !sb) {
         primary.hide();
         return [
-          h('section', { class: 'card' }, h('h2', { class: 'task-title' }, t.title), h('div', { class: 'pills' }, pill(t.status_label, statusTone(t)))),
+          h('section', { class: 'card' }, h('h2', { class: 'task-title' }, own(t.title)), h('div', { class: 'pills' }, pill(t.status_label, statusTone(t)))),
           emptyState('Результат уже обработан или ещё не сдан.', '✔️'),
           button('Открыть карточку задачи', () => go('#/task/' + t.id, { replace: true }), 'btn-block'),
         ];
@@ -3148,13 +3286,13 @@
       primary.set(canConfirm ? { text: '✅ Подтвердить ' + sb.ai.score_text, onClick: () => confirmScore(t, sb) } : null);
       return [
         h('section', { class: 'card' },
-          h('h2', { class: 'task-title' }, '#' + t.id + ' ' + t.title),
-          h('p', { class: 'line muted mt8' }, '👤 ' + (t.assignee ? t.assignee.short_name : '—') + ' · попытка ' + sb.attempt + ' · вес ' + t.weight + ' %')),
+          h('h2', { class: 'task-title' }, '#' + t.id + ' ' + own(t.title)),
+          h('p', { class: 'line muted mt8' }, '👤 ' + own(t.assignee ? t.assignee.short_name : '—') + ' · попытка ' + sb.attempt + ' · вес ' + t.weight + ' %')),
         h('section', { class: 'card' },
-          kvBlock('🎯 План', t.expected_result, t.plan_text ? line('📊', h('b', { class: 'num' }, t.plan_text)) : null),
+          kvBlock('🎯 План', t.expected_result, t.plan_text ? line('📊', h('b', { class: 'num' }, own(t.plan_text))) : null),
           kvBlock('✅ Факт', sb.fact_text),
           sb.result_text ? kvBlock('📈 Результат', sb.result_text) : null,
-          sb.fact_line ? h('p', { class: 'line num' }, sb.fact_line) : null),
+          sb.fact_line ? h('p', { class: 'line num' }, own(sb.fact_line)) : null),
         h('section', { class: 'card' },
           line('📅 Срок:', fmtFull(sb.deadline_at_submit)),
           h('p', { class: 'line' }, h('span', { class: 'muted' }, '📤 Сдано: '), sb.created_local + ' — ', h('span', { class: sb.is_late ? 'tone-bad' : 'tone-good' }, sb.late_text)),
@@ -3201,8 +3339,8 @@
       return h('section', { class: 'card ai-card', 'aria-label': 'Предварительная оценка' },
         h('div', { class: 'ai-label' }, sb.ai.label),
         h('div', { class: 'kpi-num' }, String(Math.floor(sb.ai.score + 0.5)), h('span', { class: 'unit' }, '%')),
-        sb.ai.rationale ? h('p', { class: 'ai-why' }, sb.ai.rationale) : null,
-        sb.ai.model ? h('p', { class: 'small muted mt8' }, 'Модель: ' + sb.ai.model) : null);
+        sb.ai.rationale ? h('p', { class: 'ai-why' }, own(sb.ai.rationale)) : null,
+        sb.ai.model ? h('p', { class: 'small muted mt8' }, 'Модель: ' + own(sb.ai.model)) : null);
     }
     if (sb.ai_pending) {
       return h('section', { class: 'card ai-card', role: 'status' },
@@ -3345,7 +3483,7 @@
         h('div', { class: 'field', role: 'radiogroup', 'aria-label': 'Срок доработки' },
           h('div', { class: 'label' }, 'Срок доработки'),
           h('label', { class: 'radio-line' + (past ? ' is-disabled' : '') }, keep,
-            h('span', null, '📌 Оставить текущий (' + t.deadline_local + ')',
+            h('span', null, '📌 Оставить текущий (' + own(t.deadline_local) + ')',
               past ? h('span', { class: 'why' }, 'срок уже прошёл — укажите новый') : null)),
           h('label', { class: 'radio-line' }, fresh, h('span', null, '📅 Новый срок'))),
         pickerWrap),
@@ -3372,7 +3510,7 @@
             backToQueue('results');
           } catch (err) {
             primary.update({ progress: false }, 'sheet');
-            if (!err.handled && /срок/i.test(err.message || '') && !isAlreadyProcessed(err)) {
+            if (!err.handled && /срок/i.test(err.ru || '') && !isAlreadyProcessed(err)) {
               haptic.err();
               if (mode !== 'new') {
                 mode = 'new';
@@ -3407,7 +3545,7 @@
       if (!t.actions || !t.actions.approve) {
         primary.hide();
         return [
-          h('section', { class: 'card' }, h('h2', { class: 'task-title' }, t.title), h('div', { class: 'pills' }, pill(t.status_label, statusTone(t)))),
+          h('section', { class: 'card' }, h('h2', { class: 'task-title' }, own(t.title)), h('div', { class: 'pills' }, pill(t.status_label, statusTone(t)))),
           emptyState('Поручение уже обработано.', '✔️'),
           button('Открыть карточку задачи', () => go('#/task/' + t.id, { replace: true }), 'btn-block'),
         ];
@@ -3446,13 +3584,13 @@
           primary.update({ progress: false });
           if (err.handled) return;
           haptic.err();
-          if (/уже обработан/i.test(err.message || '')) {
+          if (/уже обработан/i.test(err.ru || '')) {
             toast(err.message);
             afterMutation();
             backToQueue('proposals');
             return;
           }
-          formErr.replaceChildren(note(err.message, 'bad', /срок/i.test(err.message || '')
+          formErr.replaceChildren(note(err.message, 'bad', /срок/i.test(err.ru || '')
             ? h('div', { class: 'mt8' }, button('✏️ Изменить срок', () => go('#/task/' + t.id + '/edit')))
             : null));
           safely(() => formErr.scrollIntoView({ block: 'center', behavior: scrollBehavior() }));
@@ -3462,14 +3600,14 @@
       primary.set({ text: '✅ Подтвердить поручение', enabled: wp.filled(), onClick: approve });
       return [
         h('section', { class: 'card' },
-          h('h2', { class: 'task-title' }, t.title),
-          h('p', { class: 'line muted mt8' }, '👤 ' + (t.assignee ? t.assignee.short_name : '—') + ' · ✋ внесено сотрудником (устное поручение)'),
+          h('h2', { class: 'task-title' }, own(t.title)),
+          h('p', { class: 'line muted mt8' }, '👤 ' + own(t.assignee ? t.assignee.short_name : '—') + ' · ✋ внесено сотрудником (устное поручение)'),
           h('p', { class: 'deadline-line' }, '📅 ', t.deadline_label)),
         expired ? note('⚠️ Срок поручения уже прошёл — сначала измените срок.', 'bad',
           h('div', { class: 'mt8' }, button('✏️ Изменить срок', () => go('#/task/' + t.id + '/edit')))) : null,
         h('section', { class: 'card' },
           kvBlock('🎯 Ожидаемый результат', t.expected_result),
-          t.plan_text ? line('📊 План:', h('b', { class: 'num' }, t.plan_text)) : null,
+          t.plan_text ? line('📊 План:', h('b', { class: 'num' }, own(t.plan_text))) : null,
           t.description ? kvBlock('💬 Описание', t.description) : null),
         sec('Подтвердить'),
         h('section', { class: 'card' },
@@ -3567,7 +3705,7 @@
     const who = selectField({
       label: 'Сотрудник', required: true, value: d.assignee_id, placeholder: 'Выберите сотрудника',
       requiredText: 'Выберите сотрудника',
-      options: employees.map((u) => ({ value: String(u.id), label: u.short_name + (u.position ? ' — ' + u.position : '') })),
+      options: employees.map((u) => ({ value: String(u.id), label: own(u.short_name + (u.position ? ' — ' + u.position : '')) })),
       onChange: (v) => {
         d.assignee_id = v;
         refreshLoad();
@@ -3795,7 +3933,7 @@
         const t = card.task;
         if (!t.actions || !t.actions.edit) {
           primary.hide();
-          return [emptyState('Эту задачу сейчас изменить нельзя: ' + statusText(t).toLowerCase() + '.', '🔒'),
+          return [emptyState('Эту задачу сейчас изменить нельзя: ' + own(statusText(t).toLowerCase()) + '.', '🔒'),
             button('Открыть карточку задачи', () => go('#/task/' + t.id, { replace: true }), 'btn-block')];
         }
         form = editForm(scr, t);
@@ -3972,8 +4110,8 @@
     });
 
     function problemOf(file) {
-      if (file.size === 0) return 'Пустой файл «' + file.name + '»';
-      if (file.size > maxOne) return 'Файл «' + file.name + '» больше ' + (cfg().max_file_mb || 20) + ' МБ.';
+      if (file.size === 0) return 'Пустой файл «' + own(file.name) + '»';
+      if (file.size > maxOne) return 'Файл «' + own(file.name) + '» больше ' + (cfg().max_file_mb || 20) + ' МБ.';
       return '';
     }
 
@@ -3984,7 +4122,7 @@
           it.url ? h('img', { class: 'thumb', src: it.url, alt: '' }) : h('span', { class: 'thumb', 'aria-hidden': 'true' }, '📄'),
           h('span', { class: 'fname' }, it.file.name),
           h('span', { class: 'fsize' }, fileSize(it.file.size)),
-          h('button', { type: 'button', class: 'x', 'aria-label': 'Убрать файл «' + it.file.name + '»', onclick: () => {
+          h('button', { type: 'button', class: 'x', 'aria-label': 'Убрать файл «' + own(it.file.name) + '»', onclick: () => {
             const [gone] = items.splice(index, 1);
             if (gone && gone.url) URL.revokeObjectURL(gone.url);
             paint();
@@ -3994,15 +4132,15 @@
           } }, '✕'));
       }));
       const total = items.reduce((sum, it) => sum + it.file.size, 0);
-      summary.textContent = items.length
-        ? plural(items.length, 'файл', 'файла', 'файлов') + ' · ' + fileSize(total) + ' из ' + (cfg().max_total_mb || 50) + ' МБ'
-        : 'До ' + maxCount + ' файлов, каждый до ' + (cfg().max_file_mb || 20) + ' МБ, всего до ' + (cfg().max_total_mb || 50) + ' МБ. Файлы сохранятся в чате с ботом.';
-      pick.textContent = items.length ? '📎 Добавить ещё' : '📎 Выбрать файлы';
+      setText(summary, items.length
+        ? plural(items.length, 'файл', 'файла', 'файлов') + ' · ' + own(fileSize(total)) + ' из ' + (cfg().max_total_mb || 50) + ' МБ'
+        : 'До ' + maxCount + ' файлов, каждый до ' + (cfg().max_file_mb || 20) + ' МБ, всего до ' + (cfg().max_total_mb || 50) + ' МБ. Файлы сохранятся в чате с ботом.');
+      setText(pick, items.length ? '📎 Добавить ещё' : '📎 Выбрать файлы');
       pick.disabled = items.length >= maxCount;
     }
 
     function setError(message) {
-      err.textContent = message || '';
+      setText(err, message || '');
     }
 
     function validate() {
@@ -4043,7 +4181,7 @@
         if (!t.actions || !t.actions.submit) {
           primary.hide();
           return [
-            h('section', { class: 'card' }, h('h2', { class: 'task-title' }, t.title), h('div', { class: 'pills' }, pill(t.status_label, statusTone(t)))),
+            h('section', { class: 'card' }, h('h2', { class: 'task-title' }, own(t.title)), h('div', { class: 'pills' }, pill(t.status_label, statusTone(t)))),
             emptyState(NOT_OPEN_TEXTS[t.status] || 'Задача не в работе — сдать результат нельзя.', 'ℹ️'),
             button('📋 К моим задачам', () => go('#/my', { reset: true }), 'btn-block'),
           ];
@@ -4081,7 +4219,7 @@
     });
     const value = isNum(t.plan_value) ? field({
       label: 'Фактическое значение', inputmode: 'decimal', placeholder: 'Например: 110',
-      hint: 'План: ' + (t.plan_text || fmtNum(t.plan_value)),
+      hint: 'План: ' + own(t.plan_text || fmtNum(t.plan_value)),
       check: (v) => {
         if (!v) return '';
         const n = parseLooseNumber(v);
@@ -4160,7 +4298,7 @@
         primary.update({ progress: false, progressText: null });
         if (err.handled) return;
         haptic.err();
-        if (err.status === 413 || /файл/i.test(err.message || '')) {
+        if (err.status === 413 || /файл/i.test(err.ru || '')) {
           files.setError(err.message);
           safely(() => files.focus());
           return;
@@ -4174,13 +4312,13 @@
     primary.set({ text: '📤 Отправить', enabled: false, onClick: send });
 
     const intro = h('section', { class: 'card' },
-      h('h2', { class: 'task-title' }, '📌 Задача #' + t.id + ': ' + t.title),
+      h('h2', { class: 'task-title' }, '📌 Задача #' + t.id + ': ' + own(t.title)),
       h('div', { class: 'mt12' }, kvBlock('🎯 Ожидаемый результат', t.expected_result,
-        t.plan_text ? line('📊 План:', h('b', { class: 'num' }, t.plan_text)) : null)),
+        t.plan_text ? line('📊 План:', h('b', { class: 'num' }, own(t.plan_text))) : null)),
       line('⏳ Срок:', t.deadline_label),
       t.attempts > 0 ? line('🔁', 'Попытка сдачи №' + (t.attempts + 1)) : null);
     const reworkNote = t.status === 'rework'
-      ? note('↩️ Задача возвращена на доработку', 'warn', t.rework_comment ? h('p', { class: 'line pre mt8' }, '💬 Комментарий начальника: ' + t.rework_comment) : null)
+      ? note('↩️ Задача возвращена на доработку', 'warn', t.rework_comment ? h('p', { class: 'line pre mt8' }, '💬 Комментарий начальника: ' + own(t.rework_comment)) : null)
       : null;
     const lateNote = t.overdue ? note('⚠️ Срок уже прошёл — результат будет отмечен как сданный с опозданием.', 'bad') : null;
 
@@ -4262,6 +4400,380 @@
   }
 
   // ---------------------------------------------------------------------------------------------
+  // 17a. Словарь узбекского языка: «скелет» русской строки -> узбекская строка (см. раздел 0a)
+  // ---------------------------------------------------------------------------------------------
+
+  const UZ = {
+    /*UZ-BEGIN*/
+    ", требуют внимания: {}": ", eʼtibor talab qiladi: {}",
+    "KPI по неделям:": "Haftalar boʻyicha KPI:",
+    "KPI: {u}, отметка — {} %": "KPI: {u}, belgi — {} %",
+    "{} % — предлагает AI": "{} % — AI taklifi",
+    "{} %, неделя сотрудника будет перегружена": "{} %, xodimning haftasi ortiqcha yuklanadi",
+    "{} задач": "{} ta vazifa",
+    "{} задача": "{} ta vazifa",
+    "{} задачи": "{} ta vazifa",
+    "{} из {}": "{} / {}",
+    "{} сотрудник": "{} ta xodim",
+    "{} сотрудника": "{} ta xodim",
+    "{} сотрудников": "{} ta xodim",
+    "{} файл · {u} из {} МБ": "{} ta fayl · {u} / {} MB",
+    "{} файла · {u} из {} МБ": "{} ta fayl · {u} / {} MB",
+    "{} файлов · {u} из {} МБ": "{} ta fayl · {u} / {} MB",
+    "· не принята": "· qabul qilinmagan",
+    "· попытка {}": "· {}-urinish",
+    "Активных сотрудников пока нет. Подтвердите заявки в чате с ботом: «👥 Сотрудники».": "Faol xodimlar hali yoʻq. Arizalarni bot bilan chatda tasdiqlang: «👥 Xodimlar».",
+    "Быстрые оценки": "Tezkor baholar",
+    "Быстрый выбор срока": "Muddatni tez tanlash",
+    "В работе": "Bajarilmoqda",
+    "Вернуть на доработку": "Qayta ishlashga qaytarish",
+    "Вес задачи": "Vazifa vazni",
+    "Вес и приоритет: назначит начальник при подтверждении": "Vazn va ustuvorlik: boshliq tasdiqlashda belgilaydi",
+    "Вес — целое число от {} до {}": "Vazn — {} dan {} gacha butun son",
+    "Внесена сотрудником (устное поручение)": "Xodim kiritgan (ogʻzaki topshiriq)",
+    "Внесено самостоятельно": "Oʻzi kiritgan",
+    "Внесите поручение, полученное устно: начальник подтвердит его.": "Ogʻzaki olingan topshiriqni kiriting: boshliq uni tasdiqlaydi.",
+    "Время": "Vaqt",
+    "Все": "Hammasi",
+    "Все сотрудники": "Barcha xodimlar",
+    "Все файлы вместе — не больше {} МБ.": "Barcha fayllar birgalikda {} MB dan oshmasin.",
+    "Вы написали:": "Siz yozdingiz:",
+    "Выберите вес задачи": "Vazifa vaznini tanlang",
+    "Выберите дату кнопкой или в календаре": "Sanani tugma bilan yoki taqvimdan tanlang",
+    "Выберите задачу, по которой сдаёте результат": "Natija topshiriladigan vazifani tanlang",
+    "Выберите значение": "Qiymatni tanlang",
+    "Выберите оценку": "Bahoni tanlang",
+    "Выберите оценку кнопкой или введите число": "Bahoni tugma bilan tanlang yoki son kiriting",
+    "Выберите сотрудника": "Xodimni tanlang",
+    "Выйти без сохранения?": "Saqlamasdan chiqilsinmi?",
+    "Выполнение в срок": "Muddatida bajarish",
+    "Выполнено": "Bajarildi",
+    "Выполнено {}, просрочено {}, в работе {}, на проверке {}": "Bajarildi {}, muddati oʻtgan {}, bajarilmoqda {}, tekshiruvda {}",
+    "Выполнены": "Bajarilgan",
+    "Где лежат материалы": "Materiallar qayerda",
+    "Год": "Yil",
+    "До {} файлов, каждый до {} МБ, всего до {} МБ. Файлы сохранятся в чате с ботом.": "{} tagacha fayl, har biri {} MB gacha, jami {} MB gacha. Fayllar bot bilan chatda saqlanadi.",
+    "Доля задачи в оценке эффективности сотрудника, {}–{} %.": "Vazifaning xodim samaradorligi bahosidagi ulushi, {}–{} %.",
+    "Доступ закрыт": "Kirish yopiq",
+    "Единица измерения плана": "Reja oʻlchov birligi",
+    "Единица измерения — до {} символов": "Oʻlchov birligi — {} belgigacha",
+    "Загрузка…": "Yuklanmoqda…",
+    "Задач в этом периоде нет.": "Bu davrda vazifalar yoʻq.",
+    "Задач нет": "Vazifalar yoʻq",
+    "Задач нет.": "Vazifalar yoʻq.",
+    "Задача": "Vazifa",
+    "Задача #{}": "Vazifa #{}",
+    "Задача не в работе — сдать результат нельзя.": "Vazifa bajarilayotgan holatda emas — natijani topshirib boʻlmaydi.",
+    "Задачи": "Vazifalar",
+    "Закрыть": "Yopish",
+    "Заполните это поле": "Bu maydonni toʻldiring",
+    "Заявка на рассмотрении": "Ariza koʻrib chiqilmoqda",
+    "Изменение задачи": "Vazifani oʻzgartirish",
+    "Изменений нет": "Oʻzgarish yoʻq",
+    "Итоги периода": "Davr yakunlari",
+    "Какой получен результат?": "Qanday natija olindi?",
+    "Квартал": "Chorak",
+    "Команда": "Jamoa",
+    "Комментарий для сотрудника (необязательно)": "Xodim uchun izoh (ixtiyoriy)",
+    "Месяц": "Oy",
+    "Месяц:": "Oy:",
+    "Модель: {u}": "Model: {u}",
+    "Можно приложить не более {} файлов — лишние ({}) не добавлены.": "{} tadan koʻp fayl biriktirib boʻlmaydi — ortiqchalari ({}) qoʻshilmadi.",
+    "Можно приложить не более {} файлов.": "{} tadan koʻp fayl biriktirib boʻlmaydi.",
+    "Мои задачи": "Vazifalarim",
+    "Мой KPI": "Mening KPI",
+    "На подтверждении": "Tasdiqlashda",
+    "На проверке": "Tekshiruvda",
+    "Надиктовать голосом": "Ovoz bilan aytib yozdirish",
+    "Надиктовать:": "Aytib yozdirish:",
+    "Нажмите, скажите задачу по-русски или по-узбекски и нажмите ещё раз — поля заполнятся сами.": "Tugmani bosing, vazifani oʻzbekcha yoki ruscha ayting va yana bosing — maydonlar oʻzi toʻladi.",
+    "Название не может быть пустым": "Nom boʻsh boʻlishi mumkin emas",
+    "Название, сотрудник или #номер": "Nom, xodim yoki #raqam",
+    "Напишите, что нужно доработать": "Nimani qayta ishlash kerakligini yozing",
+    "Напишите, что нужно сделать": "Nima qilish kerakligini yozing",
+    "Например: {}": "Masalan: {}",
+    "Например: {} договоров. Оставьте пустым, если числового плана нет.": "Masalan: {} ta shartnoma. Sonli reja boʻlmasa, boʻsh qoldiring.",
+    "Например: Анализ договоров поставщиков": "Masalan: Yetkazib beruvchilar shartnomalari tahlili",
+    "Например: Подготовлен отчёт и рекомендации по нарушениям": "Masalan: Hisobot va kamchiliklar boʻyicha tavsiyalar tayyorlandi",
+    "Например: Проверено {} договоров, в {} выявлены нарушения": "Masalan: {} ta shartnoma tekshirildi, {} tasida kamchilik aniqlandi",
+    "Например: добавьте расчёт по {} договорам с нарушениями": "Masalan: kamchiligi bor {} ta shartnoma boʻyicha hisobni qoʻshing",
+    "Например: задача больше не актуальна": "Masalan: vazifa endi dolzarb emas",
+    "Например: не хватает расчёта по двум договорам": "Masalan: ikkita shartnoma boʻyicha hisob yetishmaydi",
+    "Например: ссылка на папку или «отправил по почте»": "Masalan: papkaga havola yoki «pochta orqali yubordim»",
+    "Например: эту работу уже выполняет другой сотрудник": "Masalan: bu ishni boshqa xodim bajarmoqda",
+    "Не понял число. Введите, например: {}": "Son tushunarsiz. Masalan, shunday kiriting: {}",
+    "Не удалось загрузить": "Yuklab boʻlmadi",
+    "Неделя": "Hafta",
+    "Неделя:": "Hafta:",
+    "Недостаточно данных для динамики": "Dinamika uchun maʼlumot yetarli emas",
+    "Нет активных сотрудников. Подтвердите заявки в чате: «👥 Сотрудники».": "Faol xodimlar yoʻq. Arizalarni chatda tasdiqlang: «👥 Xodimlar».",
+    "Нет задач для сдачи. Здесь появятся задачи в работе и на доработке.": "Topshiriladigan vazifalar yoʻq. Bu yerda bajarilayotgan va qayta ishlashdagi vazifalar chiqadi.",
+    "Нет связи с сервером. Проверьте интернет и нажмите «Повторить».": "Server bilan aloqa yoʻq. Internetni tekshirib, «Qayta urinish» tugmasini bosing.",
+    "Нечего проверять 🎉": "Tekshiradigan narsa yoʻq 🎉",
+    "Новая": "Yangi",
+    "Новая задача": "Yangi vazifa",
+    "Новый срок": "Yangi muddat",
+    "Новых поручений нет.": "Yangi topshiriqlar yoʻq.",
+    "Нужна регистрация": "Roʻyxatdan oʻtish kerak",
+    "Обновить": "Yangilash",
+    "Ожидаемый результат": "Kutilayotgan natija",
+    "Окончательное решение — за начальником.": "Yakuniy qaror — boshliqda.",
+    "Опишите ожидаемый результат": "Kutilayotgan natijani yozing",
+    "Опишите чуть подробнее, пожалуйста.": "Iltimos, biroz batafsilroq yozing.",
+    "Опишите, что сделано": "Nima qilinganini yozing",
+    "Остановить запись": "Yozishni toʻxtatish",
+    "Отклонить": "Rad etish",
+    "Откройте из Telegram": "Telegramdan oching",
+    "Откройте приложение из Telegram: кнопка «Открыть» в чате с ботом.": "Ilovani Telegramdan oching: bot bilan chatdagi «Ochish» tugmasi.",
+    "Открыть карточку задачи": "Vazifa kartochkasini ochish",
+    "Отменить задачу": "Vazifani bekor qilish",
+    "Отменить задачу #{}? Сотрудник получит уведомление.": "#{} vazifa bekor qilinsinmi? Xodim xabar oladi.",
+    "Отправка": "Yuborish",
+    "Отправка заняла слишком много времени. Проверьте интернет и попробуйте ещё раз.": "Yuborish juda uzoq davom etdi. Internetni tekshirib, qayta urinib koʻring.",
+    "Отправка… {} %": "Yuborilmoqda… {} %",
+    "Оценка рассчитывается": "Baho hisoblanmoqda",
+    "Оценка — число от {} до {}": "Baho — {} dan {} gacha son",
+    "Оценённых задач в периоде пока нет": "Davrda baholangan vazifalar hali yoʻq",
+    "Оценённых задач пока нет.": "Baholangan vazifalar hali yoʻq.",
+    "Очистить поиск": "Qidiruvni tozalash",
+    "Перевыполнено": "Ortigʻi bilan bajarilgan",
+    "Передаю файлы в Telegram…": "Fayllar Telegramga uzatilmoqda…",
+    "Перейти в чат": "Chatga oʻtish",
+    "Перейти на русский язык": "Перейти на русский язык",
+    "Период": "Davr",
+    "План (число)": "Reja (son)",
+    "План: {u}": "Reja: {u}",
+    "Плановое число должно быть больше нуля": "Reja soni noldan katta boʻlishi kerak",
+    "По запросу «{u}» ничего не найдено.": "«{u}» soʻrovi boʻyicha hech narsa topilmadi.",
+    "Подтвердить": "Tasdiqlash",
+    "Подтверждающие материалы": "Tasdiqlovchi materiallar",
+    "Поиск задач": "Vazifalarni qidirish",
+    "Показаны первые {} задач — уточните запрос.": "Dastlabki {} ta vazifa koʻrsatildi — soʻrovni aniqlashtiring.",
+    "Показатели периода": "Davr koʻrsatkichlari",
+    "Показать ещё": "Yana koʻrsatish",
+    "Попытка {} · {}.{} {}:{}": "{}-urinish · {}.{} {}:{}",
+    "Попытка сдачи №{}": "{}-topshirish urinishi",
+    "Поручение": "Topshiriq",
+    "Поручение сотрудника": "Xodim topshirigʻi",
+    "Поручение уже обработано.": "Topshiriq allaqachon koʻrib chiqilgan.",
+    "Поручения": "Topshiriqlar",
+    "Поручения ({})": "Topshiriqlar ({})",
+    "Последние {} недели (до сегодня)": "Oxirgi {} hafta (bugungacha)",
+    "Последние {} недель (до сегодня)": "Oxirgi {} hafta (bugungacha)",
+    "Последние {} неделя (до сегодня)": "Oxirgi {} hafta (bugungacha)",
+    "Поставить {} %": "{} % qoʻyish",
+    "Поставить задачу": "Vazifa qoʻyish",
+    "Предварительная оценка": "Dastlabki baho",
+    "Предварительная оценка {} %": "Dastlabki baho {} %",
+    "Предыдущие попытки · {}": "Oldingi urinishlar · {}",
+    "Предыдущий период": "Oldingi davr",
+    "Принять задачу #{} в работу": "#{} vazifani ishga qabul qilish",
+    "Приоритет": "Ustuvorlik",
+    "Причина (необязательно)": "Sabab (ixtiyoriy)",
+    "Проверка": "Tekshiruv",
+    "Проверка результата": "Natijani tekshirish",
+    "Просрочено": "Muddati oʻtgan",
+    "Просрочены": "Muddati oʻtgan",
+    "Пустой файл «{u}»": "Boʻsh fayl: «{u}»",
+    "Разделы": "Boʻlimlar",
+    "Распознаю речь": "Nutq aniqlanmoqda",
+    "Результат ещё отправляется. Уйти с этого экрана?": "Natija hali yuborilmoqda. Bu ekrandan chiqilsinmi?",
+    "Результат отправлен": "Natija yuborildi",
+    "Результат уже обработан или ещё не сдан.": "Natija allaqachon koʻrib chiqilgan yoki hali topshirilmagan.",
+    "Результаты": "Natijalar",
+    "Результаты ({})": "Natijalar ({})",
+    "Своими словами: что должно получиться. Например: проверить {} договоров и подготовить отчёт о нарушениях": "Oʻz soʻzlaringiz bilan: yakunda nima boʻlishi kerak. Masalan: {} ta shartnomani tekshirib, kamchiliklar haqida hisobot tayyorlash",
+    "Своими словами: что нужно получить. Например: проверить {} договоров и представить отчёт с нарушениями": "Oʻz soʻzlaringiz bilan: nimaga erishish kerak. Masalan: {} ta shartnomani tekshirib, kamchiliklar koʻrsatilgan hisobot taqdim etish",
+    "Своя оценка, %": "Oʻz bahongiz, %",
+    "Своё значение, %": "Oʻz qiymatingiz, %",
+    "Сдать": "Topshirish",
+    "Сдать результат": "Natijani topshirish",
+    "Сдача результата": "Natijani topshirish",
+    "Сдачи результата": "Natija topshirishlar",
+    "Сейчас на неделе: {} %. Рекомендуется, чтобы сумма весов за неделю была ≈{} %.": "Hozir haftada: {} %. Haftalik vaznlar yigʻindisi ≈{} % boʻlishi tavsiya etiladi.",
+    "Сервер долго не отвечает. Проверьте интернет и нажмите «Повторить».": "Server uzoq javob bermayapti. Internetni tekshirib, «Qayta urinish» tugmasini bosing.",
+    "Сессия устарела": "Seans eskirgan",
+    "Следующий период": "Keyingi davr",
+    "Слишком большое число — введите реальное плановое значение": "Son juda katta — haqiqiy reja qiymatini kiriting",
+    "Слишком длинно: {} из {} символов. Сократите, пожалуйста.": "Juda uzun: {} / {} belgi. Iltimos, qisqartiring.",
+    "Слишком коротко": "Juda qisqa",
+    "Сотрудник": "Xodim",
+    "Сотрудник #{}": "Xodim #{}",
+    "Сотрудник получит её в чате с ботом": "Xodim uni bot bilan chatda oladi",
+    "Сотрудник получит уведомление и увидит причину, если вы её укажете.": "Xodim xabar oladi va sababni koʻradi (agar koʻrsatsangiz).",
+    "Сотрудник получит уведомление об отмене.": "Xodim bekor qilinganligi haqida xabar oladi.",
+    "Сотрудники": "Xodimlar",
+    "Сохранить": "Saqlash",
+    "Средняя оценка": "Oʻrtacha baho",
+    "Срок": "Muddat",
+    "Срок доработки": "Qayta ishlash muddati",
+    "Убрать файл «{u}»": "«{u}» faylini olib tashlash",
+    "Укажите плановое число или уберите единицу": "Reja sonini kiriting yoki birlikni olib tashlang",
+    "Укажите срок": "Muddatni koʻrsating",
+    "Файл «{u}» больше {} МБ.": "«{u}» fayli {} MB dan katta.",
+    "Фактическое значение": "Amaldagi qiymat",
+    "Фильтр по статусу": "Holat boʻyicha filtr",
+    "Число не может быть отрицательным": "Son manfiy boʻlishi mumkin emas",
+    "Что нужно доработать?": "Nimani qayta ishlash kerak?",
+    "Что проверять": "Nimani tekshirish",
+    "Что фактически сделано?": "Amalda nima qilindi?",
+    "Экран обновится сам — обычно это занимает до пары минут.": "Ekran oʻzi yangilanadi — odatda bu bir-ikki daqiqa davom etadi.",
+    "Экран обновится сам. Можно не ждать — изменить оценку или вернуть на доработку.": "Ekran oʻzi yangilanadi. Kutmasdan bahoni oʻzgartirish yoki qayta ishlashga qaytarish mumkin.",
+    "Эту задачу сейчас изменить нельзя: {u}.": "Bu vazifani hozir oʻzgartirib boʻlmaydi: {u}.",
+    "Эффективность за период": "Davr samaradorligi",
+    "Эффективность команды": "Jamoa samaradorligi",
+    "в работе": "bajarilmoqda",
+    "вес {} %": "vazn {} %",
+    "вес {} % × {} %": "vazn {} % × {} %",
+    "вес {} % × {} % · ⏰ просрочена": "vazn {} % × {} % · ⏰ muddati oʻtgan",
+    "вес {} % × —": "vazn {} % × —",
+    "вес {} % × — · ⏰ просрочена": "vazn {} % × — · ⏰ muddati oʻtgan",
+    "выполнено": "bajarildi",
+    "ждёт подтверждения начальника": "boshliq tasdigʻini kutmoqda",
+    "задач нет": "vazifalar yoʻq",
+    "на проверке": "tekshiruvda",
+    "напр. {}": "mas. {}",
+    "напр. договоров": "mas. shartnoma",
+    "необязательно": "ixtiyoriy",
+    "нет данных": "maʼlumot yoʻq",
+    "по правилам, без AI": "qoidalar boʻyicha, AIsiz",
+    "просрочено": "muddati oʻtgan",
+    "сдано {}.{} {}:{} ·": "{}.{} {}:{} da topshirilgan ·",
+    "срок {u}": "muddat: {u}",
+    "срок уже прошёл — укажите новый": "muddat oʻtib ketgan — yangisini koʻrsating",
+    "— подтверждена автоматически": "— avtomatik tasdiqlangan",
+    "‹ Назад": "‹ Orqaga",
+    "↩ Вернуть на доработку": "↩ Qayta ishlashga qaytarish",
+    "↩ Возвращено на доработку": "↩ Qayta ishlashga qaytarildi",
+    "↩ На доработку": "↩ Qayta ishlashga",
+    "↩️ Возвратов на доработку:": "↩️ Qayta ishlashga qaytarishlar:",
+    "↩️ Возвращено на доработку": "↩️ Qayta ishlashga qaytarildi",
+    "↩️ Задача возвращена на доработку": "↩️ Vazifa qayta ishlashga qaytarildi",
+    "↩️ доработок: {}": "↩️ qayta ishlash: {}",
+    "↩️ на доработке": "↩️ qayta ishlashda",
+    "↩️ на доработке · возвратов: {}": "↩️ qayta ishlashda · qaytarishlar: {}",
+    "⏳ Вы ещё не подтвердили получение": "⏳ Siz hali qabul qilganingizni tasdiqlamadingiz",
+    "⏳ Готовлю отчёт…": "⏳ Hisobot tayyorlanmoqda…",
+    "⏳ Исполнитель ещё не подтвердил получение": "⏳ Ijrochi hali qabul qilganini tasdiqlamadi",
+    "⏳ Предварительная оценка ещё рассчитывается": "⏳ Dastlabki baho hali hisoblanmoqda",
+    "⏳ Принимаю…": "⏳ Qabul qilinmoqda…",
+    "⏳ Распознаю…": "⏳ Aniqlanmoqda…",
+    "⏳ Срок:": "⏳ Muddat:",
+    "⏳ Формулирую измеримый результат…": "⏳ Oʻlchanadigan natija taʼriflanmoqda…",
+    "⚖️ Вес и приоритет назначаются при подтверждении поручения.": "⚖️ Vazn va ustuvorlik topshiriqni tasdiqlashda belgilanadi.",
+    "⚖️ Вес:": "⚖️ Vazn:",
+    "⚠️ AI не ответил вовремя. Попробуйте ещё раз или сформулируйте результат сами.": "⚠️ AI oʻz vaqtida javob bermadi. Qayta urinib koʻring yoki natijani oʻzingiz taʼriflang.",
+    "⚠️ Произошла ошибка, попробуйте ещё раз": "⚠️ Xatolik yuz berdi, qayta urinib koʻring",
+    "⚠️ С этой задачей будет {} %.": "⚠️ Bu vazifa bilan {} % boʻladi.",
+    "⚠️ Срок поручения уже прошёл — сначала измените срок.": "⚠️ Topshiriq muddati oʻtib ketgan — avval muddatni oʻzgartiring.",
+    "⚠️ Срок уже прошёл — результат будет отмечен как сданный с опозданием.": "⚠️ Muddat oʻtib ketgan — natija kechikib topshirilgan deb belgilanadi.",
+    "⚠️ с опозданием": "⚠️ kechikib",
+    "⚡ Приоритет:": "⚡ Ustuvorlik:",
+    "⛔ заблокирован": "⛔ bloklangan",
+    "✅ Задача #{} поставлена": "✅ #{} vazifa qoʻyildi",
+    "✅ Задача #{} принята в работу": "✅ #{} vazifa ishga qabul qilindi",
+    "✅ Задача уже выполнена и оценена — сдавать результат не нужно.": "✅ Vazifa allaqachon bajarilgan va baholangan — natija topshirish shart emas.",
+    "✅ Оценка: {} %": "✅ Baho: {} %",
+    "✅ Подтвердить": "✅ Tasdiqlash",
+    "✅ Подтвердить {} %": "✅ {} % ni tasdiqlash",
+    "✅ Подтвердить поручение": "✅ Topshiriqni tasdiqlash",
+    "✅ Подтверждено: {} %": "✅ Tasdiqlandi: {} %",
+    "✅ Поручение #{} подтверждено — задача в работе": "✅ #{} topshiriq tasdiqlandi — vazifa ishga olindi",
+    "✅ Принял в работу": "✅ Ishga qabul qildim",
+    "✅ Принять": "✅ Qabul qilish",
+    "✅ Результат отправлен начальнику на проверку. Решение придёт в чат с ботом.": "✅ Natija tekshirish uchun boshliqqa yuborildi. Qaror bot bilan chatga keladi.",
+    "✅ Результат по задаче #{} отправлен начальнику на проверку.": "✅ #{} vazifa boʻyicha natija tekshirish uchun boshliqqa yuborildi.",
+    "✅ Сохранено": "✅ Saqlandi",
+    "✅ Факт": "✅ Fakt",
+    "✅ Формулировка подставлена": "✅ Taʼrif qoʻyildi",
+    "✅ Что сделано": "✅ Nima qilindi",
+    "✏️ Изменить": "✏️ Oʻzgartirish",
+    "✏️ Изменить оценку": "✏️ Bahoni oʻzgartirish",
+    "✏️ Изменить оценку (до {}.{} в {}:{})": "✏️ Bahoni oʻzgartirish ({}.{} {}:{} gacha)",
+    "✏️ Изменить срок": "✏️ Muddatni oʻzgartirish",
+    "✔️ Принята": "✔️ Qabul qilindi",
+    "✔️ Принята в работу: {}.{} {}:{}": "✔️ Ishga qabul qilingan: {}.{} {}:{}",
+    "✕ Убрать план": "✕ Rejani olib tashlash",
+    "✨ Сделать измеримым": "✨ Oʻlchanadigan qilish",
+    "❌ Отклонить": "❌ Rad etish",
+    "❌ Отклонить поручение #{}": "❌ #{} topshiriqni rad etish",
+    "❌ Поручение #{} отклонено": "❌ #{} topshiriq rad etildi",
+    "❌ Поручение отклонено начальником — сдавать результат не нужно.": "❌ Topshiriq boshliq tomonidan rad etilgan — natija topshirish shart emas.",
+    "🎤 Готово — проверьте поля перед отправкой.": "🎤 Tayyor — yuborishdan oldin maydonlarni tekshiring.",
+    "🎤 Готово — проверьте поля. Вес и приоритет выберите сами.": "🎤 Tayyor — maydonlarni tekshiring. Vazn va ustuvorlikni oʻzingiz tanlang.",
+    "🎤 Запись слишком короткая. Нажмите, скажите фразу и нажмите ещё раз.": "🎤 Yozuv juda qisqa. Tugmani bosing, gapni ayting va yana bosing.",
+    "🎤 Микрофон не найден.": "🎤 Mikrofon topilmadi.",
+    "🎤 Надиктовать задачу целиком": "🎤 Vazifani toʻliq aytib yozdirish",
+    "🎤 Надиктовать поручение целиком": "🎤 Topshiriqni toʻliq aytib yozdirish",
+    "🎤 Не удалось включить микрофон. Попробуйте ещё раз или введите текст с клавиатуры.": "🎤 Mikrofonni yoqib boʻlmadi. Qayta urinib koʻring yoki matnni klaviaturadan kiriting.",
+    "🎤 Нет доступа к микрофону. Разрешите микрофон для Telegram в настройках телефона и попробуйте ещё раз.": "🎤 Mikrofonga ruxsat yoʻq. Telefon sozlamalarida Telegram uchun mikrofonga ruxsat bering va qayta urinib koʻring.",
+    "🎯 Ожидаемый результат": "🎯 Kutilayotgan natija",
+    "🎯 План": "🎯 Reja",
+    "🏁 {} % ✅ подтверждена": "🏁 {} % ✅ tasdiqlangan",
+    "🏁 {} % ✏️ изменена": "🏁 {} % ✏️ oʻzgartirilgan",
+    "🏁 Итоговая оценка:": "🏁 Yakuniy baho:",
+    "🏁 Сейчас:": "🏁 Hozir:",
+    "👤 {u} · попытка {} · вес {} %": "👤 {u} · {}-urinish · vazn {} %",
+    "👤 {u} · ✋ внесено сотрудником (устное поручение)": "👤 {u} · ✋ xodim kiritgan (ogʻzaki topshiriq)",
+    "👤 Исполнитель:": "👤 Ijrochi:",
+    "💡 Предлагаемый вес: {} %": "💡 Taklif qilingan vazn: {} %",
+    "💬 Комментарий начальника": "💬 Boshliq izohi",
+    "💬 Комментарий начальника: {u}": "💬 Boshliq izohi: {u}",
+    "💬 Описание": "💬 Tavsif",
+    "📅 Новый срок": "📅 Yangi muddat",
+    "📅 Срок:": "📅 Muddat:",
+    "📈 Результат": "📈 Natija",
+    "📊 План:": "📊 Reja:",
+    "📋 Задачи сотрудника": "📋 Xodim vazifalari",
+    "📋 К моим задачам": "📋 Vazifalarimga",
+    "📌 Задача #{}: {u}": "📌 Vazifa #{}: {u}",
+    "📌 Оставить текущий ({u})": "📌 Joriy muddatni qoldirish ({u})",
+    "📎 Выбрать файлы": "📎 Fayllarni tanlash",
+    "📎 Добавить ещё": "📎 Yana qoʻshish",
+    "📎 Прислать файлы в чат": "📎 Fayllarni chatga yuborish",
+    "📎 Файлы ({})": "📎 Fayllar ({})",
+    "📎 Файлы ({}) — сохранены в чате с ботом": "📎 Fayllar ({}) — bot bilan chatda saqlangan",
+    "📎 Файлы придут в чат с ботом": "📎 Fayllar bot bilan chatga keladi",
+    "📎 Файлы сохранены в чате с ботом": "📎 Fayllar bot bilan chatda saqlangan",
+    "📐 Подсказка без AI": "📐 AIsiz maslahat",
+    "📜 История · {}": "📜 Tarix · {}",
+    "📜 История оценок": "📜 Baholar tarixi",
+    "📝 Оставить как написал": "📝 Yozganimcha qoldirish",
+    "📝 Результат на проверке у начальника. Решение придёт в чат с ботом.": "📝 Natija boshliq tekshiruvida. Qaror bot bilan chatga keladi.",
+    "📝 Результат уже отправлен и ждёт проверки начальника.": "📝 Natija allaqachon yuborilgan va boshliq tekshiruvini kutmoqda.",
+    "📤 Excel-отчёт в чат": "📤 Excel hisobotini chatga",
+    "📤 Отправить": "📤 Yuborish",
+    "📤 Отправить начальнику": "📤 Boshliqqa yuborish",
+    "📤 Отчёт придёт в чат с ботом через несколько секунд.": "📤 Hisobot bir necha soniyada bot bilan chatga keladi.",
+    "📤 Поручение #{} отправлено начальнику на подтверждение": "📤 #{} topshiriq tasdiqlash uchun boshliqqa yuborildi",
+    "📤 Сдано:": "📤 Topshirildi:",
+    "📤 Сдать результат": "📤 Natijani topshirish",
+    "📥 Заявок на доступ: {} — подтвердите в чате («👥 Сотрудники»)": "📥 Kirish uchun arizalar: {} — chatda tasdiqlang («👥 Xodimlar»)",
+    "📥 Поручение ещё не подтверждено начальником — сдать результат можно после подтверждения.": "📥 Topshiriq hali boshliq tomonidan tasdiqlanmagan — natijani tasdiqlangandan keyin topshirish mumkin.",
+    "🔁 Другой вариант": "🔁 Boshqa variant",
+    "🔄 Повторить": "🔄 Qayta urinish",
+    "🔄 Приложение обновилось": "🔄 Ilova yangilandi",
+    "🔍 Проверить результат": "🔍 Natijani tekshirish",
+    "🔴 Высокий": "🔴 Yuqori",
+    "🚫 Задача #{} отменена": "🚫 #{} vazifa bekor qilindi",
+    "🚫 Задача отменена начальником — сдавать результат не нужно.": "🚫 Vazifa boshliq tomonidan bekor qilingan — natija topshirish shart emas.",
+    "🚫 Отменить": "🚫 Bekor qilish",
+    "🚫 Отменить задачу #{}": "🚫 #{} vazifani bekor qilish",
+    "🟡 Средний": "🟡 Oʻrta",
+    "🟢 Низкий": "🟢 Past",
+    "🤖 {} % → 🏁 {} % ✏️ изменена": "🤖 {} % → 🏁 {} % ✏️ oʻzgartirilgan",
+    "🤖 Измеримая формулировка": "🤖 Oʻlchanadigan taʼrif",
+    "🤖 Предварительной оценки AI нет.": "🤖 AIning dastlabki bahosi yoʻq.",
+    "🤖 Предварительной оценки нет — выставьте оценку сами.": "🤖 Dastlabki baho yoʻq — bahoni oʻzingiz qoʻying.",
+    "🧑‍💼 Ответственный начальник:": "🧑‍💼 Masʼul boshliq:",
+    "🧑‍💼 Постановщик:": "🧑‍💼 Vazifa qoʻyuvchi:",
+    "🧑‍💼 Проверка: {u}": "🧑‍💼 Tekshirdi: {u}",
+    "🧑‍💼 Проверка: {u}, {}.{} {}:{}": "🧑‍💼 Tekshirdi: {u}, {}.{} {}:{}",
+    "🧮 Вошли в расчёт": "🧮 Hisobga kirganlar",
+    /*UZ-END*/
+  };
+
+  // ---------------------------------------------------------------------------------------------
   // 18. Запуск
   // ---------------------------------------------------------------------------------------------
 
@@ -4301,6 +4813,7 @@
       if (!err.handled) showBootError(err);
       return;
     }
+    if (me && me.lang) setLang(me.lang);
     if (!me || me.access !== 'active') {
       showBlocking((me && me.access) || 'session', (me && me.message) || T.generic);
       return;
@@ -4370,6 +4883,9 @@
     });
     watchKeyboard();
 
+    // До ответа сервера язык — по Telegram; дальше — выбранный человеком (Me.lang).
+    const tgUser = tg && tg.initDataUnsafe ? tg.initDataUnsafe.user : null;
+    setLang(tgUser && String(tgUser.language_code || '').toLowerCase().slice(0, 2) === 'uz' ? 'uz' : 'ru');
     auth.initData = resolveInitData();
     if (!auth.initData) {
       showBlocking('outside', T.openFromTelegram);

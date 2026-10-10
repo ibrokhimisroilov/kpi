@@ -99,6 +99,83 @@ _DAY_OF_MONTH_RE = re.compile(r"(\d{1,2})(?:\s*-?\s*(?:го|е|ое))?\s+чис�
 _YEAR_SUFFIX_RE = re.compile(r"(\d{4})\s*г(?:ода|\.)?(?=\s|$)")
 
 
+# --- Узбекский (SPEC.md §14): фраза приводится к русской, дальше — общий разбор ----------------------
+
+_APOSTROPHES = str.maketrans({char: "'" for char in "ʻʼ‘’`´"})
+# Узбекская кириллица -> латиница, только слова о сроках.
+_UZ_CYRILLIC = {
+    "бугун": "bugun", "эртага": "ertaga", "индинга": "indinga",
+    "душанба": "dushanba", "сешанба": "seshanba", "чоршанба": "chorshanba", "пайшанба": "payshanba",
+    "жума": "juma", "шанба": "shanba", "якшанба": "yakshanba",
+    "кундан": "kundan", "ҳафтадан": "haftadan", "хафтадан": "haftadan", "ойдан": "oydan", "соатдан": "soatdan",
+    "кейин": "keyin", "сўнг": "so'ng", "охири": "oxiri", "охиригача": "oxirigacha", "ой": "oy", "ҳафта": "hafta",
+    "хафта": "hafta", "йил": "yil", "куни": "kuni", "соат": "soat", "гача": "gacha", "келаси": "kelasi",
+    "кейинги": "keyingi", "бир": "bir", "икки": "ikki", "уч": "uch",
+}
+_UZ_HINT_RE = re.compile(
+    r"bugun|erta|indin|shanba|juma|keyin|so'ng|oxir|gacha|kuni|soat|yil|ichida|"
+    r"yanvar|fevral|mart|aprel|may|iyun|iyul|avgust|sent[ay]|okt[ay]|noyabr|dekabr"
+)
+_UZ_NUMBERS = {
+    "bir": "1", "ikki": "2", "uch": "3", "to'rt": "4", "besh": "5", "olti": "6", "yetti": "7",
+    "sakkiz": "8", "to'qqiz": "9", "o'n": "10",
+}
+_UZ_WEEKDAYS = {
+    "dushanba": "понедельник", "seshanba": "вторник", "chorshanba": "среда", "payshanba": "четверг",
+    "juma": "пятница", "shanba": "суббота", "yakshanba": "воскресенье",
+}
+_UZ_MONTHS = {
+    "yanvar": "января", "fevral": "февраля", "mart": "марта", "aprel": "апреля", "may": "мая", "iyun": "июня",
+    "iyul": "июля", "avgust": "августа", "sentabr": "сентября", "sentyabr": "сентября", "oktabr": "октября",
+    "oktyabr": "октября", "noyabr": "ноября", "dekabr": "декабря",
+}
+_UZ_UNITS = {"kun": "дней", "hafta": "недель", "oy": "месяц", "soat": "часов"}
+_UZ_DAYPARTS = {"ertalab": "утра", "kechqurun": "вечера", "kechki": "вечера", "kechasi": "ночи", "tushdan keyin": "дня"}
+_UZ_MONTH = "|".join(sorted(_UZ_MONTHS, key=len, reverse=True))
+_UZ_CASE = r"(?:gacha|ga|da|ning|ni)?"  # падежные окончания: «jumagacha», «oktabrda»
+_UZ_YEAR_FIRST_RE = re.compile(rf"(\d{{4}})\s*-?\s*yil(?:i|ning|da)?\s+(\d{{1,2}})\s*-?\s*({_UZ_MONTH}){_UZ_CASE}\b")
+_UZ_DATE_RE = re.compile(rf"(\d{{1,2}})\s*-?\s*({_UZ_MONTH}){_UZ_CASE}\b(?:\s+(\d{{4}})\s*-?\s*yil\w*)?")
+_UZ_AFTER_RE = re.compile(
+    r"(\d{1,3}|bir|ikki|uch|to'rt|besh|olti|yetti|sakkiz|to'qqiz|o'n)\s+(kun|hafta|oy|soat)(?:dan\s+(?:keyin|so'ng)|\s+ichida)"
+)
+_UZ_END_RE = re.compile(r"\b(oy|hafta|yil)(?:ning)?\s+oxiri" + _UZ_CASE + r"\b")
+_UZ_WEEKDAY_RE = re.compile(
+    r"(?:\b(kelasi|keyingi|shu)\s+)?\b(dushanba|seshanba|chorshanba|payshanba|yakshanba|shanba|juma)" + _UZ_CASE + r"\b"
+)
+_UZ_HOUR_RE = re.compile(r"\bsoat\s+(\d{1,2})(?::(\d{2}))?(?:\s*(?:da|gacha|ga)\b)?")
+_UZ_DAYPART_RE = re.compile(r"\b(ertalab|kechqurun|kechki|kechasi|tushdan keyin)\s+(в \d{1,2}:\d{2})")
+_UZ_CLOCK_SUFFIX_RE = re.compile(r"(\d{1,2}:\d{2})\s*(?:da|gacha|ga)\b")
+_UZ_FILLER_RE = re.compile(r"\b(?:kuni(?:gacha|ga)?|muddati?|sanasi|gacha|kechi bilan)\b")
+_UZ_GLUED_GACHA_RE = re.compile(r"(?<=[\d.])gacha\b")
+
+
+def _from_uzbek(text: str) -> str:
+    """«ertaga soat 15:00 da», «juma kuni», «5-oktabr», «3 kundan keyin», «oy oxirigacha» — в русские
+    слова, которые понимает общий разбор. Текст без узбекских слов возвращается как есть."""
+    text = text.translate(_APOSTROPHES)
+    text = " ".join(_UZ_CYRILLIC.get(word, word) for word in text.split())
+    if not _UZ_HINT_RE.search(text):
+        return text
+    text = _UZ_YEAR_FIRST_RE.sub(lambda m: f"{m.group(2)} {_UZ_MONTHS[m.group(3)]} {m.group(1)}", text)
+    text = _UZ_DATE_RE.sub(lambda m: f"{m.group(1)} {_UZ_MONTHS[m.group(2)]}" + (f" {m.group(3)}" if m.group(3) else ""), text)
+    text = _UZ_AFTER_RE.sub(lambda m: f"через {_UZ_NUMBERS.get(m.group(1), m.group(1))} {_UZ_UNITS[m.group(2)]}", text)
+    text = _UZ_END_RE.sub(lambda m: "конец " + {"oy": "месяца", "hafta": "недели", "yil": "года"}[m.group(1)], text)
+    text = re.sub(r"\bertagacha\b|\bertaga\b", "завтра", text)
+    text = re.sub(r"\bbugun(?:gacha)?\b", "сегодня", text)
+    text = re.sub(r"\bindin(?:ga)?\b", "послезавтра", text)
+    text = _UZ_WEEKDAY_RE.sub(
+        lambda m: ({"kelasi": "следующая ", "keyingi": "следующая ", "shu": "эта "}.get(m.group(1) or "", ""))
+        + _UZ_WEEKDAYS[m.group(2)],
+        text,
+    )
+    text = _UZ_HOUR_RE.sub(lambda m: f"в {m.group(1)}:{m.group(2) or '00'}", text)
+    text = _UZ_DAYPART_RE.sub(lambda m: f"{m.group(2)} {_UZ_DAYPARTS[m.group(1)]}", text)
+    text = _UZ_CLOCK_SUFFIX_RE.sub(r"\1", text)
+    text = _UZ_GLUED_GACHA_RE.sub("", text)
+    text = _UZ_FILLER_RE.sub(" ", text)
+    return " ".join(text.split())
+
+
 # --- Общие хелперы ---------------------------------------------------------------------------
 
 
@@ -120,6 +197,7 @@ def _default_time() -> time:
 def _normalize(text: str) -> str:
     text = text.lower().replace("ё", "е")
     text = re.sub(r"[,;«»\"!?]", " ", text)
+    text = _from_uzbek(text)
     text = re.sub(r"не\s+(?:позднее|позже)", " ", text)
     text = _YEAR_SUFFIX_RE.sub(r"\1", text)
     return " ".join(text.split())

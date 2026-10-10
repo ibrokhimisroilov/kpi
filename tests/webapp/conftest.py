@@ -365,6 +365,7 @@ async def ma(
 ) -> AsyncIterator[MiniApp]:
     """Бот (чат) + Mini App на одном боте и одной базе, aiohttp TestClient."""
     from bot.db.base import make_sessionmaker
+    from bot.i18n.telegram import install as install_i18n
     from bot.main import build_dispatcher, default_storage
     from bot.webapp import setup_webapp
 
@@ -373,6 +374,7 @@ async def ma(
     release_bot_routers()
     dp = build_dispatcher(sessionmaker, storage)
     bot = Bot(TOKEN, session=FakeSession(), default=DefaultBotProperties(parse_mode="HTML"))
+    install_i18n(bot)  # как в bot.main
     harness = BotHarness(dp, bot, sessionmaker)
     static_dir = write_static(tmp_path / "static")
     app = web.Application()

@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
+from bot import i18n
 from bot.db.models import (
     OPEN_STATUSES,
     Attachment,
@@ -155,7 +156,13 @@ def _plain(text: str | None) -> str | None:
     в чате уже «&lt;b&gt;» — снова становится текстом «<b>»)."""
     if text is None:
         return None
-    return html.unescape(_TAG_RE.sub("", text))
+    # Сначала перевод (строки каталога — с тегами чата), потом теги убираются; метки снимает перевод.
+    return html.unescape(_TAG_RE.sub("", i18n.tr(text)))
+
+
+def _t(text: str | None) -> str | None:
+    """Подпись бота без HTML — на язык запроса (SPEC.md §14); слова пользователя сюда не передаются."""
+    return i18n.tr(text) if text else text
 
 
 def _value(item: Any) -> Any:
@@ -163,7 +170,7 @@ def _value(item: Any) -> Any:
 
 
 def kpi_text(value: float | None) -> str:
-    return fmt_pct(value) if value is not None else KPI_NO_DATA
+    return fmt_pct(value) if value is not None else i18n.tr(KPI_NO_DATA)
 
 
 def short_name(full_name: str) -> str:
@@ -221,14 +228,14 @@ def task_row(task: Task | TaskRowData, now: datetime) -> dict[str, Any]:
         "id": task.id,
         "title": task.title,
         "status": status.value,
-        "status_label": render.status_label(task, now),  # type: ignore[arg-type]
+        "status_label": _t(render.status_label(task, now)),  # type: ignore[arg-type]
         "overdue": task.is_open and task.deadline < now,
         "priority": _value(task.priority),
-        "priority_label": render.PRIORITY_LABELS.get(Priority(task.priority), str(task.priority)),
+        "priority_label": _t(render.PRIORITY_LABELS.get(Priority(task.priority), str(task.priority))),
         "weight": task.weight,
         "source": _value(task.source),
         "deadline": iso(task.deadline),
-        "deadline_local": fmt_datetime(task.deadline),
+        "deadline_local": _t(fmt_datetime(task.deadline)),
         "tail": _plain(render._line_tail(task, now)),  # type: ignore[arg-type]  # noqa: SLF001 - подпись чата
         "assignee": assignee,
         "accepted": task.accepted_at is not None,
@@ -267,6 +274,7 @@ def actions(task: Task, viewer: User) -> dict[str, Any]:
         "review_submission_id": last.id if review and last is not None else None,
         "revise": revise,
         "revise_submission_id": last.id if revise and last is not None else None,
+        # «03.10 в 12:00» — приложение вставляет это в свою фразу и переводит её целиком.
         "revise_until_text": render.auto_when(revise_until) if revise_until is not None else None,
         "approve": manager and status == TaskStatus.PROPOSED,
         "reject": manager and status == TaskStatus.PROPOSED,
@@ -315,7 +323,7 @@ def task_detail(task: Task, viewer: User, now: datetime) -> dict[str, Any]:
         "plan_value": task.plan_value,
         "plan_unit": task.plan_unit,
         "plan_text": plan_text,
-        "deadline_label": render.deadline_label(task, now),
+        "deadline_label": _t(render.deadline_label(task, now)),
         "created_at": iso(task.created_at),
         "updated_at": iso(task.updated_at),
         "accepted_at": iso(task.accepted_at),
@@ -324,7 +332,7 @@ def task_detail(task: Task, viewer: User, now: datetime) -> dict[str, Any]:
         "manager": user_ref(task.manager) if task.manager is not None else None,
         "weight_pending": task.status == TaskStatus.PROPOSED,
         # Начальнику: когда поручение / оценка будут приняты без него или почему оценка его ждёт (None — нечего сказать).
-        "auto_note": _auto_note(task, viewer),
+        "auto_note": _t(_auto_note(task, viewer)),
         "ai_score": None if _ai_hidden(task, viewer) else task.ai_score,
         "attempts": len(task.submissions),
         "rework_comment": rework_comment,
@@ -340,7 +348,7 @@ def _attachment(att: Attachment) -> dict[str, Any]:
     return {
         "id": att.id,
         "kind": kind,
-        "name": att.file_name or _ATTACHMENT_NAMES.get(kind, "файл"),
+        "name": att.file_name or _t(_ATTACHMENT_NAMES.get(kind, "файл")),
         "mime_type": att.mime_type,
         "size": att.file_size,
     }
@@ -351,12 +359,13 @@ def _ai(sub: Submission, *, full: bool) -> dict[str, Any]:
     rationale: str | None = None
     if full and sub.ai_rationale:
         # У расчёта по правилам подпись уже в label — в обосновании её не повторяем (как в чате).
-        rationale = render._rules_head(sub.ai_rationale)[1] if rules else sub.ai_rationale  # noqa: SLF001
+        # Расчёт по правилам — текст бота: переводится по предложениям. Слова AI остаются как написаны.
+        rationale = _t(render.rules_sentences(render._rules_head(sub.ai_rationale)[1])) if rules else sub.ai_rationale  # noqa: SLF001
     return {
         "score": sub.ai_score,
         "score_text": fmt_pct(sub.ai_score),
         "source": "rules" if rules else "ai",
-        "label": RULES_LABEL if rules else AI_LABEL,
+        "label": _t(RULES_LABEL if rules else AI_LABEL),
         "rationale": rationale or None,
         "model": sub.ai_model if full else None,
     }
@@ -391,14 +400,15 @@ def submission(task: Task, sub: Submission, *, manager_view: bool) -> dict[str, 
         "deadline_at_submit": iso(sub.deadline_at_submit),
         "is_late": bool(sub.is_late),
         "late_days": float(sub.late_days or 0.0),
-        "late_text": render._late_text(sub),  # noqa: SLF001
+        "late_text": _t(render._late_text(sub)),  # noqa: SLF001
         "attachments": [_attachment(att) for att in sub.attachments],
         "ai": ai,
         "ai_pending": ai_pending,
         "ai_hidden": ai_hidden,
         "decision": decision.value if decision is not None else None,
-        "decision_label": AUTO_DECISION_LABEL if sub.auto_confirmed
-        else DECISION_LABELS.get(decision) if decision is not None else None,
+        "decision_label": _t(
+            AUTO_DECISION_LABEL if sub.auto_confirmed else DECISION_LABELS.get(decision) if decision is not None else None
+        ),
         "auto_confirmed": sub.auto_confirmed,
         "final_score": sub.final_score,
         "final_score_text": fmt_pct(sub.final_score) if sub.final_score is not None else None,
@@ -428,7 +438,7 @@ def event(ev: TaskEvent) -> dict[str, Any]:
         "at": iso(ev.created_at),
         "at_local": _dm_hm(ev.created_at),
         "actor": user_ref(actor) if actor is not None else None,
-        "actor_name": actor.short_name if actor is not None else BOT_ACTOR,
+        "actor_name": actor.short_name if actor is not None else _t(BOT_ACTOR),
         "text": _plain(render._event_phrase(ev)),  # noqa: SLF001 - фраза журнала чата
     }
 
@@ -452,8 +462,8 @@ def period(p: Period, max_back: int) -> dict[str, Any]:
     return {
         "kind": p.kind,
         "offset": p.offset,
-        "label": p.label,
-        "short": p.short,
+        "label": _t(p.label),
+        "short": _t(p.short),
         "start": iso(p.start),
         "end": iso(p.end),
         "has_prev": p.offset > -max_back,

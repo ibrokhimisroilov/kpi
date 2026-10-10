@@ -109,6 +109,14 @@ button:disabled { cursor: default; }
 }
 .screen-head .sub { margin: 4px 0 0; color: var(--hint); font-size: 15px; }
 .screen-head + * { margin-top: 12px; }
+/* Кнопка языка — справа от заголовка главных экранов; подпись — название другого языка. */
+.lang-btn {
+  float: right; display: inline-flex; align-items: center;
+  min-height: 32px; margin: 0 0 4px 8px; padding: 0 12px;
+  background: var(--section); border: 1px solid var(--separator); border-radius: 16px;
+  color: var(--link); font-size: 13px; font-weight: 600; white-space: nowrap;
+}
+.lang-btn:disabled { opacity: .5; }
 
 .back-link {
   display: inline-flex; align-items: center; gap: 4px;

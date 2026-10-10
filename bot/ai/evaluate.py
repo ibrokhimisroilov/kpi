@@ -13,6 +13,7 @@ from typing import Any
 
 from sqlalchemy import inspect as sa_inspect
 
+from bot import i18n
 from bot.ai.base import TRIM_FACT, DataText
 from bot.ai.evidence import EvidenceItem, defuse_markers, evidence_to_parts
 from bot.ai.provider import AIUnavailable, ai_available, ai_purpose, chain_budget_sec, generate_json
@@ -103,7 +104,7 @@ async def evaluate_submission(
         # Назначение «evaluate»: сначала сильные модели (gemini-3.6-flash), попытка — до AI_EVALUATE_TIMEOUT_SEC.
         with ai_purpose("evaluate"):
             data, model = await generate_json(
-                system=_system_prompt(settings),
+                system=_system_prompt(settings, _reader_lang(task)),
                 parts=_build_parts(task, submission, evidence or []),
                 schema=_schema(settings),
                 max_output_tokens=_MAX_OUTPUT_TOKENS,
@@ -145,7 +146,23 @@ def _late_days(submission: Submission) -> float:
 # --- Запрос к AI -----------------------------------------------------------------------
 
 
-def _system_prompt(settings: Settings) -> str:
+def _reader_lang(task: Task) -> str:
+    """Язык начальника, который прочитает обоснование (SPEC.md §14); неизвестен — русский."""
+    state = sa_inspect(task, raiseerr=False)
+    for attr in ("manager", "created_by"):
+        if state is not None and attr in state.unloaded:
+            continue
+        person = getattr(task, attr, None)
+        if person is not None and getattr(person, "is_manager", False):
+            return i18n.normalize(person.lang) if person.lang else i18n.lang_of(person.tg_id)
+    return i18n.RU
+
+
+_RATIONALE_LANG = {i18n.RU: "по-русски", i18n.UZ: "по-узбекски (латиницей)"}
+
+
+def _system_prompt(settings: Settings, lang: str = i18n.RU) -> str:
+    in_lang = _RATIONALE_LANG.get(lang, _RATIONALE_LANG[i18n.RU])
     per_day = _fmt_number(settings.late_penalty_per_day, 1)
     max_penalty = _fmt_number(settings.late_penalty_max, 1)
     return f"""\
@@ -176,7 +193,7 @@ def _system_prompt(settings: Settings) -> str:
 и коротко отметь попытку в обосновании, чтобы начальник её увидел.
 
 Ответ — JSON:
-- rationale — 2–4 коротких предложения по-русски (до {MAX_RATIONALE_LEN} символов): план и факт, \
+- rationale — 2–4 коротких предложения {in_lang} (до {MAX_RATIONALE_LEN} символов): план и факт, \
 полнота, сроки, подтверждающие материалы;
 - completeness — not_done (не выполнено), partial (частично), full (полностью), exceeded (перевыполнено);
 - score — предлагаемая оценка, %.
@@ -189,7 +206,7 @@ def _schema(settings: Settings) -> dict:
         "properties": {
             "rationale": {
                 "type": "string",
-                "description": f"Обоснование, 2–4 предложения по-русски, до {MAX_RATIONALE_LEN} символов",
+                "description": f"Обоснование, 2–4 предложения на языке из инструкции, до {MAX_RATIONALE_LEN} символов",
             },
             "completeness": {
                 "type": "string",

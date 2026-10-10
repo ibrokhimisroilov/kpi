@@ -557,7 +557,10 @@ async def test_polling_takeover_resets_menu_button(sessionmaker: async_sessionma
     await _run_polling_until_updates(api, sessionmaker, takeover=True)
     [call] = api.menu_calls()
     assert isinstance(call.menu_button, MenuButtonDefault) and call.chat_id is None
-    assert api.names()[:5] == ["GetMe", "GetWebhookInfo", "DeleteWebhook", "SetMyCommands", "SetChatMenuButton"]
+    # Команды ставятся дважды: общий список и список для узбекского языка Telegram.
+    assert api.names()[:6] == [
+        "GetMe", "GetWebhookInfo", "DeleteWebhook", "SetMyCommands", "SetMyCommands", "SetChatMenuButton",
+    ]
 
 
 async def test_polling_takeover_menu_button_error_is_not_fatal(
@@ -675,7 +678,8 @@ async def test_start_inactive_users_get_no_app_button(
         await h.seed_user(EMP, full_name, status=status)
     await h.send_command(EMP, "start", first_name="Пётр")
     assert app_buttons(h, EMP) == []
-    assert len(h.messages(EMP)) == 1
+    # Новому человеку перед анкетой приходит ещё и выбор языка.
+    assert len(h.messages(EMP)) == (1 if status is not None else 2)
     if expected is not None:
         assert h.last_text(EMP) == expected
     else:
@@ -720,3 +724,41 @@ async def test_start_app_button_after_registration_approval(chat: BotHarness, we
     await h.send_command(EMP, "menu")
     await h.send_command(EMP, "help")
     assert len(app_buttons(h, EMP)) == 1 and len(h.messages(EMP)) == before + 2
+
+
+# --- Кнопка меню чата на языке человека (SPEC.md §14) --------------------------------------------
+
+
+def _menu_buttons(h: BotHarness) -> list[m.SetChatMenuButton]:
+    return [request for request in h.requests if isinstance(request, m.SetChatMenuButton)]
+
+
+async def test_uzbek_user_gets_own_menu_button_and_russian_gets_the_common_one(
+    chat: BotHarness, webhook_env: None
+) -> None:
+    """Выбрал узбекский — кнопка меню его чата «Ochish» открывает то же приложение; вернулся на русский —
+    ему снова показывается общая кнопка бота «Открыть»."""
+    h = chat
+    await h.seed_user(EMP, "Иванов Иван Иванович", position="Юрист")
+    await h.send_command(EMP, "start")
+    assert _menu_buttons(h) == []  # язык не меняли — кнопку не трогаем
+
+    await h.send_command(EMP, "lang")
+    await h.press_button(EMP, "Oʻzbekcha")
+    [call] = _menu_buttons(h)
+    assert call.chat_id == EMP and isinstance(call.menu_button, MenuButtonWebApp)
+    assert call.menu_button.text == "Ochish" and call.menu_button.web_app.url == APP_URL
+
+    await h.send_command(EMP, "lang")
+    await h.press_button(EMP, "Русский")
+    back = _menu_buttons(h)[-1]
+    assert back.chat_id == EMP and isinstance(back.menu_button, MenuButtonDefault)
+
+
+async def test_menu_button_is_left_alone_without_the_app(chat: BotHarness) -> None:
+    """Приложения нет (не webhook) — смена языка кнопку меню не трогает."""
+    h = chat
+    await h.seed_user(EMP, "Иванов Иван Иванович", position="Юрист")
+    await h.send_command(EMP, "lang")
+    await h.press_button(EMP, "Oʻzbekcha")
+    assert _menu_buttons(h) == []

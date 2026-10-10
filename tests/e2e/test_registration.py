@@ -45,6 +45,14 @@ BLOCKED = "Доступ закрыт"
 # --- Хелперы ---------------------------------------------------------------------------------
 
 
+LANG_BUTTONS = ["Русский", "Oʻzbekcha"]
+
+
+def form_messages(h: BotHarness, chat_id: int) -> list:
+    """Сообщения чата без выбора языка: его кнопки живут сами по себе и к анкете не относятся."""
+    return [m for m in h.messages(chat_id) if m.button_texts != LANG_BUTTONS]
+
+
 def _set_admins(monkeypatch: pytest.MonkeyPatch, value: str) -> None:
     monkeypatch.setenv("ADMIN_IDS", value)
     get_settings.cache_clear()
@@ -175,7 +183,7 @@ async def test_full_name_validation_then_position_and_request_to_both_managers(t
     await h.send_sticker(EMP)
     assert "ФИО обычным текстом" in h.last_text(EMP)
     # Кнопки остаются только у последнего вопроса — старые «Отмена» убраны.
-    assert [m.message_id for m in h.messages(EMP) if m.buttons] == [h.last_message(EMP).message_id]
+    assert [m.message_id for m in form_messages(h, EMP) if m.buttons] == [h.last_message(EMP).message_id]
 
     await h.send_text(EMP, "  Иванов   Иван  Иванович ")
     assert "Приятно познакомиться, Иванов Иван Иванович" in h.last_text(EMP)
@@ -193,7 +201,7 @@ async def test_full_name_validation_then_position_and_request_to_both_managers(t
     assert "Ведущий специалист" in log.to(EMP).text
     assert h.reply_keyboard(EMP) is None
     assert await h.get_state(EMP) is None
-    assert not any(m.buttons for m in h.messages(EMP))  # кнопки анкеты больше не нажать
+    assert not any(m.buttons for m in form_messages(h, EMP))  # кнопки анкеты больше не нажать
 
     for manager in (MANAGER_TG_ID, MGR2):
         request = log.to(manager).text
@@ -354,13 +362,13 @@ async def test_cancel_and_restart_in_the_middle_of_questionnaire(app):
     log = await h.send_command(EMP, "start")
     assert "Шаг 1 из 2" in log.text
     assert await h.get_state(EMP) == "RegistrationSG:full_name"
-    assert [m.message_id for m in h.messages(EMP) if m.buttons] == [h.last_message(EMP).message_id]
+    assert [m.message_id for m in form_messages(h, EMP) if m.buttons] == [h.last_message(EMP).message_id]
 
     # /cancel — тоже сброс.
     log = await h.send_command(EMP, "cancel")
     assert "Действие отменено" in log.text
     assert await h.get_state(EMP) is None
-    assert not any(m.buttons for m in h.messages(EMP))
+    assert not any(m.buttons for m in form_messages(h, EMP))
 
     # Текст после отмены — не ФИО, а подсказка.
     log = await h.send_text(EMP, "Сидоров Сидор")

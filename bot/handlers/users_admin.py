@@ -36,7 +36,7 @@ from bot.ui import keyboards, render
 from bot.ui.callbacks import UserCB
 from bot.ui.texts import BTN_STAFF
 from bot.utils.dates import fmt_date
-from bot.utils.text import esc, truncate
+from bot.utils.text import esc, own, truncate
 
 log = logging.getLogger(__name__)
 
@@ -145,7 +145,7 @@ def _button_text(u: User) -> str:
     name = " ".join(u.full_name.split()) or f"ID {u.tg_id}"
     if len(name) > 48:
         name = name[:47] + "…"
-    return f"{_GROUPS[_group(u)][1]} {name}"
+    return f"{_GROUPS[_group(u)][1]} {own(name)}"
 
 
 def _staff_screen(all_users: list[User], page: int) -> tuple[str, InlineKeyboardMarkup]:

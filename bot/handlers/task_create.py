@@ -129,7 +129,11 @@ _PRIORITY_WORDS = (
     ("выс", Priority.HIGH), ("high", Priority.HIGH),
     ("сред", Priority.MEDIUM), ("обыч", Priority.MEDIUM), ("норм", Priority.MEDIUM), ("medium", Priority.MEDIUM),
     ("низ", Priority.LOW), ("low", Priority.LOW),
+    # по-узбекски: «yuqori», «oʻrta», «past»
+    ("yuqori", Priority.HIGH), ("baland", Priority.HIGH), ("o'rta", Priority.MEDIUM), ("orta", Priority.MEDIUM),
+    ("past", Priority.LOW), ("quyi", Priority.LOW),
 )
+_APOSTROPHES = str.maketrans({char: "'" for char in "ʻʼ‘’`´"})
 
 _CANCEL_DATA = PickCB(field="cancel").pack()          # «k:cancel:»
 _BACK_TO_SUMMARY = PickCB(field="field", value="back").pack()
@@ -1269,7 +1273,7 @@ def _parse_weight(text: str) -> int | None:
 
 
 def _priority_from_text(text: str) -> Priority | None:
-    word = text.strip().lstrip("🔴🟡🟢 ").lower()
+    word = text.strip().lstrip("🔴🟡🟢 ").lower().translate(_APOSTROPHES)
     for prefix, priority in _PRIORITY_WORDS:
         if word.startswith(prefix):
             return priority

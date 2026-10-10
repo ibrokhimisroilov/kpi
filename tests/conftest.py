@@ -52,6 +52,9 @@ TEST_ENV: dict[str, str] = {
     "QUIET_HOURS_START": "21",
     "QUIET_HOURS_END": "8",
     "REVIEW_REMINDER_DAYS": "2",
+    # Метки слов пользователя (bot.i18n) в тестах выключены: юнит-тесты сверяют тексты render напрямую.
+    # TEST_I18N_MARKS=true — прогнать набор с метками (проверка, что они не доходят до Telegram и API).
+    "I18N_MARKS": os.environ.get("TEST_I18N_MARKS", "false"),
 }
 os.environ.update(TEST_ENV)
 
@@ -107,9 +110,19 @@ def _test_settings(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
         monkeypatch.setenv(key, value)
     get_settings.cache_clear()
     _reset_ai_state()
+    _reset_languages()
     yield
     get_settings.cache_clear()
     _reset_ai_state()
+    _reset_languages()
+
+
+def _reset_languages() -> None:
+    """Языки людей (bot.i18n) запоминаются в памяти процесса — из теста в тест они не переходят."""
+    i18n = sys.modules.get("bot.i18n")
+    if i18n is not None:
+        i18n.forget_all()
+        i18n.set_current(None)
 
 
 def _reset_ai_state() -> None:

@@ -56,7 +56,7 @@ from bot.ui.callbacks import ListCB, PickCB, SubCB, TaskCB
 from bot.ui.texts import BTN_REVIEW
 from bot.utils import dateparse
 from bot.utils.dates import fmt_deadline, to_local, utcnow
-from bot.utils.text import esc, fmt_num, fmt_pct, parse_percent, plural, truncate
+from bot.utils.text import esc, fmt_num, fmt_pct, own, parse_percent, plural, truncate
 
 log = logging.getLogger(__name__)
 
@@ -394,7 +394,7 @@ async def _review_list(session: AsyncSession, page: int) -> tuple[str, InlineKey
         assignee = task.assignee.short_name if task.assignee is not None else "—"
         kb.row(
             InlineKeyboardButton(
-                text=_short(f"🔍 #{task.id} · {assignee} · {task.title}", 60),
+                text=_short(f"🔍 #{task.id} · {own(assignee)} · {own(task.title)}", 60),
                 callback_data=TaskCB(action="review", task_id=task.id).pack(),
             )
         )

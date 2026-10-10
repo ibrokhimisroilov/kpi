@@ -198,3 +198,58 @@ def test_names_far_year(text: str, far: bool) -> None:
     assert names_far_year(text, NOW_LOCAL) is far
     if far:
         assert parse_deadline(text, NOW_LOCAL) is None
+
+
+# --- Узбекский (SPEC.md §14) --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("ertaga", local(2026, 10, 3)),
+        ("Ertaga soat 15:00 da", local(2026, 10, 3, 15)),
+        ("bugun 17:00 gacha", local(2026, 10, 2, 17)),
+        ("indinga", local(2026, 10, 4)),
+        ("ertaga ertalab soat 9 da", local(2026, 10, 3, 9)),
+        ("ertaga kechqurun soat 6 da", local(2026, 10, 3, 18)),
+        # дни недели: сегодня пятница -> «juma» значит следующая
+        ("juma kuni", local(2026, 10, 9)),
+        ("jumagacha", local(2026, 10, 9)),
+        ("dushanba", local(2026, 10, 5)),
+        ("chorshanba kuni soat 11:00 da", local(2026, 10, 7, 11)),
+        ("kelasi seshanba", local(2026, 10, 6)),
+        ("shanba", local(2026, 10, 3)),
+        # «через …»
+        ("3 kundan keyin", local(2026, 10, 5)),
+        ("bir haftadan keyin", local(2026, 10, 9)),
+        ("ikki haftadan soʻng", local(2026, 10, 16)),
+        ("2 oydan keyin", local(2026, 12, 2)),
+        ("3 kun ichida", local(2026, 10, 5)),
+        # конец месяца и года
+        ("oy oxirigacha", local(2026, 10, 31)),
+        ("oy oxiri", local(2026, 10, 31)),
+        ("yil oxirigacha", local(2026, 12, 31)),
+        # даты: «5-oktabr», с годом и временем
+        ("5-oktabr", local(2026, 10, 5)),
+        ("5 oktabr", local(2026, 10, 5)),
+        ("5-oktabrgacha", local(2026, 10, 5)),
+        ("25-oktyabr soat 14:30", local(2026, 10, 25, 14, 30)),
+        ("2026-yil 15-dekabr", local(2026, 12, 15)),
+        ("15-dekabr 2026-yil", local(2026, 12, 15)),
+        ("05.10 gacha", local(2026, 10, 5)),
+        ("05.10.2026 15:00 gacha", local(2026, 10, 5, 15)),
+        # узбекская кириллица и разные апострофы
+        ("эртага", local(2026, 10, 3)),
+        ("жума куни", local(2026, 10, 9)),
+        ("3 кундан кейин", local(2026, 10, 5)),
+        ("ikki haftadan so'ng", local(2026, 10, 16)),
+    ],
+)
+def test_uzbek_deadlines(text: str, expected: datetime) -> None:
+    """Срок по-узбекски понимается так же, как по-русски: «ertaga», «juma kuni», «5-oktabr», «3 kundan keyin»."""
+    assert parse_deadline(text, NOW_LOCAL) == expected
+
+
+@pytest.mark.parametrize("text", ["qachondir", "keyinroq", "soat", "40-oktabr", "bugun 10:00 gacha"])
+def test_uzbek_unclear_or_past_deadline_is_none(text: str) -> None:
+    assert parse_deadline(text, NOW_LOCAL) is None

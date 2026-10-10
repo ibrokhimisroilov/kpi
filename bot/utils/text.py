@@ -7,6 +7,8 @@ import math
 import re
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 
+from bot import i18n
+
 __all__ = ["esc", "truncate", "fmt_pct", "fmt_num", "plural", "parse_number", "parse_percent", "bar"]
 
 _ELLIPSIS = "…"
@@ -24,10 +26,21 @@ _PERCENT_RE = re.compile(r"\s*([-−]?\d+(?:[.,]\d+)?)\s*(?:%|проц\w*)?\s*",
 
 
 def esc(text: object) -> str:
-    """Экранирует текст для HTML-разметки Telegram. None -> пустая строка."""
+    """Экранирует текст для HTML-разметки Telegram. None -> пустая строка.
+
+    Это слова пользователя (название задачи, ФИО, комментарий): они окружаются невидимыми метками
+    (bot.i18n.mark), чтобы перевод интерфейса на другой язык их не трогал. Метки убираются при отправке.
+    """
     if text is None:
         return ""
-    return html.escape(str(text))
+    return i18n.mark(html.escape(str(text)))
+
+
+def own(text: object) -> str:
+    """Слова пользователя там, где HTML нет (подписи кнопок): те же метки, что у esc(), без экранирования."""
+    if text is None:
+        return ""
+    return i18n.mark(str(text))
 
 
 def _closing_tags(fragment: str) -> str:

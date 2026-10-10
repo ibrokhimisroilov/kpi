@@ -87,7 +87,12 @@ _CHANGE_LABELS = {
     "priority": "приоритет",
     "weight": "вес",
 }
-_PRIORITY_WORDS = (("выс", Priority.HIGH), ("сред", Priority.MEDIUM), ("низ", Priority.LOW))
+_PRIORITY_WORDS = (
+    ("выс", Priority.HIGH), ("сред", Priority.MEDIUM), ("низ", Priority.LOW),
+    # по-узбекски: «yuqori», «oʻrta», «past»
+    ("yuqori", Priority.HIGH), ("baland", Priority.HIGH), ("o'rta", Priority.MEDIUM), ("orta", Priority.MEDIUM),
+    ("past", Priority.LOW), ("quyi", Priority.LOW),
+)
 
 # Ключи FSM-данных этого модуля.
 K_TASK = "tv_task_id"
@@ -316,7 +321,7 @@ def _from_notification(callback: CallbackQuery) -> bool:
     msg = callback.message
     if not isinstance(msg, Message) or msg.text is None:
         return False
-    return not msg.text.startswith(_OWN_SCREENS)
+    return not msg.text.startswith(_OWN_SCREENS)  # значки экранов одинаковы на обоих языках
 
 
 # --- Списки -----------------------------------------------------------------------------------
@@ -620,10 +625,13 @@ def _parse_weight(text: str) -> int | None:
     return value if 1 <= value <= 100 else None
 
 
+_APOSTROPHES = str.maketrans({char: "'" for char in "ʻʼ‘’`´"})
+
+
 def _parse_priority(text: str) -> Priority | None:
     """«высокий», «🔴 Высокий», «низкий» -> приоритет. Слово должно начинаться с основы:
     «невысокий» — не «высокий» (лучше переспросить, чем поставить противоположное)."""
-    low = (text or "").strip().lstrip("🔴🟡🟢 ").lower()
+    low = (text or "").strip().lstrip("🔴🟡🟢 ").lower().translate(_APOSTROPHES)
     for prefix, priority in _PRIORITY_WORDS:
         if low.startswith(prefix):
             return priority

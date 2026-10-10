@@ -22,18 +22,22 @@ BTN_MY_KPI = "📈 Моя эффективность"
 
 # --- Общие ---
 BTN_HELP = "❓ Помощь"
+# Выбор языка интерфейса (bot.handlers.language). Надпись одна на обоих языках — её видно при любом.
+BTN_LANG = "🌐 Til / Язык"
+TXT_CHOOSE_LANG = "🌐 Выберите язык / Tilni tanlang:"
 
 MANAGER_MENU_LAYOUT: list[list[str]] = [
     [BTN_NEW_TASK, BTN_TEAM],
     [BTN_REVIEW, BTN_PROPOSALS],
     [BTN_TASKS, BTN_STAFF],
     [BTN_EXPORT, BTN_HELP],
+    [BTN_LANG],
 ]
 
 EMPLOYEE_MENU_LAYOUT: list[list[str]] = [
     [BTN_MY_TASKS, BTN_PROPOSE],
     [BTN_SUBMIT, BTN_MY_KPI],
-    [BTN_HELP],
+    [BTN_HELP, BTN_LANG],
 ]
 
 MENU_BUTTONS: frozenset[str] = frozenset(

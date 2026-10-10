@@ -7,10 +7,12 @@
 from __future__ import annotations
 
 import math
+import re
 from collections.abc import Callable, Iterable, Sequence
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
+from bot import i18n
 from bot.config import get_settings
 from bot.db.models import (
     Attachment,
@@ -80,6 +82,8 @@ _HISTORY_PAGE_SIZE = 10    # совпадает с keyboards.history_kb и servi
 _MAX_LIST_ITEMS = 8        # сколько элементов показывать в коротких перечнях
 _SYSTEM_ACTOR = "🤖 Бот"
 _RULES_LABEL = "Расчёт по правилам"  # начало обоснования оценки без AI (SPEC 4.3)
+# Границы предложений в расчёте по правилам (bot.ai.evaluate.rules_score): перед «Сдано …» и «Итог: …».
+_RULES_SENTENCE_RE = re.compile(r"(?<=\.) (?=Сдано |Итог: )")
 # Если сообщение не влезает в лимит, длинные пользовательские поля сжимаются по этим ступеням —
 # чтобы обрезался текст сотрудника, а не строки «Сдано … с опозданием», «AI предлагает», «Срок».
 _SHRINK_STEPS = (1.0, 0.7, 0.45, 0.25)
@@ -355,6 +359,12 @@ def _rules_head(rationale: str) -> tuple[str, str]:
     return _RULES_LABEL, rationale
 
 
+def rules_sentences(text: str) -> str:
+    """Объяснение расчёта по правилам — несколько предложений бота в одной строке: между ними ставится
+    невидимая граница, чтобы перевод искал в каталоге каждое предложение отдельно."""
+    return _RULES_SENTENCE_RE.sub(" " + i18n.sentence_break(), text)
+
+
 def _ai_lines(sub: Submission, *, with_rationale: bool, scale: float = 1.0, task: Task | None = None) -> list[str]:
     if sub.ai_score is None:
         if task is not None and task.status == TaskStatus.SUBMITTED and sub.decision is None:
@@ -363,12 +373,16 @@ def _ai_lines(sub: Submission, *, with_rationale: bool, scale: float = 1.0, task
         return ["⏳ Предварительная оценка ещё не рассчитана"]
     rationale = sub.ai_rationale or ""
     if sub.ai_source == "rules":
+        # Расчёт по правилам — текст самого бота (не слова пользователя): без меток, чтобы он переводился.
         label, rationale = _rules_head(rationale)
-        lines = [f"📐 {esc(label)}: <b>{fmt_pct(sub.ai_score)}</b>"]
+        lines = [f"📐 {i18n.strip_marks(esc(label))}: <b>{fmt_pct(sub.ai_score)}</b>"]
     else:
         lines = [f"🤖 AI предлагает: <b>{fmt_pct(sub.ai_score)}</b>"]
     if with_rationale and rationale:
-        lines.append(f"<i>{_clip_long(rationale, _scaled(1200, scale))}</i>")
+        body = _clip_long(rationale, _scaled(1200, scale))
+        if sub.ai_source == "rules":
+            body = rules_sentences(i18n.strip_marks(body))
+        lines.append(f"<i>{body}</i>")
     return lines
 
 
@@ -852,7 +866,7 @@ def employee_card(
     lines = [f"👤 <b>{_clip(user.full_name, 200)} — {_kpi_text(selected.kpi)}</b>"]
     if user.position:
         lines.append(f"💼 {_clip(user.position, 200)}")
-    lines.append(f"📅 {esc(period.label) if period is not None else 'Текущая неделя'}")
+    lines.append(f"📅 {period.label if period is not None else 'Текущая неделя'}")
     if selected.kpi is not None:
         lines.append(bar(selected.kpi))
     lines += ["", *_kpi_stat_lines(selected), *_kpi_items_lines(selected)]
@@ -872,7 +886,7 @@ def _team_entry(index: int, user: User, res: KpiResult) -> str:
 def team_dashboard(period: Period, rows: list[tuple[User, KpiResult]], team_value: float | None) -> str:
     """Дашборд команды: KPI команды, итоги и строка на каждого сотрудника."""
     lines = [
-        f"📊 <b>Команда · {esc(period.label)}</b>",
+        f"📊 <b>Команда · {period.label}</b>",
         f"Эффективность команды: <b>{_kpi_text(team_value)}</b>",
     ]
     if rows:
@@ -1066,6 +1080,6 @@ def help_text(user: User | None) -> str:
         "",
         *_kpi_help(),
         "",
-        "⌨️ Команды: /menu — меню, /cancel — отменить действие, /help — справка.",
+        "⌨️ Команды: /menu — меню, /cancel — отменить действие, /help — справка, /lang — язык (til).",
     ]
     return _finish(lines)

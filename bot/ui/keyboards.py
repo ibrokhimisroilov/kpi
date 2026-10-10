@@ -20,11 +20,11 @@ from bot.config import get_settings
 from bot.db.models import OPEN_STATUSES, Priority, Role, Submission, Task, TaskStatus, User, UserStatus
 from bot.services import auto
 from bot.ui import texts
-from bot.ui.callbacks import ListCB, PeriodCB, PickCB, SubCB, TaskCB, UserCB
+from bot.ui.callbacks import LangCB, ListCB, PeriodCB, PickCB, SubCB, TaskCB, UserCB
 from bot.ui.render import PRIORITY_LABELS, status_label
 from bot.utils.dateparse import quick_deadline_options
 from bot.utils.dates import utcnow
-from bot.utils.text import fmt_pct
+from bot.utils.text import fmt_pct, own
 
 if TYPE_CHECKING:
     from bot.services.kpi import KpiResult
@@ -142,6 +142,11 @@ def open_app_kb(url: str) -> InlineKeyboardMarkup:
     return _markup([[InlineKeyboardButton(text=BTN_OPEN_APP, web_app=WebAppInfo(url=url))]])
 
 
+def language_kb() -> InlineKeyboardMarkup:
+    """[Русский] [Oʻzbekcha] — выбор языка интерфейса (названия языков не переводятся)."""
+    return _markup([[_btn("Русский", LangCB(lang="ru")), _btn("Oʻzbekcha", LangCB(lang="uz"))]])
+
+
 def cancel_kb() -> InlineKeyboardMarkup:
     return _markup([_cancel_row()])
 
@@ -153,7 +158,7 @@ def skip_cancel_kb(field: str = "skip") -> InlineKeyboardMarkup:
 
 def choose_user_kb(users: list[User], field: str = "assignee") -> InlineKeyboardMarkup:
     """Выбор сотрудника: PickCB(field, str(user.id)), по 2 в ряд."""
-    buttons = [_pick(_short(user.short_name, 32), field, str(user.id)) for user in users]
+    buttons = [_pick(_short(own(user.short_name), 32), field, str(user.id)) for user in users]
     return _markup([*_chunk(buttons, 2), _cancel_row()])
 
 
@@ -366,7 +371,7 @@ def team_kb(rows: list[tuple[User, KpiResult]], kind: str, offset: int) -> Inlin
     в карточке возвращает к ней же.
     """
     people = [
-        [_btn(_short(f"👤 {user.short_name}" + (f" — {fmt_pct(res.kpi)}" if res.kpi is not None else "")),
+        [_btn(_short(f"👤 {own(user.short_name)}" + (f" — {fmt_pct(res.kpi)}" if res.kpi is not None else "")),
               PeriodCB(scope="emp", kind=kind, offset=offset, user_id=user.id))]
         for user, res in rows[:_MAX_USER_BUTTONS]
     ]
@@ -399,8 +404,8 @@ def _task_button_text(task: Task, scope: str) -> str:
     who = ""
     if scope in _SCOPES_WITH_ASSIGNEE and task.assignee is not None:
         surname = (task.assignee.full_name.split() or [""])[0]
-        who = f"{surname} · " if surname else ""
-    return _short(f"{icon} #{task.id} {who}{task.title}")
+        who = f"{own(surname)} · " if surname else ""
+    return _short(f"{icon} #{task.id} {who}{own(task.title)}")
 
 
 def _pager(prev_cb: CallbackData | None, next_cb: CallbackData | None) -> _Row:

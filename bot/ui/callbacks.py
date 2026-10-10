@@ -81,6 +81,12 @@ class ListCB(CallbackData, prefix="l"):
     user_id: DbInt = 0
 
 
+class LangCB(CallbackData, prefix="g"):
+    """Выбор языка интерфейса (handlers/language.py): lang — «ru» | «uz». Работает в любом состоянии диалога."""
+
+    lang: str
+
+
 class PickCB(CallbackData, prefix="k"):
     """Выбор варианта внутри FSM-диалога (приоритет, вес, срок, подтверждение ...).
 

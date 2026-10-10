@@ -27,6 +27,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from bot import i18n
 from bot.ai import evaluate as ai_evaluate
 from bot.ai import progress
 from bot.ai.provider import ai_available
@@ -48,7 +49,7 @@ from bot.ui import keyboards, render
 from bot.ui.callbacks import PickCB, TaskCB
 from bot.ui.texts import BTN_SUBMIT
 from bot.utils.dates import to_local
-from bot.utils.text import esc, fmt_num, parse_number, plural, truncate
+from bot.utils.text import esc, fmt_num, own, parse_number, plural, truncate
 
 log = logging.getLogger(__name__)
 
@@ -112,7 +113,7 @@ def _list_text(tasks: list[Task]) -> str:
 async def _refresh_list(callback: CallbackQuery, session: AsyncSession, user: User) -> None:
     """Нажата кнопка из устаревшего списка «Сдать результат» — показать актуальный список."""
     msg = callback.message
-    if not isinstance(msg, Message) or not (msg.text or "").startswith(LIST_TITLE):
+    if not isinstance(msg, Message) or not (msg.text or "").startswith(i18n.variants(LIST_TITLE)):
         return  # напоминание, карточку, уведомление не трогаем
     tasks = await _open_tasks(session, user)
     if tasks:
@@ -139,7 +140,7 @@ def _task_button(task: Task) -> str:
     title = " ".join(task.title.split())
     if len(title) > 40:
         title = title[:39].rstrip() + "…"
-    return f"{icon} {title} · до {to_local(task.deadline):%d.%m}"
+    return f"{icon} {own(title)} · до {to_local(task.deadline):%d.%m}"
 
 
 # --- 1. Начало сдачи (из списка, карточки, напоминания, уведомления о доработке) ------------------
@@ -191,7 +192,7 @@ async def start_submit(
     text = _fit(f"{dropped}\n\n{intro}" if dropped else intro, question)
     # Список «Сдать результат» превращаем в диалог; напоминание, карточку и замечания начальника
     # не трогаем — диалог начинается новым сообщением.
-    if isinstance(msg, Message) and (msg.text or "").startswith(LIST_TITLE):
+    if isinstance(msg, Message) and (msg.text or "").startswith(i18n.variants(LIST_TITLE)):
         sent = await common.edit_or_answer(callback, text, kb)
     else:
         sent = await common.send_new(callback, text, kb)

@@ -734,6 +734,7 @@ HistoryItem = { task_id: int, title: str, weight: int, completed_at: ISO|null, c
 | Метод и путь | Кто | Сервис | Уведомление (как в чате) | RT |
 |---|---|---|---|---|
 | `GET /api/me` | все с валидным initData | `queries.me_counts` | — | 2 |
+| `POST /api/lang` | все с валидным initData | `users.set_lang` (§8.11) | — | 2 |
 | `GET /api/tasks` | M (my/all/emp), E (my) | `queries.list_task_rows` / `search_task_rows` / `tab_counts` | — | 3 (+1 counts) |
 | `GET /api/tasks/{id}` | M; E — только свои | `tasks.get_task`, `tasks.task_events` | — | 5 |
 | `POST /api/ai/formulate` | M, E | `formulate.suggest_expected_result` | — | 1 |
@@ -1061,6 +1062,24 @@ voice_failed` — речь не распознана (текст — `dictate.Vo
 одна запись (`BUSY["voice"]`). `GET /api/me`: `config.voice_enabled` (голос включён и AI доступен) и
 `config.voice_max_sec`.
 
+### 8.11 Язык: `POST /api/lang` и язык ответов
+
+Язык запроса (SPEC.md §14): `users.lang`; не выбран — `language_code` из initData (узбекский запоминается
+у пользователя сразу). `error_middleware` сбрасывает язык в начале каждого запроса (соединение общее),
+`auth_session_middleware` ставит его после входа.
+
+* `GET /api/me` — поля `lang` (`"ru"` | `"uz"`) и `langs` (`[{code, name}]`).
+* `POST /api/lang` `{"lang": "ru" | "uz"}` → `{"lang": …}`; доступен всем с валидным initData (и до
+  подтверждения заявки); меняет язык и в чате. Другое значение или лишние поля — `400`.
+* Подписи, которые строит сервер, приходят на языке пользователя: `status_label`, `priority_label`,
+  `deadline_label`, `deadline_local`, `tail`, `auto_note`, `late_text`, `fact_line`, `decision_label`,
+  `ai.label`, обоснование расчёта по правилам, `events[].text`, `actor_name` бота, `period.label/short`,
+  `kpi_text`, `week_label`, `deadline_options[].label`, `message`, `notice`. Слова пользователя (`title`,
+  ФИО, тексты сдачи, комментарии) и обоснование AI не переводятся. `revise_until_text` остаётся
+  «03.10 в 12:00» — приложение вставляет его в свою фразу.
+* Ошибки: `error` — на языке пользователя; если текст переведён, рядом `ru` — тот же текст по-русски.
+* Невидимые метки слов пользователя в JSON не попадают (`_dumps`).
+
 ## 9. Общий конвейер сдачи (`bot/services/submission_flow.py`, CORE)
 
 Вынести из `bot/handlers/task_submit.py` всё, что идёт **после** `submit_result` + commit, чтобы чат
@@ -1194,7 +1213,7 @@ def kpi_in(snaps: Sequence[tuple[int, TaskSnapshot]], start: datetime, end: date
 
 ### 11.1 Файлы и ограничения
 
-* `index.html` (≤ 4 КБ), `app.css` (≤ 40 КБ), `app.js` (≤ 200 КБ) — без сборки, без модулей
+* `index.html` (≤ 4 КБ), `app.css` (≤ 40 КБ), `app.js` (≤ 256 КБ, вместе со словарём узбекского языка) — без сборки, без модулей
   (`<script defer>`), без сторонних библиотек и шрифтов; иконки — эмодзи (как в чате).
 * `index.html`: `<html lang="ru">`, `<meta charset="utf-8">`,
   `<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">`
@@ -1519,6 +1538,24 @@ MainButton «📤 Отправить начальнику» → `POST /api/propo
 * Ошибки — тостом: нет доступа («Разрешите микрофон для Telegram в настройках телефона…»), микрофон не
   найден, текст ошибки сервера (422/429/413).
 
+### 11.12 Язык интерфейса
+
+Тексты SPA написаны по-русски; для узбекского переводятся на выходе (SPEC.md §14): `tr()` вызывается в
+`appendKids` (текстовые узлы), `setProps` (`aria-label`, `placeholder`, `title`, `alt`), `setText`,
+MainButton, `confirmDialog`, заголовке окна. Строка → скелет (числа → `{}`, слова из `own()` → `{u}`) →
+словарь `UZ` в конце `app.js` (между `/*UZ-BEGIN*/` и `/*UZ-END*/`). Чего в словаре нет, остаётся как есть.
+
+* `own(value)` — слова пользователя и готовые подписи сервера: название задачи, ФИО, должность, тексты
+  сдачи, комментарии, имена файлов, подпись срока. Составные подписи склеиваются по-русски и переводятся
+  целиком («📌 Задача #5: {u}»); части, которые стоят рядом с подписями сервера, переводятся до склейки
+  (`meta.push(tr('вес 20 %'))`).
+* Язык: до ответа сервера — по `initDataUnsafe.user.language_code`, дальше `Me.lang` (`setLang`).
+* Кнопка «🌐 Oʻzbekcha» / «🌐 Русский» справа от заголовка главных экранов вкладок (`langButton`): `POST
+  /api/lang`, сброс кэша GET, `/api/me`, перерисовка каркаса и экрана. Черновики форм сохраняются.
+* Даты (`humanDate`), размеры файлов и неразрывные пробелы учитывают язык. Логика, зависящая от текста
+  ошибки сервера («срок», «уже обработан», «файл»), смотрит на `ApiError.ru` — русский исходник.
+* Локальная отладка: `window.kpiI18n.misses` — скелеты строк без перевода.
+
 ### 11.10 Доступность
 
 Только нативные `<button>`, `<input>`, `<label for>`; видимый `:focus-visible`; цели касания ≥ 44×44 px (в т.ч. сегменты: `min-height: var(--tap)`);
@@ -1668,7 +1705,7 @@ url=…/app)` (проверка по запросам `FakeSession`/`WebhookApi`
 обе заглушки `__ASSET_VERSION__` и `__KPI_CONFIG__` (в `type="application/json"`), нет `on…=` и
 inline-скриптов с кодом; во всех файлах нет внешних адресов, кроме
 `https://telegram.org/js/telegram-web-app.js`; в `app.js` нет `innerHTML`, `outerHTML`,
-`insertAdjacentHTML`, `document.write`, `eval(`, `new Function`; размеры ≤ 4/40/200 КБ; каждый
+`insertAdjacentHTML`, `document.write`, `eval(`, `new Function`; размеры ≤ 4/40/256 КБ; каждый
 литерал `/api/...` в `app.js` (шаблон `${…}` → параметр, без `?…`) соответствует маршруту из
 `bot.webapp.api.ROUTES`; в `app.css` есть токены §11.3 и блок `:root[data-theme="dark"]`; в `app.js`
 есть подписи всех восьми вкладок.

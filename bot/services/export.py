@@ -2,6 +2,9 @@
 
 Числа пишутся числами (KPI 101.5, а не «102 %»), даты — строками местного времени
 «dd.mm.yyyy HH:MM». Файл собирается в памяти и возвращается байтами.
+
+Язык отчёта — язык того, кто его запросил (bot.i18n, SPEC.md §14): названия листов и колонок, статусы,
+события и подписи журнала проходят через ``_t``; тексты задач и ФИО остаются как написаны.
 """
 
 from __future__ import annotations
@@ -20,6 +23,7 @@ from openpyxl.worksheet.worksheet import Worksheet
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from bot import i18n
 from bot.config import get_settings
 from bot.db.models import (
     EventType,
@@ -114,6 +118,11 @@ _TOP_WRAP = Alignment(vertical="top", wrap_text=True)
 _MIN_WIDTH, _MAX_WIDTH, _MAX_WRAP_WIDTH = 6, 40, 60
 
 
+def _t(text: str | None) -> str | None:
+    """Подпись отчёта (не слова пользователя) — на язык запросившего."""
+    return i18n.tr(text) if text else text
+
+
 @dataclass(frozen=True)
 class _Col:
     title: str
@@ -173,13 +182,13 @@ async def build_report_xlsx(session: AsyncSession, period: Period, now: datetime
     events = await _events(session, [t.id for t in tasks])
 
     wb = Workbook()
-    wb.properties.title = f"Эффективность — {period.label}"
+    wb.properties.title = f"{_t('Эффективность')} — {_t(period.label)}"
     summary = wb.active
-    summary.title = "Сводка"
+    summary.title = _t("Сводка")
     _fill_summary(summary, period, team, now)
-    _write_table(wb.create_sheet("Задачи"), _TASK_COLUMNS, [_task_row(t, now) for t in tasks])
+    _write_table(wb.create_sheet(_t("Задачи")), _TASK_COLUMNS, [_task_row(t, now) for t in tasks])
     titles = {t.id: f"#{t.id} {t.title}" for t in tasks}
-    _write_table(wb.create_sheet("Журнал"), _JOURNAL_COLUMNS, [_event_row(e, titles) for e in events])
+    _write_table(wb.create_sheet(_t("Журнал")), _JOURNAL_COLUMNS, [_event_row(e, titles) for e in events])
 
     buffer = BytesIO()
     wb.save(buffer)
@@ -231,6 +240,7 @@ def _position(user: User) -> str | None:
         note = "сейчас начальник"
     else:
         return user.position
+    note = _t(note)
     return f"{user.position} ({note})" if user.position else f"({note})"
 
 
@@ -239,12 +249,12 @@ def _fill_summary(ws: Worksheet, period: Period, team: list[tuple[User, KpiResul
     _write_table(ws, _SUMMARY_COLUMNS, rows, total=_summary_total(team))
     last_day = period.end - timedelta(seconds=1)
     ws.append([])
-    ws.append([f"Период: {period.label} ({fmt_date(period.start)} – {fmt_date(last_day)})"])
-    ws.append([f"Сформировано: {fmt_datetime(now)}"])
+    ws.append([_t(f"Период: {period.label} ({fmt_date(period.start)} – {fmt_date(last_day)})")])
+    ws.append([_t(f"Сформировано: {fmt_datetime(now)}")])
     note = "KPI % = Σ(вес × оценка) / Σ(вес) по оценённым задачам периода"
     if get_settings().overdue_counts_as_zero:
         note += "; просроченные несданные задачи учитываются как 0 %"
-    ws.append([note + "."])
+    ws.append([_t(note + ".")])
 
 
 def _summary_row(user: User, res: KpiResult) -> list[Any]:
@@ -268,7 +278,7 @@ def _summary_total(team: list[tuple[User, KpiResult]]) -> list[Any]:
     done = sum(r.done for r in results)
     on_time = sum(r.done_on_time for r in results)
     return [
-        "Итого по команде",
+        _t("Итого по команде"),
         None,
         _round(team_kpi(team)),
         sum(r.total for r in results),
@@ -298,11 +308,11 @@ def _task_row(task: Task, now: datetime) -> list[Any]:
         fmt_datetime(last.created_at) if last else None,
         _late_days(task, last, now),
         task.weight,
-        PRIORITY_NAMES.get(task.priority, str(task.priority)),
-        _status_name(task, now),
+        _t(PRIORITY_NAMES.get(task.priority, str(task.priority))),
+        _t(_status_name(task, now)),
         task.ai_score,
         task.final_score,
-        _decision_name(last),
+        _t(_decision_name(last)),
         last.review_comment if last else None,
     ]
 
@@ -326,10 +336,10 @@ def _fact_text(last: Submission | None, unit: str | None) -> str | None:
         return None
     lines = [_value_with_unit(last.fact_value, unit), last.fact_text]
     if last.result_text:
-        lines.append(f"Результат: {last.result_text}")
+        lines.append(f"{_t('Результат')}: {last.result_text}")
     if last.attachments:
         names = ", ".join(a.file_name or str(a.kind) for a in last.attachments)
-        lines.append(f"Файлы: {names}")
+        lines.append(f"{_t('Файлы')}: {names}")
     return "\n".join(line for line in lines if line)
 
 
@@ -346,8 +356,8 @@ def _event_row(event: TaskEvent, titles: dict[int, str]) -> list[Any]:
     return [
         fmt_datetime(event.created_at),
         titles.get(event.task_id, f"#{event.task_id}"),
-        event.actor.full_name if event.actor else "Система",
-        EVENT_NAMES.get(event.type, str(event.type)),
+        event.actor.full_name if event.actor else _t("Система"),
+        _t(EVENT_NAMES.get(event.type, str(event.type))),
         _event_details(event.data or {}),
     ]
 
@@ -361,13 +371,13 @@ def _event_details(data: dict[str, Any]) -> str | None:
         if key == "changes" and isinstance(value, dict):
             lines += [_change_line(field, change) for field, change in value.items()]
         else:
-            lines.append(f"{_DATA_LABELS.get(key, key)}: {_data_value(key, value)}")
+            lines.append(f"{_t(_DATA_LABELS.get(key, key))}: {_data_value(key, value)}")
     text = "\n".join(lines)
     return _clip(text) if text else None
 
 
 def _change_line(field: str, change: Any) -> str:
-    label = _DATA_LABELS.get(field, field)
+    label = _t(_DATA_LABELS.get(field, field))
     if isinstance(change, (list, tuple)) and len(change) == 2:
         old, new = change
         return f"{label}: {_data_value(field, old)} → {_data_value(field, new)}"
@@ -387,18 +397,18 @@ def _data_value(key: str, value: Any) -> str:
     if value is None or value == "":
         return "—"
     if isinstance(value, bool):
-        return "да" if value else "нет"
+        return _t("да" if value else "нет") or ""
     if isinstance(value, (int, float)):
         return _num(value) + (" %" if key in _PERCENT_KEYS else "")
     text = str(value)
     if key == "priority":
-        return PRIORITY_NAMES.get(text, text)
+        return _t(PRIORITY_NAMES.get(text)) or text
     if key == "previous_status":
-        return STATUS_NAMES.get(text, text)
+        return _t(STATUS_NAMES.get(text)) or text
     if key == "source":
-        return _SOURCE_NAMES.get(text, text)
+        return _t(_SOURCE_NAMES.get(text)) or text
     if key == "kind":
-        return _reminder_name(text)
+        return _t(_reminder_name(text)) or text
     if "deadline" in key:
         return _iso_to_local(text)
     return _clip(text)
@@ -442,7 +452,7 @@ def _write_table(
     total: Sequence[Any] | None = None,
 ) -> None:
     """Таблица с жирной шапкой, закреплённой первой строкой, фильтром и шириной по содержимому."""
-    ws.append([col.title for col in columns])
+    ws.append([_t(col.title) for col in columns])
     for row in rows:
         ws.append(list(row))
     if rows:

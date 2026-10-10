@@ -49,7 +49,7 @@ from aiohttp import BodyPartReader, hdrs, web
 from sqlalchemy import ColumnElement, case, false, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from bot import notify
+from bot import i18n, notify
 from bot.ai import dictate, formulate
 from bot.ai import provider as ai_provider
 from bot.config import get_settings
@@ -65,6 +65,7 @@ from bot.db.models import (
     User,
     UserStatus,
 )
+from bot.i18n.telegram import sync_menu_button
 from bot.middlewares import load_user
 from bot.services import export as export_service
 from bot.services import kpi, periods, proposal_flow
@@ -75,7 +76,7 @@ from bot.services.errors import DomainError
 from bot.services.kpi import KpiResult, TaskSnapshot
 from bot.utils import dateparse
 from bot.utils.dates import to_local, to_utc, utcnow
-from bot.utils.text import esc, parse_number
+from bot.utils.text import esc, own, parse_number
 from bot.webapp import CTX, ApiError, WebappContext, auth, pending_tasks, register_webapp
 from bot.webapp import serializers as ser
 from bot.webapp.serializers import HistoryRowData, TaskRowData
@@ -247,7 +248,12 @@ _INT_RE = re.compile(r"-?\d{1,9}")
 _DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
 _LOCAL_DT_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?")
 _TASK_ID_QUERY_RE = re.compile(r"#?(\d{1,10})")
-_dumps = functools.partial(json.dumps, ensure_ascii=False, separators=(",", ":"))
+_json_dumps = functools.partial(json.dumps, ensure_ascii=False, separators=(",", ":"))
+
+
+def _dumps(data: Any) -> str:
+    """JSON ответа; невидимые метки слов пользователя (bot.i18n) наружу не выходят."""
+    return i18n.strip_marks(_json_dumps(data))
 
 
 # Данные запроса, которые кладёт auth_session_middleware.
@@ -261,7 +267,12 @@ def _ok(data: Any, status: int = 200) -> web.Response:
 
 
 def _error(status: int, code: str, message: str) -> web.Response:
-    return web.json_response({"error": message, "code": code}, status=status, dumps=_dumps)
+    # Текст ошибки — на языке запроса (SPEC.md §14); чего нет в каталоге, остаётся по-русски.
+    translated = i18n.tr(message)
+    body = {"error": translated, "code": code}
+    if translated != i18n.strip_marks(message):
+        body["ru"] = message  # приложение узнаёт вид ошибки по русскому тексту
+    return web.json_response(body, status=status, dumps=_dumps)
 
 
 def _bad(message: str) -> ApiError:
@@ -277,7 +288,7 @@ def _session(request: web.Request) -> AsyncSession:
 
 
 def _notice(delivered: object) -> str | None:
-    return None if delivered else NOT_DELIVERED
+    return None if delivered else i18n.tr(NOT_DELIVERED)
 
 
 def _wait_text(seconds: float) -> str:
@@ -931,6 +942,22 @@ async def _weight_load_row(
     return None if row is None else int(row[1] or 0)
 
 
+# --- Язык (SPEC.md §14) --------------------------------------------------------------------------------------
+
+
+def _request_lang(viewer: User | None, init: auth.InitData) -> str:
+    """Язык ответа: выбранный человеком (users.lang); не выбран — язык его Telegram. Узбекский язык Telegram
+    запоминается у пользователя сразу — уведомления в чат тоже пойдут на нём."""
+    if viewer is not None and viewer.lang:
+        lang = i18n.normalize(viewer.lang)
+    else:
+        lang = i18n.from_telegram(init.language_code)
+        if viewer is not None and lang != i18n.RU:
+            viewer.lang = lang
+    i18n.remember(init.tg_id, lang)
+    return lang
+
+
 # --- Middleware (§4.4) --------------------------------------------------------------------------------------
 
 
@@ -938,6 +965,8 @@ def _make_middlewares(ctx: WebappContext) -> list[Any]:
     @web.middleware
     async def error_middleware(request: web.Request, handler: Handler) -> web.StreamResponse:
         started = time.perf_counter()
+        # Соединение (и его контекст) переживает запрос: язык прошлого запроса на новый не переходит.
+        i18n.set_current(None)
         code: str | None = None
         try:
             response = await handler(request)
@@ -994,7 +1023,8 @@ def _make_middlewares(ctx: WebappContext) -> list[Any]:
                 raise ApiError(408, "request_timeout", REQUEST_TIMEOUT) from None
         async with ctx.sessionmaker() as session:
             request[SESSION] = session
-            request[VIEWER] = await load_user(session, init.tg_id)
+            viewer = request[VIEWER] = await load_user(session, init.tg_id)
+            i18n.set_current(_request_lang(viewer, init))
             try:
                 response = await handler(request)
             except Exception:
@@ -1023,7 +1053,10 @@ async def get_me(request: web.Request) -> web.Response:
     return _ok(
         {
             "access": access,
-            "message": message,
+            "message": i18n.tr(message) if message else message,
+            # Язык интерфейса и доступные языки (переключатель в приложении, POST /api/lang).
+            "lang": i18n.current(),
+            "langs": [{"code": code, "name": i18n.LANG_NAMES[code]} for code in i18n.LANGS],
             "user": ser.me_user(viewer) if viewer is not None and access != "unregistered" else None,
             "role": role,
             "now": ser.iso(now),
@@ -1046,11 +1079,26 @@ async def get_me(request: web.Request) -> web.Response:
                 "voice_max_sec": settings.voice_max_sec,
             },
             "deadline_options": [
-                {"label": label, "date": day} for label, day in dateparse.quick_deadline_options()
+                {"label": i18n.tr(label), "date": day} for label, day in dateparse.quick_deadline_options()
             ],
             "counts": counts,
         }
     )
+
+
+async def set_language(request: web.Request) -> web.Response:
+    """POST /api/lang {lang: "ru" | "uz"} — язык интерфейса (чат и приложение); доступно и до подтверждения."""
+    viewer: User | None = request[VIEWER]
+    data = await _body(request, ("lang",))
+    lang = data.get("lang")
+    if lang not in i18n.LANGS:
+        raise _bad("lang: ожидается ru или uz")
+    if viewer is not None:
+        await users_svc.set_lang(_session(request), viewer, lang)
+    i18n.remember(request[INIT].tg_id, lang)
+    i18n.set_current(lang)
+    await sync_menu_button(_ctx(request).bot, request[INIT].tg_id, lang)
+    return _ok({"lang": lang})
 
 
 # --- Задачи (§8.4) -------------------------------------------------------------------------------------------
@@ -1265,7 +1313,7 @@ async def ai_formulate(request: web.Request) -> web.Response:
             "plan_unit": suggestion.plan_unit,
             "note": suggestion.note,
             "source": suggestion.source,
-            "notice": notice,
+            "notice": i18n.tr(notice) if notice else notice,
         }
     )
 
@@ -1401,7 +1449,7 @@ async def create_proposal(request: web.Request) -> web.Response:
         {
             "task": ser.task_detail(task, viewer, utcnow()),
             "notified": count,
-            "notice": None if count else NO_MANAGER_NOTICE.format(task_id=task.id),
+            "notice": None if count else i18n.tr(NO_MANAGER_NOTICE.format(task_id=task.id)),
         },
         status=201,
     )
@@ -1520,7 +1568,7 @@ async def _read_file_part(part: BodyPartReader, upload: _Upload, deadline: _Read
     if not chunk:
         if not raw_name:  # пустое поле выбора файла из обычной формы браузера — не файл (диск не трогаем)
             return
-        raise _bad(f"Пустой файл «{name}»")
+        raise _bad(f"Пустой файл «{own(name)}»")
     if len(upload.files) >= MAX_FILES:
         raise ApiError(413, "too_large", f"Можно приложить не более {MAX_FILES} файлов.")
     content_type = (part.headers.get(hdrs.CONTENT_TYPE) or "").split(";", 1)[0].strip().lower() or None
@@ -1532,7 +1580,7 @@ async def _read_file_part(part: BodyPartReader, upload: _Upload, deadline: _Read
         while chunk:
             size += len(chunk)
             if size > MAX_FILE_BYTES:
-                raise ApiError(413, "too_large", f"Файл «{name}» больше {_mb(MAX_FILE_BYTES)} МБ.")
+                raise ApiError(413, "too_large", f"Файл «{own(name)}» больше {_mb(MAX_FILE_BYTES)} МБ.")
             if upload.total + size > MAX_TOTAL_BYTES:
                 raise ApiError(413, "too_large", f"Все файлы вместе — не больше {_mb(MAX_TOTAL_BYTES)} МБ.")
             handle.write(chunk)
@@ -1641,7 +1689,7 @@ def _attachment_from(message: Message, item: _UploadedFile) -> tasks_svc.Attachm
         media = message.animation or message.audio or message.voice
         if media is None:
             log.warning("API: в ответе Telegram на sendDocument нет файла")
-            raise ApiError(502, "telegram_error", TG_FILE_FAILED.format(name=item.name))
+            raise ApiError(502, "telegram_error", TG_FILE_FAILED.format(name=own(item.name)))
         kind = AttachmentKind.OTHER
     return tasks_svc.AttachmentIn(
         kind=kind,
@@ -1690,7 +1738,7 @@ async def _upload_one(bot: Bot, chat_id: int, item: _UploadedFile, caption: str)
         raise ApiError(502, "telegram_error", TG_BLOCKED) from exc
     except (TelegramAPIError, OSError) as exc:
         log.warning("API: Telegram не принял файл сдачи (%s)", type(exc).__name__)
-        raise ApiError(502, "telegram_error", TG_FILE_FAILED.format(name=item.name)) from exc
+        raise ApiError(502, "telegram_error", TG_FILE_FAILED.format(name=own(item.name))) from exc
 
 
 async def _upload_files(bot: Bot, chat_id: int, task_id: int, files: Sequence[_UploadedFile]) -> list[tasks_svc.AttachmentIn]:
@@ -2068,7 +2116,7 @@ async def export_report(request: web.Request) -> web.Response:
         {
             "status": "started",
             "period": ser.period(period, MAX_BACK_OFFSET),
-            "message": EXPORT_STARTED.format(label=period.label),
+            "message": i18n.tr(EXPORT_STARTED.format(label=period.label)),
         },
         status=202,
     )
@@ -2092,7 +2140,7 @@ async def _export_job(ctx: WebappContext, chat_id: int, period: periods.Period, 
         filename = f"kpi_{period.kind}_{to_local(period.start):%Y%m%d}.xlsx"
         try:
             await bot.send_document(
-                chat_id, BufferedInputFile(data, filename=filename), caption=f"📊 Отчёт: {esc(period.label)}"
+                chat_id, BufferedInputFile(data, filename=filename), caption=f"📊 Отчёт: {period.label}"
             )
         except (TelegramAPIError, OSError) as exc:
             log.warning("Не удалось отправить Excel-отчёт (%s)", type(exc).__name__)
@@ -2129,7 +2177,7 @@ async def weight_load(request: web.Request) -> web.Response:
     return _ok(
         {
             "load": load,
-            "week_label": week.label,
+            "week_label": i18n.tr(week.label),
             "options": [{"weight": weight, "over": load + weight > 100} for weight in WEIGHT_OPTIONS],
         }
     )
@@ -2139,6 +2187,7 @@ async def weight_load(request: web.Request) -> web.Response:
 
 _TABLE: list[tuple[str, str, Handler]] = [
     ("GET", "/me", get_me),
+    ("POST", "/lang", set_language),
     ("GET", "/tasks", list_tasks),
     ("POST", "/tasks", create_task),
     ("GET", "/tasks/{task_id}", get_task),

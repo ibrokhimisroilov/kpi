@@ -31,6 +31,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from bot.db.base import init_db, make_engine, make_sessionmaker
 from bot.ai.evaluate import RULES_PREFIX
+from bot.i18n.telegram import install as install_i18n
 from bot.db.models import DigestLog, JobLog, ReminderLog, Role, Submission, TaskEvent, User, UserStatus
 from bot.scheduler import backup, jobs
 from bot.scheduler.jobs import run_due_jobs
@@ -93,6 +94,7 @@ async def pair(tmp_path: Path) -> AsyncIterator[tuple[Instance, Instance]]:
             engine = make_engine(url)
             await init_db(engine)
             bot = Bot("42:TEST", session=FakeSession(), default=DefaultBotProperties(parse_mode="HTML"))
+            install_i18n(bot)  # как в bot.main
             instances.append(Instance(engine, make_sessionmaker(engine), bot))
         yield instances[0], instances[1]
     finally:

@@ -229,6 +229,11 @@ class Settings(BaseSettings):
     # webhook игнорируется всегда (webapp_debug_active) — на Render отладку включить нельзя.
     webapp_debug: bool = False
 
+    # --- Языки интерфейса (bot.i18n) ---
+    # Метки вокруг слов пользователя в текстах бота: по ним перевод на узбекский отличает название задачи
+    # или ФИО от фраз самого бота. Выключить — интерфейс останется только русским.
+    i18n_marks: bool = True
+
     log_level: str = "INFO"
 
     @field_validator(

@@ -57,8 +57,10 @@ from bot.db.base import (
     normalize_url,
     warm_up,
 )
+from bot.i18n.telegram import LanguageMiddleware, MenuTextMiddleware, install as install_i18n, load_languages
 from bot.handlers import (
     dashboard,
+    language,
     start,
     task_create,
     task_propose,
@@ -194,6 +196,15 @@ _COMMANDS = [
     BotCommand(command="menu", description="Показать меню"),
     BotCommand(command="help", description="Как работает бот"),
     BotCommand(command="cancel", description="Отменить текущее действие"),
+    BotCommand(command="lang", description="Язык / Til"),
+]
+# Те же команды для тех, у кого Telegram на узбекском.
+_COMMANDS_UZ = [
+    BotCommand(command="start", description="Ishni boshlash / bosh menyu"),
+    BotCommand(command="menu", description="Menyuni koʻrsatish"),
+    BotCommand(command="help", description="Bot qanday ishlaydi"),
+    BotCommand(command="cancel", description="Joriy amalni bekor qilish"),
+    BotCommand(command="lang", description="Til / Язык"),
 ]
 
 
@@ -421,9 +432,13 @@ def build_dispatcher(
     )
     dp.update.outer_middleware(DbSessionMiddleware(sessionmaker))
     dp.update.outer_middleware(UserMiddleware())
+    # Язык автора апдейта (bot.i18n): ответы и уведомления переводятся на выходе, по получателю.
+    dp.update.outer_middleware(LanguageMiddleware())
+    dp.message.outer_middleware(MenuTextMiddleware())  # кнопка меню на узбекском -> русская надпись
     # Голосовой ответ на вопрос диалога превращается в текст до хендлеров (bot.voice).
     dp.message.outer_middleware(VoiceMiddleware())
     dp.include_routers(
+        language.router,  # выбор языка — в любом состоянии, раньше диалогов и регистрации
         start.router,
         users_admin.router,
         voice.router,  # задача одним голосовым — раньше диалогов, у которых свои «ловушки» нетекстового ввода
@@ -493,6 +508,7 @@ async def _connect(bot: Bot) -> TgUser:
 async def _set_commands(bot: Bot) -> None:
     try:
         await bot.set_my_commands(_COMMANDS)
+        await bot.set_my_commands(_COMMANDS_UZ, language_code="uz")
     except TelegramAPIError as exc:
         log.warning("Не удалось обновить список команд бота: %s", type(exc).__name__)
 
@@ -687,6 +703,11 @@ async def main(settings: Settings | None = None) -> None:
         # не ждал подключения к облачной базе (TCP + TLS + пароль — до 1,4 с).
         await warm_up(storage_engine)
         sessionmaker = make_sessionmaker(engine)
+        install_i18n(bot)  # тексты исходящих сообщений — на языке получателя
+        try:
+            await load_languages(sessionmaker)
+        except Exception:  # noqa: BLE001 - язык человека бот узнает и по первому его сообщению
+            log.warning("Не удалось заранее прочитать языки пользователей", exc_info=True)
         storage = default_storage(make_sessionmaker(storage_engine)) if storage_engine is not None else None
         dp = build_dispatcher(sessionmaker, storage)
         if settings.run_mode == "webhook":

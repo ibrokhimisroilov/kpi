@@ -40,7 +40,7 @@ from bot.services import tasks as tasks_svc
 from bot.services import users as users_svc
 from bot.ui import keyboards, render
 from bot.ui.callbacks import PickCB
-from bot.utils.text import esc, truncate
+from bot.utils.text import esc, own, truncate
 
 log = logging.getLogger(__name__)
 
@@ -193,7 +193,8 @@ async def choose_kind(
         return
     rows = [
         [InlineKeyboardButton(
-            text=truncate(f"#{task.id} {task.title}", 48), callback_data=PickCB(field="vtask", value=str(task.id)).pack()
+            text=truncate(f"#{task.id} {own(task.title)}", 48),
+            callback_data=PickCB(field="vtask", value=str(task.id)).pack(),
         )]
         for task in open_tasks
     ]

@@ -181,6 +181,7 @@ def sign_init_data(
     username: str | None = None,
     auth_date: int | None = None,
     extra: Mapping[str, str] | None = None,
+    language_code: str = "ru",
 ) -> str:
     """Подписанная строка initData, как её даёт Telegram (user — JSON, auth_date, query_id, hash).
 
@@ -192,7 +193,7 @@ def sign_init_data(
         user["last_name"] = last_name
     if username:
         user["username"] = username
-    user["language_code"] = "ru"
+    user["language_code"] = language_code
     fields: dict[str, str] = {
         "query_id": "AA" + secrets.token_hex(8),
         "user": json.dumps(user, ensure_ascii=False, separators=(",", ":")),

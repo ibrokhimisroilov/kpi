@@ -166,6 +166,7 @@ async def open_perf_app(
     DbStorage (общая база: ``write_behind=False``) на движке ``fsm_engine``; ``probe`` подключается
     к обоим движкам, дописывает фоновые записи хранилища в конце замера и считает запросы к Telegram."""
     from bot.db.base import make_sessionmaker
+    from bot.i18n.telegram import install as install_i18n
     from bot.main import build_dispatcher
 
     probe.attach(main_engine, "main")
@@ -176,6 +177,7 @@ async def open_perf_app(
     dp = build_dispatcher(sessionmaker, storage)
     session = FakeSession()
     bot = Bot("42:TEST", session=session, default=DefaultBotProperties(parse_mode="HTML"))
+    install_i18n(bot)  # как в bot.main
     harness = BotHarness(dp, bot, sessionmaker)
     probe.mark_background(storage, "_flush_loop")  # запись хранилища в базу — фоновая, её не ждут
     probe.flush = storage.flush

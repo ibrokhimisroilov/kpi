@@ -156,6 +156,19 @@ async def complete_registration(
     return user
 
 
+# --- Язык интерфейса ------------------------------------------------------------------------
+
+
+async def set_lang(session: AsyncSession, user: User, lang: str) -> User:
+    """Запомнить язык интерфейса пользователя: «ru» или «uz» (bot.i18n)."""
+    from bot import i18n
+
+    user.lang = i18n.normalize(lang)
+    await session.flush()
+    i18n.remember(user.tg_id, user.lang)
+    return user
+
+
 # --- Админы ---------------------------------------------------------------------------------
 
 
