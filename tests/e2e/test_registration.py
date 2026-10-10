@@ -33,6 +33,7 @@ pytestmark = pytest.mark.asyncio
 MGR2 = 1002  # второй начальник из ADMIN_IDS (фикстура two_admins)
 EMP = 2001
 EMP2 = 2002
+ADMIN_TG = 7001  # админ по отметке в базе (не из ADMIN_IDS)
 
 MANAGER_MENU = [text for row in MANAGER_MENU_LAYOUT for text in row]
 EMPLOYEE_MENU = [text for row in EMPLOYEE_MENU_LAYOUT for text in row]
@@ -1124,3 +1125,46 @@ async def test_help_for_blocked_user_does_not_offer_to_apply_again(app):
     assert BLOCKED in log.text
     assert "отправьте заявку" not in log.text
     assert h.reply_keyboard(EMP) is None
+
+
+# --- Админ бота называется админом -------------------------------------------------------------------
+
+
+async def test_marked_admin_is_called_admin_everywhere(app: BotHarness) -> None:
+    """Человек с отметкой админа (python -m bot.tools.admin grant …) в приветствии, в списке сотрудников и
+    в своей карточке — «админ», а не «начальник». Начальник из ADMIN_IDS остаётся начальником."""
+    from bot.services import users as users_svc
+
+    h = app
+    await h.send_command(MANAGER_TG_ID, "start", first_name="Анна")  # начальник из ADMIN_IDS
+    assert "Вы вошли как начальник" in h.last_text(MANAGER_TG_ID)
+
+    await h.seed_user(ADMIN_TG, "Исроилов Иброхим")
+    async with h.db() as s:
+        await users_svc.grant_admin(s, ADMIN_TG)
+        await s.commit()
+    await h.send_command(ADMIN_TG, "start", first_name="Иброхим")
+    greeting = h.last_text(ADMIN_TG)
+    assert "Вы вошли как админ бота" in greeting and "начальник" not in greeting.split("\n")[1]
+    assert h.reply_keyboard(ADMIN_TG) == MANAGER_MENU  # права и меню — как у начальника
+
+    await h.press_menu(ADMIN_TG, BTN_STAFF)
+    text = h.last_text(ADMIN_TG)
+    assert "Начальников: 1 · Админов: 1 · Заблокировано: 0" in text
+    assert "👔 Начальники" in text and "🛡 Админы" in text
+    assert text.index("👔 Начальники") < text.index("🛡 Админы")
+    admin_line = next(line for line in text.split("\n") if "Исроилов Иброхим" in line)
+    assert "🛡 админ" in admin_line and "начальник" not in admin_line
+    assert "🛡 Исроилов Иброхим" in h.buttons(ADMIN_TG)
+    assert any(label.startswith("👔 ") for label in h.buttons(ADMIN_TG))
+
+    await h.press_button(ADMIN_TG, "Исроилов Иброхим")
+    card = h.last_text(ADMIN_TG)
+    assert "Роль: 🛡 Админ" in card and "Роль: 👔 Начальник" not in card
+
+    # Начальник смотрит карточку админа: понизить и заблокировать нельзя.
+    await h.press_menu(MANAGER_TG_ID, BTN_STAFF)
+    await h.press_button(MANAGER_TG_ID, "Исроилов Иброхим")
+    card = h.last_text(MANAGER_TG_ID)
+    assert "Роль: 🛡 Админ" in card and "админ бота" in card
+    assert not any("Сотрудник" in label or "Заблокировать" in label for label in h.buttons(MANAGER_TG_ID))

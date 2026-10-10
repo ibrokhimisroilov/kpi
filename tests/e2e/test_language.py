@@ -318,3 +318,22 @@ async def test_newcomer_keeps_russian_without_extra_messages(app: BotHarness) ->
     assert await h.get_state(NEW) == "RegistrationSG:full_name"
     await h.send_text(NEW, "Иванов Иван Иванович")
     assert await h.get_state(NEW) == "RegistrationSG:position"
+
+
+async def test_admin_screens_in_uzbek(app: BotHarness) -> None:
+    """Админ с узбекским языком: приветствие, список и карточка называют его админом — и без русских слов."""
+    from bot.services import users as users_svc
+
+    h = app
+    await h.seed_user(NEW, "Иванов Иван Иванович")
+    async with h.db() as s:
+        await users_svc.grant_admin(s, NEW)
+        await s.commit()
+    await set_lang(h, NEW, "uz")
+    await h.send_command(NEW, "start")
+    assert "bot admini" in (h.last_text(NEW) or "")
+    await h.press_menu(NEW, uz(BTN_STAFF))
+    assert "Adminlar: 1" in (h.last_text(NEW) or "") and "🛡 Adminlar" in (h.last_text(NEW) or "")
+    await h.press_button(NEW, "Иванов Иван Иванович")
+    assert "Rol: 🛡 Admin" in (h.last_text(NEW) or "")
+    assert_uzbek(h, NEW)

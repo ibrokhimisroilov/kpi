@@ -74,6 +74,7 @@ ROLE_LABELS = {
     Role.MANAGER: "👔 Начальник",
     Role.EMPLOYEE: "👤 Сотрудник",
 }
+ADMIN_ROLE_LABEL = "🛡 Админ"  # начальник с отметкой users.is_admin: в карточке и списке он — админ
 STATUS_LABELS = {
     UserStatus.PENDING: "⏳ Ждёт подтверждения",
     UserStatus.ACTIVE: "✅ Активен",
@@ -85,8 +86,10 @@ _GROUPS = (
     ("📥 <b>Заявки на доступ</b>", "⏳"),
     ("👤 <b>Сотрудники</b>", "👤"),
     ("👔 <b>Начальники</b>", "👔"),
+    ("🛡 <b>Админы</b>", "🛡"),
     ("🚫 <b>Заблокированы</b>", "🚫"),
 )
+_G_PENDING, _G_EMPLOYEES, _G_MANAGERS, _G_ADMINS, _G_BLOCKED = range(5)
 
 # action -> (короткий ответ на кнопку, строка над обновлённой карточкой)
 _RESULTS: dict[str, tuple[str, str]] = {
@@ -132,13 +135,20 @@ _UNDELIVERED: dict[str, str] = {
 # --- Список сотрудников ---------------------------------------------------------------------
 
 
+def _is_marked_admin(u: User) -> bool:
+    """Показывается как «админ»: начальник с отметкой users.is_admin (как render.user_line)."""
+    return bool(u.is_admin) and u.role == Role.MANAGER
+
+
 def _group(u: User) -> int:
-    """Порядок групп: заявки, активные сотрудники, активные начальники, заблокированные."""
+    """Порядок групп: заявки, активные сотрудники, начальники, админы, заблокированные."""
     if u.status == UserStatus.PENDING:
-        return 0
+        return _G_PENDING
     if u.status == UserStatus.BLOCKED:
-        return 3
-    return 1 if u.role == Role.EMPLOYEE else 2
+        return _G_BLOCKED
+    if u.role == Role.EMPLOYEE:
+        return _G_EMPLOYEES
+    return _G_ADMINS if _is_marked_admin(u) else _G_MANAGERS
 
 
 def _button_text(u: User) -> str:
@@ -156,7 +166,7 @@ def _staff_screen(all_users: list[User], page: int) -> tuple[str, InlineKeyboard
         (u for u in all_users if not (u.status == UserStatus.PENDING and not u.full_name.strip())),
         key=_group,  # сортировка устойчивая: внутри группы сохраняется порядок list_all (по ФИО)
     )
-    counts = [0, 0, 0, 0]
+    counts = [0] * len(_GROUPS)
     for u in people:
         counts[_group(u)] += 1
 
@@ -165,10 +175,11 @@ def _staff_screen(all_users: list[User], page: int) -> tuple[str, InlineKeyboard
     chunk = people[page * PAGE_SIZE : (page + 1) * PAGE_SIZE]
 
     head = ["👥 <b>Сотрудники</b>"]
-    head.append(
-        f"Заявок: {counts[0]} · Сотрудников: {counts[1]} · "
-        f"Начальников: {counts[2]} · Заблокировано: {counts[3]}"
-    )
+    totals = [f"Заявок: {counts[_G_PENDING]}", f"Сотрудников: {counts[_G_EMPLOYEES]}", f"Начальников: {counts[_G_MANAGERS]}"]
+    if counts[_G_ADMINS]:
+        totals.append(f"Админов: {counts[_G_ADMINS]}")
+    totals.append(f"Заблокировано: {counts[_G_BLOCKED]}")
+    head.append(" · ".join(totals))
     if counts[0]:
         head.append("⏳ <b>Есть новые заявки</b> — нажмите на имя, чтобы подтвердить или отклонить.")
 
@@ -246,7 +257,8 @@ def _card_text(target: User, viewer: User, note: str | None = None) -> str:
     lines.append(render.user_line(target))
     lines.append("")
     lines.append(f"<b>Должность:</b> {esc(target.position) if target.position else '—'}")
-    lines.append(f"<b>Роль:</b> {ROLE_LABELS.get(target.role, esc(target.role))}")
+    role = ADMIN_ROLE_LABEL if _is_marked_admin(target) else ROLE_LABELS.get(target.role, esc(target.role))
+    lines.append(f"<b>Роль:</b> {role}")
     lines.append(f"<b>Статус:</b> {STATUS_LABELS.get(target.status, esc(target.status))}")
     if target.created_at:
         lines.append(f"<b>Дата регистрации:</b> {fmt_date(target.created_at)}")

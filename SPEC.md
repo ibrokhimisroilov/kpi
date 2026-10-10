@@ -1143,8 +1143,12 @@ def tick_schedule_summary(interval_sec: float | None = None) -> str   # расп
 * `users.revoke_admin(session, tg_id)` — снять отметку (остаётся обычным начальником); `users.list_admins`.
 * Команда: `python -m bot.tools.admin grant|revoke|list [Telegram ID]` — работает с базой из `DATABASE_URL`,
   настройки хостинга менять не нужно. Перед действием вызывает `init_db` (колонка добавится, если её нет).
-* В списке сотрудников админ с отметкой показан как «🛡 админ» (`render.user_line`); в карточке — `ADMIN_NOTE`,
-  кнопок «понизить» / «заблокировать» нет (`users_admin._is_config_admin` = `users.is_admin`).
+* **Как он называется.** Человек с отметкой `User.is_admin` везде назван админом, а не начальником:
+  приветствие на `/start` — «Вы вошли как админ бота» (`start._greeting`); список сотрудников — своя группа
+  «🛡 Админы» после «👔 Начальники», строка «🛡 админ» (`render.user_line`), значок 🛡 на кнопке, счётчик
+  «Админов: N» (показывается, когда они есть); карточка — «Роль: 🛡 Админ» (`users_admin.ADMIN_ROLE_LABEL`).
+  Начальник из `ADMIN_IDS` без отметки называется начальником (защита та же). В карточке любого админа —
+  `ADMIN_NOTE`, кнопок «понизить» / «заблокировать» нет (`users_admin._is_config_admin` = `users.is_admin`).
 * **Новые колонки.** `init_db` после `create_all` вызывает `_add_missing_columns`: колонка модели, которой нет
   в таблице, добавляется `ALTER TABLE … ADD COLUMN` (PostgreSQL — `IF NOT EXISTS`, под той же advisory-
   блокировкой). Годятся только колонки, допускающие NULL или с `server_default`; иначе — `RuntimeError` при

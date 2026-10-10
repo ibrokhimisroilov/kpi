@@ -131,9 +131,11 @@ def _greeting(user: User) -> str:
     """Приветствие активного пользователя по роли."""
     name = esc(user.full_name) if user.full_name else "коллега"
     if user.role == Role.MANAGER:
+        # Админ бота (отметка users.is_admin) — тот же начальник по правам, но называется админом.
+        who = "Вы вошли как <b>админ бота</b>." if user.is_admin else "Вы вошли как <b>начальник</b>."
         return (
             f"👋 Здравствуйте, {name}!\n"
-            "Вы вошли как <b>начальник</b>.\n\n"
+            f"{who}\n\n"
             f"• {BTN_NEW_TASK} — задача, ожидаемый результат, срок, приоритет и вес\n"
             f"• {BTN_REVIEW} — результаты сотрудников и оценка AI\n"
             f"• {BTN_PROPOSALS} — поручения, внесённые сотрудниками\n"
