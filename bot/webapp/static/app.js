@@ -370,6 +370,7 @@
     adduser: 'M15 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2M5 7.5a3.5 3.5 0 1 0 7 0a3.5 3.5 0 1 0-7 0M19 8L19 14M16 11L22 11',
     bulb: 'M9 18h6M10 21.5h4M15 14.5c.2-1 .7-1.7 1.5-2.5A5.5 5.5 0 0 0 18 8 6 6 0 0 0 6 8c0 1.4.5 2.8 1.5 4 .8.8 1.3 1.5 1.5 2.5',
     empty: 'M21 19a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h4.5l2 2.5H19a2 2 0 0 1 2 2z',
+    more: 'M4 12a1 1 0 1 0 2 0a1 1 0 1 0-2 0M11 12a1 1 0 1 0 2 0a1 1 0 1 0-2 0M18 12a1 1 0 1 0 2 0a1 1 0 1 0-2 0',
   };
 
   /** icon('clock') -> <svg class="ic">. cls — размер и тон: ic-sm | ic-lg | ic-xl, tone-good | tone-warn | tone-bad. */
@@ -1370,15 +1371,15 @@
     return btn;
   }
 
-  /** Шапка экрана: заголовок h1 (на него переходит фокус), подзаголовок, «Назад» вне Telegram. */
-  function screenHead(title, sub) {
+  /** Шапка экрана: заголовок h1 (на него переходит фокус), подзаголовок, «Назад» вне Telegram; actions — кнопки справа от заголовка. */
+  function screenHead(title, sub, actions) {
     setDocTitle(title);
     const nested = Boolean(nav.current && (!nav.current.route.root || nav.stack.length > 1));
     const h1 = h('h1', { tabindex: '-1' }, title);
     const subEl = h('p', { class: 'sub', hidden: !sub }, sub || '');
     const el = h('header', { class: 'screen-head' },
       nested && !back.native ? h('button', { type: 'button', class: 'back-link', onclick: () => goBack() }, icon('back'), 'Назад') : null,
-      h('div', { class: 'head-row' }, h1, nested ? null : langButton()),
+      h('div', { class: 'head-row' }, h1, actions || null, nested ? null : langButton()),
       subEl);
     return {
       el,
@@ -1404,7 +1405,7 @@
   function skelList(n) {
     const rows = [];
     for (let i = 0; i < n; i += 1) {
-      rows.push(h('div', { class: 'sk-row' }, sk('sk-ico'), h('div', { class: 'sk-lines' }, sk('sk-line w70'), sk('sk-line w40'))));
+      rows.push(h('div', { class: 'sk-row' }, h('div', { class: 'sk-lines' }, sk('sk-line w70'), sk('sk-line w40'))));
     }
     return h('div', { class: 'list', 'aria-hidden': 'true' }, rows);
   }
@@ -1463,7 +1464,8 @@
   /** Метка статуса: цвет по тону (good | warn | bad | info), значок name или точка. */
   function pill(text, tone, name) {
     return h('span', { class: 'pill' + (tone ? ' ' + tone : '') },
-      name ? icon(name, 'ic-sm') : h('span', { class: 'dot', 'aria-hidden': 'true' }), stripLeadingEmoji(text));
+      name ? icon(name, 'ic-sm') : h('span', { class: 'dot', 'aria-hidden': 'true' }),
+      h('span', { class: 'pill-t' }, stripLeadingEmoji(text)));  // подпись метки — всегда с заглавной (стили)
   }
 
   /** Строка «подпись: значение»; name — значок слева (текст рядом с ним переносится ровным столбцом). */
@@ -1662,6 +1664,7 @@
         if (!err.handled) haptic.err();
         box.dataset.state = 'error';
         box.replaceChildren(errorState(err, () => run(true)));
+        if (spec.onError) spec.onError();
       } finally {
         if (scr.alive && my === seq) box.removeAttribute('aria-busy');
       }
@@ -2372,18 +2375,13 @@
     return pill(t.status_label, statusTone(t), statusIcon(t));
   }
 
-  /** Значок статуса в строке списка. */
-  function statusMark(t) {
-    return h('span', { class: 'ico tone-' + (statusTone(t) || 'none') }, icon(statusIcon(t)));
-  }
-
   /** Приоритет: цветная точка и подпись сервера («Высокий») без эмодзи. */
   function priorityMark(t) {
     return h('span', { class: 'prio' }, h('span', { class: 'dot ' + (PRIORITY_TONES[t.priority] || ''), 'aria-hidden': 'true' }),
       own(stripLeadingEmoji(t.priority_label)));
   }
 
-  /** Стрелка «дальше» в конце строки списка, которая открывает другой экран. */
+  /** Стрелка «дальше» в конце строки сотрудника (строки задач — без неё: справа у них оценка). */
   function chevron() {
     return h('span', { class: 'chev' }, icon('next', 'ic-sm'));
   }
@@ -2393,27 +2391,62 @@
     return parts.filter(Boolean).map((part, i) => (i ? [' · ', part] : part));
   }
 
-  /** Строка задачи: «#12 Название», справа tail, ниже исполнитель · приоритет · вес. */
+  /**
+   * Строка списка: «#12 Название» во всю ширину; под ним — строка состояния (метки, срок, справа оценка),
+   * ниже — подробности. o: {to, id, title, state, meta}.
+   */
+  function listRow(o) {
+    return h('li', null, h('button', { type: 'button', class: 'row-main', onclick: () => go(o.to) },
+      h('span', { class: 'row-body' },
+        h('span', { class: 'row-title' }, h('span', { class: 'id' }, '#' + o.id), own(o.title)),
+        o.state ? h('span', { class: 'row-state' }, o.state) : null,
+        o.meta ? h('span', { class: 'row-sub' }, o.meta) : null)));
+  }
+
+  /** Оценка у правого края строки состояния. */
+  function rowScore(content, bad) {
+    return h('span', { class: 'row-score' + (bad ? ' is-bad' : '') }, content);
+  }
+
+  /**
+   * Строка задачи. Состояние: метка статуса (у просроченной — насколько просрочена), затем срок или оценка;
+   * подробности: исполнитель · приоритет · вес. o: {assignee, onAccept, to, queue, returns}.
+   */
   function taskRow(t, o) {
     const opts = o || {};
     const unaccepted = t.status === 'active' && !t.accepted;
+    const open = t.status === 'active' || t.status === 'rework' || t.status === 'proposed';
+    const wait = unaccepted ? pill('Не принята', 'warn', 'wait') : null;
+    // У просроченной подпись сервера — «Просрочена»: что она ещё и на доработке, видно только по полю status.
+    const status = t.overdue ? (t.status === 'rework' ? pill('на доработке', 'warn', 'undo') : null)
+      : opts.queue ? null : statusPill(t);  // в очереди поручений статус у всех один — метка не нужна
+    if (status && unaccepted) status.hidden = true;  // «В работе» появится после «Принять»
+    const past = t.overdue || (open && Date.parse(t.deadline) <= serverNow());
+    const due = opts.queue ? 'срок ' + own(t.deadline_local) : t.tail;
     const meta = [];
     if (opts.assignee && t.assignee) meta.push(own(t.assignee.short_name));
     if (t.status !== 'proposed') meta.push(priorityMark(t), 'вес ' + t.weight + ' %');
-    else meta.push('ждёт подтверждения начальника');
-    const warn = unaccepted ? h('span', { class: 'warn' }, ' · не принята') : null;
-    const tailClass = 'row-tail' + (t.overdue ? ' is-bad' : '') + (t.status === 'done' ? ' is-score' : '');
-    const li = h('li', null, h('button', { type: 'button', class: 'row-main', onclick: () => go('#/task/' + t.id) },
-      statusMark(t),
-      h('span', { class: 'row-body' },
-        h('span', { class: 'row-top' },
-          h('span', { class: 'row-title' }, h('span', { class: 'id' }, '#' + t.id), own(t.title)),
-          h('span', { class: tailClass }, t.tail)),
-        h('span', { class: 'row-sub' }, h('span', { class: 'sr-only' }, statusText(t) + '. '), dotted(meta), warn))));
+    else if (!opts.queue) meta.push('ждёт подтверждения начальника');
+    if (opts.returns && t.rework_count > 1) meta.push('возвратов: ' + t.rework_count);
+    const li = listRow({
+      to: opts.to || '#/task/' + t.id, id: t.id, title: t.title,
+      state: [
+        t.overdue ? pill(t.tail, 'bad', 'clock') : null,
+        wait, status,
+        t.status === 'done' ? rowScore(t.tail) : null,
+        !t.overdue && (open || (t.status === 'submitted' && t.submitted_at))
+          ? h('span', { class: 'row-due' + (past ? ' tone-bad' : '') }, open ? icon('calendar', 'ic-sm') : null, due) : null,
+      ],
+      meta: dotted(meta),
+    });
     if (opts.onAccept && unaccepted) {
+      const mark = (accepted) => {
+        wait.hidden = accepted;
+        if (status) status.hidden = !accepted;
+      };
       const accept = h('button', {
         type: 'button', class: 'row-action', 'aria-label': 'Принять задачу #' + t.id + ' в работу',
-        onclick: () => opts.onAccept(t, accept, warn),
+        onclick: () => opts.onAccept(t, accept, mark),
       }, icon('check', 'ic-sm'), 'Принять');
       li.classList.add('has-action');
       li.appendChild(accept);
@@ -2421,11 +2454,11 @@
     return li;
   }
 
-  /** «Принять» прямо в строке списка — оптимистично: кнопка сразу сменяется отметкой. */
-  async function acceptInline(t, btn, warn) {
+  /** «Принять» прямо в строке списка — оптимистично: кнопка сразу сменяется отметкой, метка — на «В работе». */
+  async function acceptInline(t, btn, mark) {
     const done = h('span', { class: 'row-done', role: 'status' }, icon('check', 'ic-sm'), 'Принята');
     btn.replaceWith(done);
-    if (warn) warn.hidden = true;
+    mark(true);
     haptic.sel();
     try {
       await api(EP.acceptTask, { params: { task_id: t.id } });
@@ -2434,9 +2467,23 @@
       afterMutation();
     } catch (err) {
       done.replaceWith(btn);
-      if (warn) warn.hidden = false;
+      mark(false);
       reportError(err);
     }
+  }
+
+  /** Меню действий — лист со списком: редкие и необратимые действия не стоят рядом с частыми. items: {icon, text, danger, run}. */
+  function menuSheet(title, items) {
+    sheet.show({
+      title,
+      body: h('div', { class: 'menu' }, items.map((item) => h('button', {
+        type: 'button', class: 'menu-item' + (item.danger ? ' is-danger' : ''),
+        onclick: () => {
+          sheet.close(false);  // фокус — обратно на «⋯»: туда же он вернётся из следующего листа
+          item.run();
+        },
+      }, icon(item.icon), item.text))),
+    });
   }
 
   function statusChips(value, onChange) {
@@ -2580,10 +2627,21 @@
       input.blur();
     });
     scr.onDestroy(() => clearTimeout(timer));
-    return h('div', { class: 'search', role: 'search' },
-      h('label', { for: id, class: 'sr-only' }, 'Поиск задач'),
-      h('span', { class: 's-ico' }, icon('search')),
-      input, clear);
+    return {
+      el: h('div', { class: 'search', role: 'search' },
+        h('label', { for: id, class: 'sr-only' }, 'Поиск задач'),
+        h('span', { class: 's-ico' }, icon('search')),
+        input, clear),
+      input,
+      /** Поиск свернули — запрос сбрасывается: скрытый фильтр не должен молча сужать список. */
+      reset() {
+        if (!input.value) return;
+        input.value = '';
+        clear.hidden = true;
+        clearTimeout(timer);
+        onSearch('');
+      },
+    };
   }
 
   /** Переключатель периода: «Неделя · Месяц · Квартал · Год» и стрелки «назад — {label} — вперёд». */
@@ -2818,14 +2876,13 @@
     const items = cur.items || [];
     if (items.length) {
       out.push(sec('Вошли в расчёт', String(items.length)));
-      out.push(h('ul', { class: 'list' }, items.map((it) => h('li', null,
-        h('button', { type: 'button', class: 'row-main', onclick: () => go('#/task/' + it.task_id) },
-          h('span', { class: 'row-body' },
-            h('span', { class: 'row-top' },
-              h('span', { class: 'row-title' }, h('span', { class: 'id' }, '#' + it.task_id), own(it.title)),
-              h('span', { class: 'row-tail is-score' + (it.zero_overdue ? ' is-bad' : '') }, pct(it.score))),
-            h('span', { class: 'row-sub' }, 'вес ' + it.weight + ' % × ' + pct(it.score) + (it.zero_overdue ? ' · просрочена' : ''))),
-          chevron())))));
+      out.push(h('ul', { class: 'list' }, items.map((it) => listRow({
+        to: '#/task/' + it.task_id, id: it.task_id, title: it.title,
+        state: [
+          h('span', { class: 'row-due' }, 'вес ' + it.weight + ' % × ' + pct(it.score) + (it.zero_overdue ? ' · просрочена' : '')),
+          rowScore(pct(it.score), it.zero_overdue),
+        ],
+      }))));
     }
 
     out.push(historySection(scr, d, ps, userId));
@@ -2877,20 +2934,23 @@
     return wrap;
   }
 
+  /**
+   * Строка истории оценок: слева словами — «Подтверждена» или «Изменена», справа — итоговая оценка;
+   * у изменённой перед ней — предварительная («100 % → 90 %»: её дал AI или расчёт по правилам).
+   */
   function historyRow(it) {
-    const meta = [it.completed_local || '—', tr('вес ' + it.weight + ' %')];
-    if (it.is_late) meta.push(tr('с опозданием'));
-    if (it.rework_count) meta.push(tr('доработок: ' + it.rework_count));
-    // Итоговая оценка; у изменённой начальником — «оценка AI → итоговая».
-    let score = it.final_score_text;
-    if (it.decision === 'changed') score = (isNum(it.ai_score) ? pct(it.ai_score) + ' → ' : '') + it.final_score_text + ' изменена';
-    else if (it.decision === 'approved') score = it.final_score_text + ' подтверждена';
-    return h('li', null, h('button', { type: 'button', class: 'row-main', onclick: () => go('#/task/' + it.task_id) },
-      h('span', { class: 'row-body' },
-        h('span', { class: 'row-title' }, h('span', { class: 'id' }, '#' + it.task_id), own(it.title)),
-        h('span', { class: 'hist-line' }, meta.join(' · ')),
-        h('span', { class: 'hist-score' }, icon('flag', 'ic-sm'), score)),
-      chevron()));
+    const meta = [it.completed_local || '—', 'вес ' + it.weight + ' %'];
+    if (it.is_late) meta.push('с опозданием');
+    if (it.rework_count) meta.push('доработок: ' + it.rework_count);
+    const changed = it.decision === 'changed';
+    return listRow({
+      to: '#/task/' + it.task_id, id: it.task_id, title: it.title,
+      state: [
+        changed ? pill('изменена', 'info', 'edit') : it.decision === 'approved' ? pill('подтверждена', '', 'check') : null,
+        rowScore([changed && isNum(it.ai_score) ? h('span', { class: 'row-due' }, pct(it.ai_score) + ' →') : null, it.final_score_text]),
+      ],
+      meta: dotted(meta),
+    });
   }
 
   // ---------------------------------------------------------------------------------------------
@@ -2906,7 +2966,25 @@
     if (fromCard && /^\d+$/.test(fromCard)) tasksFilter.userId = fromCard;
     const status = query.get('status');
     if (status && STATUS_FILTERS.some((f) => f.value === status)) tasksFilter.status = status;
-    const head = screenHead('Задачи');
+    const search = searchBox(scr, tasksFilter.q, (q) => {
+      if (q === tasksFilter.q) return;
+      tasksFilter.q = q;
+      list.reload();
+    });
+    // Поиск свёрнут в значок у заголовка: строка поиска открыта, пока ею пользуются или в ней есть запрос.
+    search.el.hidden = !tasksFilter.q;
+    const toggle = h('button', {
+      type: 'button', class: 'icon-btn', 'aria-label': 'Поиск задач', 'aria-expanded': String(!search.el.hidden),
+      onclick: () => {
+        const show = search.el.hidden;
+        search.el.hidden = !show;
+        toggle.setAttribute('aria-expanded', String(show));
+        haptic.sel();
+        if (show) search.input.focus();
+        else search.reset();
+      },
+    }, icon('search'));
+    const head = screenHead('Задачи', null, toggle);
     const select = h('select', { class: 'input', id: uid('emp'), 'aria-label': 'Сотрудник' },
       employeeOptions(null, tasksFilter.userId));
     select.value = tasksFilter.userId;
@@ -2926,14 +3004,7 @@
       if (query.has('user') || query.has('status')) replaceQuery({ user: tasksFilter.userId || null, status: tasksFilter.status });
     }
     const box = h('div');
-    scr.el.append(head.el,
-      searchBox(scr, tasksFilter.q, (q) => {
-        if (q === tasksFilter.q) return;
-        tasksFilter.q = q;
-        list.reload();
-      }),
-      h('div', { class: 'filter-row' }, select),
-      chips.el, box);
+    scr.el.append(head.el, search.el, h('div', { class: 'filter-row' }, select), chips.el, box);
 
     api(EP.employees).then((data) => {
       if (!scr.alive) return;
@@ -3001,16 +3072,9 @@
     load();
   }
 
+  /** Строка списка «Сдать»: та же строка задачи, ведёт на форму сдачи. */
   function submitRow(t) {
-    const sub = t.status === 'rework' ? 'на доработке' + (t.rework_count > 1 ? ' · возвратов: ' + t.rework_count : '') : 'вес ' + t.weight + ' %';
-    return h('li', null, h('button', { type: 'button', class: 'row-main', onclick: () => go('#/submit/' + t.id) },
-      statusMark(t),
-      h('span', { class: 'row-body' },
-        h('span', { class: 'row-top' },
-          h('span', { class: 'row-title' }, h('span', { class: 'id' }, '#' + t.id), own(t.title)),
-          h('span', { class: 'row-tail' + (t.overdue ? ' is-bad' : '') }, t.tail)),
-        h('span', { class: 'row-sub' }, h('span', { class: 'sr-only' }, statusText(t) + '. '), sub)),
-      chevron()));
+    return taskRow(t, { to: '#/submit/' + t.id, returns: true });
   }
 
   // ---------------------------------------------------------------------------------------------
@@ -3019,7 +3083,13 @@
 
   function TaskView(scr, args) {
     const taskId = Number(args[0]);
-    const head = screenHead('Задача #' + taskId);
+    // Меню «⋯» в шапке: редкие и необратимые действия (отменить, отклонить) — пункты задаёт actionsBlock.
+    let menu = [];
+    const more = h('button', {
+      type: 'button', class: 'icon-btn', hidden: true, 'aria-label': 'Ещё действия', 'aria-haspopup': 'dialog',
+      onclick: () => menuSheet('Задача #' + taskId, menu),
+    }, icon('more'));
+    const head = screenHead('Задача #' + taskId, null, more);
     const box = h('div');
     scr.el.append(head.el, box);
     const poll = pendingPoller(scr, () => load(true));
@@ -3029,6 +3099,10 @@
       render: (card) => {
         poll((card.submissions || []).some((sb) => sb.ai_pending));
         return renderCard(card);
+      },
+      onError: () => {  // вместо карточки — ошибка: меню с действиями над ней прячется
+        menu = [];
+        more.hidden = true;
       },
     });
 
@@ -3086,11 +3160,19 @@
         }
       }
       if (a.edit) extra.push(button('Изменить', () => go('#/task/' + t.id + '/edit'), '', null, 'edit'));
-      if (a.reject) extra.push(button('Отклонить', () => rejectSheet(scr, t, () => go('#/review?tab=proposals', { force: true, reset: true })), 'btn-danger', null, 'reject'));
-      if (a.cancel) extra.push(button('Отменить', () => cancelSheet(scr, t, (task) => {
-        card.task = task;
-        repaint(card);
-      }), 'btn-danger', null, 'ban'));
+      menu = [];
+      if (a.reject) {
+        menu.push({ icon: 'reject', text: 'Отклонить поручение', danger: true,
+          run: () => rejectSheet(scr, t, () => go('#/review?tab=proposals', { force: true, reset: true })) });
+      }
+      if (a.cancel) {
+        menu.push({ icon: 'ban', text: 'Отменить задачу', danger: true,
+          run: () => cancelSheet(scr, t, (task) => {
+            card.task = task;
+            repaint(card);
+          }) });
+      }
+      more.hidden = !menu.length;
       if (!main.length && !extra.length) return null;
       return h('div', { class: 'actions' }, main, extra.length ? h('div', { class: 'btn-row' }, extra) : null);
 
@@ -3265,14 +3347,25 @@
     return h('div', { class: 'decision' }, out);
   }
 
-  /** Журнал задачи: строки сервера; эмодзи сервера (у автора-бота, кружок приоритета) не показываются. */
+  const EVENT_ICONS = {
+    created: 'plus', proposed: 'inbox', approved: 'check', rejected: 'reject', accepted: 'check', edited: 'edit',
+    submitted: 'send', ai_evaluated: 'ai', score_confirmed: 'done', score_changed: 'edit', rework: 'undo',
+    cancelled: 'ban', reminder: 'clock', weight_suggested: 'weight',
+  };
+
+  /**
+   * Журнал задачи — лента событий: значок по виду события, что произошло, ниже — когда и кто.
+   * Строки приходят с сервера; его эмодзи (у автора-бота, кружок приоритета) не показываются.
+   */
   function eventsBlock(events) {
     if (!events || !events.length) return null;
     return h('details', { class: 'fold', 'data-key': 'history' },
       h('summary', null, h('span', null, icon('history'), 'История · ' + events.length)),
       h('div', { class: 'fold-body' }, h('ul', { class: 'events' }, events.map((ev) => h('li', null,
-        h('span', { class: 'when' }, ev.at_local + ' — ' + own(ev.actor ? ev.actor_name : stripLeadingEmoji(ev.actor_name))),
-        own(String(ev.text || '').replace(PRIORITY_DOTS, '')))))));
+        h('span', { class: 'ev-ico' }, icon(ev.type === 'ai_evaluated' && !/AI/.test(ev.text || '') ? 'calc' : EVENT_ICONS[ev.type] || 'info', 'ic-sm')),
+        h('span', { class: 'ev-body' },
+          h('span', { class: 'ev-text' }, own(String(ev.text || '').replace(PRIORITY_DOTS, ''))),
+          h('span', { class: 'when' }, ev.at_local + ' · ' + own(ev.actor ? ev.actor_name : stripLeadingEmoji(ev.actor_name)))))))));
   }
 
   // --- Листы действий над задачей -----------------------------------------------------------
@@ -3381,33 +3474,33 @@
     load();
   }
 
+  /** Строка очереди проверки: сдано в срок или с опозданием, справа — предварительная оценка. */
   function reviewRow(item) {
     const t = item.task;
     const sb = item.submission;
     const ai = sb && sb.ai;
     // Значок у оценки: AI, расчёт по правилам или «ещё считается».
     const mark = ai ? (ai.source === 'ai' ? 'ai' : 'calc') : 'wait';
-    return h('li', null, h('button', { type: 'button', class: 'row-main', onclick: () => go('#/review/' + t.id) },
-      h('span', { class: 'row-body' },
-        h('span', { class: 'row-sub row-kicker' }, own(t.assignee ? t.assignee.short_name : '')),
-        h('span', { class: 'row-top' },
-          h('span', { class: 'row-title' }, h('span', { class: 'id' }, '#' + t.id), own(t.title)),
-          h('span', { class: 'row-tail is-score' },
-            h('span', { 'aria-hidden': 'true' }, icon(mark, 'ic-sm'), ai ? ai.score_text : null),
-            h('span', { class: 'sr-only' }, ai ? 'Предварительная оценка ' + ai.score_text : 'Оценка рассчитывается'))),
-        sb ? h('span', { class: 'row-sub' }, 'сдано ' + sb.created_local + ' · ',
-          h('span', { class: sb.is_late ? 'tone-bad' : null }, sb.late_text),
-          sb.attempt > 1 ? ' · попытка ' + sb.attempt : '') : null),
-      chevron()));
+    return listRow({
+      to: '#/review/' + t.id, id: t.id, title: t.title,
+      state: [
+        sb ? pill(sb.late_text, sb.is_late ? 'bad' : 'good', sb.is_late ? 'clock' : 'check') : null,
+        rowScore([
+          h('span', { 'aria-hidden': 'true' }, icon(mark, 'ic-sm'), ai ? ai.score_text : null),
+          h('span', { class: 'sr-only' }, ai ? 'Предварительная оценка ' + ai.score_text : 'Оценка рассчитывается'),
+        ]),
+      ],
+      meta: dotted([
+        own(t.assignee ? t.assignee.short_name : ''),
+        sb ? 'сдано ' + sb.created_local : null,
+        sb && sb.attempt > 1 ? 'попытка ' + sb.attempt : null,
+      ]),
+    });
   }
 
+  /** Строка очереди поручений: та же строка задачи, ведёт на подтверждение. */
   function proposalRow(t) {
-    return h('li', null, h('button', { type: 'button', class: 'row-main', onclick: () => go('#/proposal/' + t.id) },
-      h('span', { class: 'row-body' },
-        h('span', { class: 'row-sub row-kicker' }, own(t.assignee ? t.assignee.short_name : '')),
-        h('span', { class: 'row-top' }, h('span', { class: 'row-title' }, h('span', { class: 'id' }, '#' + t.id), own(t.title))),
-        h('span', { class: 'row-sub' + (t.overdue || Date.parse(t.deadline) <= serverNow() ? ' tone-bad' : '') }, 'срок ' + own(t.deadline_local))),
-      chevron()));
+    return taskRow(t, { assignee: true, to: '#/proposal/' + t.id, queue: true });
   }
 
   function backToQueue(tab) {
@@ -4581,8 +4674,8 @@
     "{} файл · {u} из {} МБ": "{} ta fayl · {u} / {} MB",
     "{} файла · {u} из {} МБ": "{} ta fayl · {u} / {} MB",
     "{} файлов · {u} из {} МБ": "{} ta fayl · {u} / {} MB",
-    "· не принята": "· qabul qilinmagan",
-    "· попытка {}": "· {}-urinish",
+    "Не принята": "Qabul qilinmagan",
+    "попытка {}": "{}-urinish",
     "Активных сотрудников пока нет. Подтвердите заявки в чате с ботом: «Сотрудники».": "Faol xodimlar hali yoʻq. Arizalarni bot bilan chatda tasdiqlang: «Xodimlar».",
     "Быстрые оценки": "Tezkor baholar",
     "Быстрый выбор срока": "Muddatni tez tanlash",
@@ -4799,7 +4892,7 @@
     "нет данных": "maʼlumot yoʻq",
     "по правилам, без AI": "qoidalar boʻyicha, AIsiz",
     "просрочено": "muddati oʻtgan",
-    "сдано {}.{} {}:{} ·": "{}.{} {}:{} da topshirilgan ·",
+    "сдано {}.{} {}:{}": "{}.{} {}:{} da topshirilgan",
     "срок {u}": "muddat: {u}",
     "срок уже прошёл — укажите новый": "muddat oʻtib ketgan — yangisini koʻrsating",
     "— подтверждена автоматически": "— avtomatik tasdiqlangan",
@@ -4810,7 +4903,7 @@
     "Задача возвращена на доработку": "Vazifa qayta ishlashga qaytarildi",
     "доработок: {}": "qayta ishlash: {}",
     "на доработке": "qayta ishlashda",
-    "на доработке · возвратов: {}": "qayta ishlashda · qaytarishlar: {}",
+    "возвратов: {}": "qaytarishlar: {}",
     "Вы ещё не подтвердили получение": "Siz hali qabul qilganingizni tasdiqlamadingiz",
     "Готовлю отчёт…": "Hisobot tayyorlanmoqda…",
     "Исполнитель ещё не подтвердил получение": "Ijrochi hali qabul qilganini tasdiqlamadi",
@@ -4855,6 +4948,8 @@
     "Убрать план": "Rejani olib tashlash",
     "Сделать измеримым": "Oʻlchanadigan qilish",
     "Отклонить поручение #{}": "#{} topshiriqni rad etish",
+    "Отклонить поручение": "Topshiriqni rad etish",
+    "Ещё действия": "Boshqa amallar",
     "Поручение #{} отклонено": "#{} topshiriq rad etildi",
     "Поручение отклонено начальником — сдавать результат не нужно.": "Topshiriq boshliq tomonidan rad etilgan — natija topshirish shart emas.",
     "Готово — проверьте поля перед отправкой.": "Tayyor — yuborishdan oldin maydonlarni tekshiring.",
@@ -4866,8 +4961,8 @@
     "Не удалось включить микрофон. Попробуйте ещё раз или введите текст с клавиатуры.": "Mikrofonni yoqib boʻlmadi. Qayta urinib koʻring yoki matnni klaviaturadan kiriting.",
     "Нет доступа к микрофону. Разрешите микрофон для Telegram в настройках телефона и попробуйте ещё раз.": "Mikrofonga ruxsat yoʻq. Telefon sozlamalarida Telegram uchun mikrofonga ruxsat bering va qayta urinib koʻring.",
     "План": "Reja",
-    "{} % подтверждена": "{} % tasdiqlangan",
-    "{} % изменена": "{} % oʻzgartirilgan",
+    "подтверждена": "tasdiqlangan",
+    "изменена": "oʻzgartirilgan",
     "Итоговая оценка:": "Yakuniy baho:",
     "Сейчас:": "Hozir:",
     "{u} · попытка {} · вес {} %": "{u} · {}-urinish · vazn {} %",
@@ -4911,11 +5006,9 @@
     "Высокий": "Yuqori",
     "Задача #{} отменена": "#{} vazifa bekor qilindi",
     "Задача отменена начальником — сдавать результат не нужно.": "Vazifa boshliq tomonidan bekor qilingan — natija topshirish shart emas.",
-    "Отменить": "Bekor qilish",
     "Отменить задачу #{}": "#{} vazifani bekor qilish",
     "Средний": "Oʻrta",
     "Низкий": "Past",
-    "{} % → {} % изменена": "{} % → {} % oʻzgartirilgan",
     "Измеримая формулировка": "Oʻlchanadigan taʼrif",
     "Предварительной оценки AI нет.": "AIning dastlabki bahosi yoʻq.",
     "Предварительной оценки нет — выставьте оценку сами.": "Dastlabki baho yoʻq — bahoni oʻzingiz qoʻying.",
