@@ -1417,9 +1417,8 @@
   function skelDashboard() {
     return [
       skelHero(),
-      h('div', { class: 'totals', 'aria-hidden': 'true' }, [0, 1, 2, 3].map(() => h('div', { class: 'total' }, sk('sk-line w40 mx-auto'), h('div', { class: 'mt8' }, sk('sk-line w70 mx-auto'))))),
-      sk('sk-block skel-on-page'),
       skelList(4),
+      sk('sk-block skel-on-page'),
     ];
   }
 
@@ -1655,6 +1654,7 @@
       const hit = fresh ? null : peek(req.ep, req.opts);
       if (hit) {
         scr.loadedAt = hit.at;
+        box.removeAttribute('aria-busy');  // запрос, который ещё в пути, устарел и флаг сам не снимет
         paint(hit.data);
         return;
       }
@@ -2514,7 +2514,7 @@
     sheet.show({
       title,
       body: h('div', { class: 'menu' }, items.map((item) => h('button', {
-        type: 'button', class: 'menu-item' + (item.danger ? ' is-danger' : ''),
+        type: 'button', class: 'menu-item' + (item.danger ? ' is-danger' : ''), 'aria-current': item.on ? 'true' : null,
         onclick: () => {
           sheet.close(false);  // фокус — обратно на «⋯»: туда же он вернётся из следующего листа
           item.run();
@@ -2681,32 +2681,47 @@
     };
   }
 
-  /** Переключатель периода: «Неделя · Месяц · Квартал · Год» и стрелки «назад — {label} — вперёд». */
-  function periodControl(ps, onChange) {
-    const label = h('div', { class: 'label', 'aria-live': 'polite' }, '…');
-    const prev = h('button', { type: 'button', class: 'icon-btn', 'aria-label': 'Предыдущий период', onclick: () => {
-      if (ps.offset <= -500) return;
-      ps.offset -= 1;
+  /**
+   * Период — одна строка: стрелки листают, кнопка между ними (вид периода и его даты) открывает лист
+   * «Неделя · Месяц · Квартал · Год». Строка стоит вне блока с данными box: работает и при загрузке, и при ошибке;
+   * пока грузится выбранный период, прежние числа в box бледнеют (класс is-switch — до update с новыми данными).
+   */
+  function periodControl(ps, onChange, box) {
+    const turn = () => {
+      box.classList.add('is-switch');
       haptic.sel();
       onChange();
-    } }, icon('back'));
-    const next = h('button', { type: 'button', class: 'icon-btn', 'aria-label': 'Следующий период', disabled: ps.offset >= 0, onclick: () => {
-      if (ps.offset >= 0) return;
-      ps.offset += 1;
-      haptic.sel();
-      onChange();
-    } }, icon('next'));
-    const seg = segmented(PERIOD_KINDS, ps.kind, (kind) => {
-      ps.kind = kind;
-      ps.offset = 0;
-      setText(label, '…');
-      onChange();
-    }, 'Период');
+    };
+    const kind = h('span');
+    const label = h('span', { class: 'label', 'aria-live': 'polite' }, '…');
+    const arrow = (name, text, by) => h('button', { type: 'button', class: 'icon-btn', 'aria-label': text, onclick: () => {
+      if (ps.offset + by > 0 || ps.offset + by < -500) return;
+      ps.offset += by;
+      turn();
+    } }, icon(name));
+    const prev = arrow('back', 'Предыдущий период', -1);
+    const next = arrow('next', 'Следующий период', 1);
+    next.disabled = ps.offset >= 0;
+    const paint = () => setText(kind, PERIOD_KINDS.find((k) => k.value === ps.kind).label);
+    const pick = h('button', { type: 'button', class: 'period-pick', 'aria-haspopup': 'dialog', onclick: () => menuSheet('Период', PERIOD_KINDS.map((k) => ({
+      icon: k.value === ps.kind ? 'check' : 'calendar', text: k.label, on: k.value === ps.kind,
+      run() {
+        if (k.value === ps.kind && !ps.offset) return;  // тот же вид: из прошлого периода — к текущему
+        ps.kind = k.value;
+        ps.offset = 0;
+        paint();
+        setText(label, '…');
+        turn();
+      },
+    }))) }, h('span', { class: 'k' }, kind, icon('next', 'ic-sm')), label);
+    paint();
     return {
-      el: h('div', null, seg.el, h('div', { class: 'period-nav' }, prev, label, next)),
+      el: h('div', { class: 'period-nav' }, prev, pick, next),
       update(period) {
+        box.classList.remove('is-switch');
         if (!period) return;
-        setText(label, period.label);
+        const short = period.short + ' ';  // «Неделя 12.10–18.10.2026»: вид уже написан строкой выше
+        setText(label, period.label.indexOf(short) ? period.label : period.label.slice(short.length));
         prev.disabled = !period.has_prev;
         next.disabled = !period.has_next;
       },
@@ -2721,8 +2736,8 @@
 
   function TeamView(scr) {
     const head = screenHead('Команда');
-    const pc = periodControl(teamPeriod, () => load());
     const box = h('div');
+    const pc = periodControl(teamPeriod, () => load(), box);
     const exportBtn = button('Excel-отчёт в чат', () => exportReport(), 'btn-block', null, 'table');
     // nodes(): заявок нет — pendingBanner() даёт null, а append(null) вставил бы текст «null».
     scr.el.append.apply(scr.el, nodes([head.el, pendingBanner(), pc.el, box, exportBtn]));
@@ -2762,34 +2777,53 @@
     load();
   }
 
+  /** Заявки на доступ подтверждаются в чате — плашка-кнопка возвращает туда (приложение закрывается). */
   function pendingBanner() {
     const n = counts().pending_users || 0;
     if (!n) return null;
-    const el = note('Заявок на доступ: ' + n + ' — подтвердите в чате («Сотрудники»)', 'info', null, 'adduser');
-    el.classList.add('pending-banner');
-    return el;
+    return h('button', { type: 'button', class: 'note info pending-banner', onclick: toChat }, icon('adduser'),
+      h('span', { class: 'note-body' }, h('b', null, 'Заявок на доступ: ' + n), h('br'), 'Перейти в чат и нажать «Сотрудники»'),
+      chevron());
   }
 
+  async function toChat() {
+    // Черновик задачи живёт только в памяти: закрыть приложение с ним можно лишь с согласия.
+    if (isAnythingDirty() && !(await confirmDialog(T.leave))) return;
+    safely(() => tg.disableClosingConfirmation());
+    safely(() => tg.close());
+  }
+
+  /**
+   * Сводная карточка периода — одна на «Команде» и на экране KPI: число, полоса и под чертой четыре счётчика
+   * статусов (те же значки и цвета, что у строк и меток). k — {kpi, kpi_text}, st — счётчики периода.
+   */
+  function heroCard(title, k, max, side, st) {
+    return h('section', { class: 'card hero', 'aria-label': title },
+      h('div', { class: 'hero-top' }, kpiNumber(k.kpi_text, k.kpi), h('div', { class: 'hero-side' }, side)),
+      h('p', { class: 'hero-cap' }, st.total
+        ? [isNum(k.kpi) ? title : 'Оценённых задач в периоде пока нет', ' · ', plural(st.total, 'задача', 'задачи', 'задач')]
+        : 'Задач в этом периоде нет.'),
+      kpiBar(k.kpi, max, k.kpi_text),
+      st.total ? h('div', { class: 'totals', role: 'list', 'aria-label': 'Итоги периода' },
+        totalTile('done', 'good', st.done, 'выполнено'),
+        totalTile('clock', 'bad', st.overdue_total, 'просрочено'),
+        totalTile('work', 'info', st.in_progress, 'в работе'),
+        totalTile('review', 'warn', st.on_review, 'на проверке')) : null);
+  }
+
+  /** Сверху — то, что зависит от выбранного периода (сводка, сотрудники); график последних недель — ниже. */
   function renderTeam(d) {
     const rows = d.rows || [];
     const max = scaleMax(rows.map((r) => r.kpi).concat([d.team.kpi]));
     const t = d.totals || {};
-    const hero = h('section', { class: 'card hero', 'aria-label': 'Эффективность команды' },
-      h('div', { class: 'hero-top' },
-        kpiNumber(d.team.kpi_text, d.team.kpi),
-        h('div', { class: 'hero-side' }, plural(t.employees || rows.length, 'сотрудник', 'сотрудника', 'сотрудников'), h('br'), plural(t.total || 0, 'задача', 'задачи', 'задач'))),
-      h('p', { class: 'hero-cap' }, isNum(d.team.kpi) ? 'Эффективность команды' : 'Оценённых задач в периоде пока нет'),
-      kpiBar(d.team.kpi, max, d.team.kpi_text));
-    const totals = h('div', { class: 'totals', role: 'list', 'aria-label': 'Итоги периода' },
-      totalTile('done', 'good', t.done, 'выполнено'),
-      totalTile('clock', 'bad', t.overdue_total, 'просрочено'),
-      totalTile('work', 'info', t.in_progress, 'в работе'),
-      totalTile('review', 'warn', t.on_review, 'на проверке'));
-    const trend = h('section', { class: 'card' }, h('h2', { class: 'card-title' }, trendTitle()), trendChart(d.trend));
-    const people = rows.length
-      ? h('ul', { class: 'list' }, rows.map((r) => teamRow(r, max)))
-      : emptyState('Активных сотрудников пока нет. Подтвердите заявки в чате с ботом: «Сотрудники».', 'users');
-    return [hero, totals, trend, sec('Сотрудники', rows.length ? String(rows.length) : null), people];
+    return [
+      heroCard('Эффективность команды', d.team, max, plural(t.employees || rows.length, 'сотрудник', 'сотрудника', 'сотрудников'), t),
+      sec('Сотрудники', rows.length ? String(rows.length) : null),
+      rows.length
+        ? h('ul', { class: 'list' }, rows.map((r) => teamRow(r, max)))
+        : emptyState('Активных сотрудников пока нет. Подтвердите заявки в чате с ботом: «Сотрудники».', 'users'),
+      h('section', { class: 'card' }, h('h2', { class: 'card-title' }, trendTitle()), trendChart(d.trend)),
+    ];
   }
 
   /** Окно тренда фиксировано (последние недели до сегодня, §8.8) — заголовок говорит об этом прямо,
@@ -2799,18 +2833,18 @@
     return 'Последние ' + plural(n, 'неделя', 'недели', 'недель') + ' (до сегодня)';
   }
 
-  /** Плитка итога: значок в цвете своего статуса, число, подпись. */
+  /** Счётчик статуса в сводной карточке: значок в цвете своего статуса, число, подпись. */
   function totalTile(name, tone, value, label) {
     return h('div', { class: 'total', role: 'listitem' },
       h('span', { class: 'v' }, icon(name, 'tone-' + tone), isNum(value) ? String(value) : '0'),
       h('span', { class: 'l' }, label));
   }
 
-  /** Счётчики сотрудника в одну строку: выполнено · просрочено · в работе · на проверке (значки те же, что у плиток). */
+  /** Счётчики сотрудника в одну строку: выполнено · просрочено · в работе · на проверке (значки те же, что в сводке); просрочки — красным. */
   function statsLine(st) {
     if (!st || !st.total) return 'задач нет';
-    const cell = (name, n) => h('span', { class: 'mini' }, icon(name, 'ic-sm'), String(n));
-    return dotted([cell('done', st.done), cell('clock', st.overdue_total), cell('work', st.in_progress), cell('review', st.on_review)]);
+    const cell = (name, n, tone) => h('span', { class: 'mini' + (tone && n ? ' tone-' + tone : '') }, icon(name, 'ic-sm'), String(n));
+    return dotted([cell('done', st.done), cell('clock', st.overdue_total, 'bad'), cell('work', st.in_progress), cell('review', st.on_review)]);
   }
 
   function teamRow(r, max) {
@@ -2858,11 +2892,11 @@
   /** Общий вид KPI (§11.6.1): карточка сотрудника у начальника и «Мой KPI» у сотрудника. */
   function kpiView(scr, userId, ps, self) {
     const head = screenHead(self ? 'Мой KPI' : 'Сотрудник', self ? own(state.me.user.full_name) : null);
+    const box = h('div');
     const pc = periodControl(ps, () => {
       if (!self) replaceQuery({ kind: ps.kind, offset: ps.offset });
       load();
-    });
-    const box = h('div');
+    }, box);
     scr.el.append(head.el, pc.el, box);
     const load = loadInto(scr, box, {
       request: () => ({ ep: EP.userKpi, opts: { params: { user_id: userId }, query: { kind: ps.kind, offset: ps.offset } } }),
@@ -2884,31 +2918,21 @@
     const cur = d.current || { stats: {} };
     const st = cur.stats || {};
     const max = scaleMax([cur.kpi, d.week && d.week.kpi, d.month && d.month.kpi]);
-    const out = [];
-    out.push(h('section', { class: 'card hero', 'aria-label': 'Эффективность за период' },
-      h('div', { class: 'hero-top' },
-        kpiNumber(cur.kpi_text, cur.kpi),
-        h('div', { class: 'hero-side' },
-          'Неделя: ', h('b', null, d.week ? d.week.kpi_text : '—'), h('br'),
-          'Месяц: ', h('b', null, d.month ? d.month.kpi_text : '—'))),
-      h('p', { class: 'hero-cap' }, isNum(cur.kpi) ? 'Эффективность за период' : 'Оценённых задач в периоде пока нет'),
-      kpiBar(cur.kpi, max, cur.kpi_text)));
-
-    if (!st.total) {
-      out.push(emptyState('Задач в этом периоде нет.', 'calendar'));
-    } else {
+    // Главное — сводная карточка (та же, что на «Команде»); остальные четыре показателя — тихим списком под ней.
+    const out = [heroCard('Эффективность за период', cur, max, [
+      'Неделя: ', h('b', null, d.week ? d.week.kpi_text : '—'), h('br'),
+      'Месяц: ', h('b', null, d.month ? d.month.kpi_text : '—')], st)];
+    if (st.total) {
       out.push(h('div', { class: 'stats', role: 'list', 'aria-label': 'Показатели периода' },
-        statCell(st.done + ' из ' + st.total, 'Выполнено'),
-        statCell(String(st.overdue_total), 'Просрочено'),
-        statCell(pct(st.on_time_pct), 'Выполнение в срок'),
-        statCell(String(st.overperformed), 'Перевыполнено'),
-        statCell(String(st.self_initiated), 'Внесено самостоятельно'),
-        statCell(String(st.in_progress), 'В работе'),
-        statCell(String(st.on_review), 'На проверке'),
-        statCell(pct(st.avg_score), 'Средняя оценка')));
+        statCell('Выполнение в срок', pct(st.on_time_pct)),
+        statCell('Средняя оценка', pct(st.avg_score)),
+        statCell('Перевыполнено', String(st.overperformed)),
+        statCell('Внесено самостоятельно', String(st.self_initiated))));
     }
-
-    out.push(h('section', { class: 'card' }, h('h2', { class: 'card-title' }, trendTitle()), trendChart(d.trend)));
+    if (!self && isManager()) {
+      // Как «Задачи сотрудника» в чате (ListCB scope=emp, status=all): все задачи, включая выполненные.
+      out.push(button('Задачи сотрудника', () => go('#/tasks?user=' + userId + '&status=all'), 'more', null, 'tasks'));
+    }
 
     const items = cur.items || [];
     if (items.length) {
@@ -2922,17 +2946,14 @@
       }))));
     }
 
+    // График последних недель не зависит от выбранного периода — он ниже того, что от периода зависит.
+    out.push(h('section', { class: 'card' }, h('h2', { class: 'card-title' }, trendTitle()), trendChart(d.trend)));
     out.push(historySection(scr, d, ps, userId));
-
-    if (!self && isManager()) {
-      // Как «Задачи сотрудника» в чате (ListCB scope=emp, status=all): все задачи, включая выполненные.
-      out.push(button('Задачи сотрудника', () => go('#/tasks?user=' + userId + '&status=all'), 'btn-block mt12', null, 'tasks'));
-    }
     return out;
   }
 
-  function statCell(value, label) {
-    return h('div', { class: 'stat', role: 'listitem' }, h('span', { class: 'v' }, value), h('span', { class: 'l' }, label));
+  function statCell(label, value) {
+    return h('div', { class: 'stat', role: 'listitem' }, h('span', { class: 'l' }, label), h('span', { class: 'v' }, value));
   }
 
   function historySection(scr, d, ps, userId) {
@@ -4746,7 +4767,6 @@
     "{} задач": "{} ta vazifa",
     "{} задача": "{} ta vazifa",
     "{} задачи": "{} ta vazifa",
-    "{} из {}": "{} / {}",
     "{} сотрудник": "{} ta xodim",
     "{} сотрудника": "{} ta xodim",
     "{} сотрудников": "{} ta xodim",
@@ -4780,7 +4800,6 @@
     "Выберите сотрудника": "Xodimni tanlang",
     "Выйти без сохранения?": "Saqlamasdan chiqilsinmi?",
     "Выполнение в срок": "Muddatida bajarish",
-    "Выполнено": "Bajarildi",
     "Выполнено {}, просрочено {}, в работе {}, на проверке {}": "Bajarildi {}, muddati oʻtgan {}, bajarilmoqda {}, tekshiruvda {}",
     "Выполнены": "Bajarilgan",
     "Где лежат материалы": "Materiallar qayerda",
@@ -4905,7 +4924,6 @@
     "Причина (необязательно)": "Sabab (ixtiyoriy)",
     "Проверка": "Tekshiruv",
     "Проверка результата": "Natijani tekshirish",
-    "Просрочено": "Muddati oʻtgan",
     "Просрочены": "Muddati oʻtgan",
     "Пустой файл «{u}»": "Boʻsh fayl: «{u}»",
     "Разделы": "Boʻlimlar",
@@ -5079,7 +5097,8 @@
     "Отчёт придёт в чат с ботом через несколько секунд.": "Hisobot bir necha soniyada bot bilan chatga keladi.",
     "Поручение #{} отправлено начальнику на подтверждение": "#{} topshiriq tasdiqlash uchun boshliqqa yuborildi",
     "Сдано:": "Topshirildi:",
-    "Заявок на доступ: {} — подтвердите в чате («Сотрудники»)": "Kirish uchun arizalar: {} — chatda tasdiqlang («Xodimlar»)",
+    "Заявок на доступ: {}": "Kirish uchun arizalar: {}",
+    "Перейти в чат и нажать «Сотрудники»": "Chatga oʻtib, «Xodimlar» tugmasini bosing",
     "Поручение ещё не подтверждено начальником — сдать результат можно после подтверждения.": "Topshiriq hali boshliq tomonidan tasdiqlanmagan — natijani tasdiqlangandan keyin topshirish mumkin.",
     "Другой вариант": "Boshqa variant",
     "Повторить": "Qayta urinish",
