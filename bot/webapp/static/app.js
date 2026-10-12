@@ -25,6 +25,7 @@
   const SVG_NS = 'http://www.w3.org/2000/svg';
 
   const CACHE_TTL_MS = 30 * 1000;      // GET-ответы живут в памяти 30 с (§11.5)
+  const STALE_MAX_MS = 10 * 60 * 1000; // прежний ответ не старше 10 мин виден, пока идёт запрос за свежим
   const STALE_MS = 30 * 1000;          // при возврате в приложение экран старше 30 с перечитывается
   const GET_TIMEOUT_MS = 20 * 1000;
   const POST_TIMEOUT_MS = 30 * 1000;
@@ -65,6 +66,8 @@
     weightLoad: ['GET', '/api/employees/{user_id}/weight-load'],
     exportReport: ['POST', '/api/export'],
   });
+  /** Запросы, которые не меняют ни списков, ни карточек (и бывают долгими): загрузчики их не ждут (см. settled). */
+  const QUIET = new Set([EP.formulate, EP.voice, EP.sendFiles, EP.exportReport]);
 
   /** Настройки по умолчанию — до ответа /api/me (тот же состав, что Me.config). */
   const DEFAULT_CFG = {
@@ -538,6 +541,8 @@
   }
 
   function applyMe(me) {
+    // Ответы в кэше написаны на прежнем языке и для прежней роли (язык могли сменить и в чате): после смены — сброс.
+    if (state.me && ((me.lang === 'uz' ? 'uz' : 'ru') !== i18n.lang || me.role !== state.role)) dropCache();
     state.me = me;
     state.role = me.role;
     setLang(me.lang);
@@ -802,6 +807,19 @@
   const cache = new Map();     // адрес -> {at, data}
   const inflight = new Map();  // адрес -> Promise (одинаковые GET не дублируются)
   let cacheGen = 0;
+  let posting = 0;             // идущие действия (всё, что не GET)
+  const whenIdle = [];         // загрузчики, которые ждут их окончания
+
+  function dropCache() {
+    cacheGen += 1;
+    cache.clear();
+    inflight.clear();
+  }
+
+  /** Действия закончились. Ответ GET, пришедший во время действия, сервер мог прочитать ещё до него. */
+  function settled() {
+    return posting ? new Promise((resolve) => whenIdle.push(resolve)) : Promise.resolve();
+  }
 
   function fillPath(template, params) {
     return template.replace(/\{(\w+)\}/g, (_, name) => {
@@ -831,12 +849,26 @@
     return hit && Date.now() - hit.at < CACHE_TTL_MS ? hit : null;
   }
 
+  /** Прежний ответ (не старше STALE_MAX_MS): его показывают сразу, пока идёт запрос за свежим. Только для загрузчиков. */
+  function stale(ep, opts) {
+    const hit = cache.get(urlOf(ep, opts));
+    return hit && Date.now() - hit.at < STALE_MAX_MS ? hit : null;
+  }
+
   /** api(EP.task, {params: {task_id: 5}, query, body, fresh, timeout}) -> данные ответа или ApiError. */
   function api(ep, opts) {
     const o = opts || {};
     const method = ep[0];
     const url = urlOf(ep, o);
-    if (method !== 'GET') return send(method, url, o.body, o.timeout || POST_TIMEOUT_MS);
+    if (method !== 'GET') {
+      if (QUIET.has(ep)) return send(method, url, o.body, o.timeout || POST_TIMEOUT_MS);
+      posting += 1;
+      return send(method, url, o.body, o.timeout || POST_TIMEOUT_MS).finally(() => {
+        posting -= 1;
+        // Ждущих будим отдельной задачей: сначала тот, кто отправлял, сбросит кэш (afterMutation).
+        if (!posting) setTimeout(() => whenIdle.splice(0).forEach((resolve) => resolve()), 0);
+      });
+    }
     if (!o.fresh) {
       const hit = cache.get(url);
       if (hit && Date.now() - hit.at < CACHE_TTL_MS) return Promise.resolve(hit.data);
@@ -847,8 +879,13 @@
       .then((data) => {
         if (gen === cacheGen) cache.set(url, { at: Date.now(), data });
         return data;
+      }, (err) => {
+        if (err.status === 403 || err.status === 404) cache.delete(url);  // прежний ответ больше не показывать
+        throw err;
       })
-      .finally(() => inflight.delete(url));
+      .finally(() => {
+        if (inflight.get(url) === promise) inflight.delete(url);
+      });
     inflight.set(url, promise);
     return promise;
   }
@@ -936,6 +973,7 @@
 
   function invalidate(prefixes) {
     cacheGen += 1;
+    inflight.clear();  // запрос, начатый до изменения, не должен достаться тому, кто придёт после
     for (const key of Array.from(cache.keys())) {
       if (prefixes.some((p) => key === p || key.indexOf(p) === 0)) cache.delete(key);
     }
@@ -1354,8 +1392,7 @@
       haptic.sel();
       try {
         await api(EP.setLang, { body: { lang: next } });
-        cacheGen += 1;
-        cache.clear();
+        dropCache();
         setLang(next);
         const me = await api(EP.me, { fresh: true });
         if (me && me.access === 'active') applyMe(me);
@@ -1435,9 +1472,9 @@
     return [block(), block(), block()];
   }
 
-  /** Пустое состояние: крупный значок (name из ICONS) и пояснение. */
-  function emptyState(text, name) {
-    return h('div', { class: 'state' }, h('div', { class: 'state-ico' }, icon(name || 'empty', 'ic-xl')), h('p', null, text));
+  /** Пустое состояние: крупный значок (name из ICONS), пояснение и — если есть честный следующий шаг — кнопка action. */
+  function emptyState(text, name, action) {
+    return h('div', { class: 'state' }, h('div', { class: 'state-ico' }, icon(name || 'empty', 'ic-xl')), h('p', null, text), action);
   }
 
   function errorState(err, retry) {
@@ -1619,9 +1656,12 @@
   // --- Загрузка данных в контейнер --------------------------------------------------------------
 
   /**
-   * loadInto(scr, box, {request: () => ({ep, opts}), skeleton, render}) -> run(fresh).
+   * loadInto(scr, box, {request: () => ({ep, opts}), skeleton, render, stale}) -> run(fresh).
    * Кэш свежий — рисуем сразу; иначе скелетон (если показывать нечего), затем данные или ошибка
    * с кнопкой «Повторить». Поздние ответы (экран сменился, запрос устарел) отбрасываются.
+   * spec.stale — вместо скелетона сразу виден прежний ответ, свежий приходит следом (не для форм и экранов
+   * решения: их render строит ввод и основную кнопку из данных — там прежнее показывать нельзя).
+   * spec.keep — ответ не старше STALE_MAX_MS годится как свежий, запроса вдогонку нет (форма не перерисуется).
    */
   function loadInto(scr, box, spec) {
     let seq = 0;
@@ -1650,8 +1690,9 @@
 
     async function run(fresh) {
       const my = ++seq;
+      const gen = cacheGen;
       const req = spec.request();
-      const hit = fresh ? null : peek(req.ep, req.opts);
+      const hit = fresh ? null : (spec.keep ? stale : peek)(req.ep, req.opts);
       if (hit) {
         scr.loadedAt = hit.at;
         box.removeAttribute('aria-busy');  // запрос, который ещё в пути, устарел и флаг сам не снимет
@@ -1659,11 +1700,22 @@
         return;
       }
       box.setAttribute('aria-busy', 'true');
-      if (box.dataset.state !== 'ok') box.replaceChildren.apply(box, nodes(spec.skeleton()));
+      const old = spec.stale && !fresh ? stale(req.ep, req.opts) : null;
+      const snap = old ? JSON.stringify(old.data) : '';  // снимок: карточка задачи правит свой объект на месте
+      if (old) {
+        scr.loadedAt = old.at;
+        paint(old.data);
+      } else if (box.dataset.state !== 'ok') box.replaceChildren.apply(box, nodes(spec.skeleton()));
       try {
         const data = await api(req.ep, Object.assign({}, req.opts, { fresh: Boolean(fresh) }));
+        while (posting) await settled();
         if (!scr.alive || my !== seq) return;
+        if (gen !== cacheGen) {  // пока ждали, что-то изменили: этот ответ мог быть прочитан до изменения
+          run(true);
+          return;
+        }
         scr.loadedAt = Date.now();
+        if (old && snap === JSON.stringify(data)) return;  // то же самое уже на экране
         paint(data);
       } catch (err) {
         // 401/403 доступа уже сменили экран; 429 показан тостом, но здесь нужна кнопка «Повторить».
@@ -2551,6 +2603,7 @@
     requestAnimationFrame(revealSelected);
     return {
       el,
+      showAll: () => items[items.length - 1].b.click(),  // «Все» — последний чип
       setCounts(c) {
         items.forEach((x, i) => {
           const n = c ? c[STATUS_FILTERS[i].value] : undefined;
@@ -2574,9 +2627,15 @@
       const notes = data.truncated ? note('Показаны первые 2000 задач — уточните запрос.', 'info') : null;
       if (!append) {
         box.dataset.state = 'ok';
+        page = 0;  // список рисуется заново с первой страницы (и свежим ответом поверх прежнего)
         if (!data.items.length) {
+          // Пусто — с действием: сбросить поиск, показать все статусы или (начальнику) поставить задачу.
+          const all = data.counts && data.counts.all;
+          const act = q ? spec.clearSearch && button('Очистить поиск', spec.clearSearch, '', null, 'x')
+            : all ? button('Все задачи', spec.showAll, '', null, 'tasks')
+              : spec.create && button('Поставить задачу', () => go('#/new'), '', null, 'add');
           box.replaceChildren.apply(box, nodes([
-            emptyState(q ? 'По запросу «' + own(q) + '» ничего не найдено.' : spec.emptyText || 'Задач нет.', q ? 'search' : 'empty'),
+            emptyState(q ? 'По запросу «' + own(q) + '» ничего не найдено.' : 'Задач нет.', q ? 'search' : 'empty', act),
             notes]));
           return;
         }
@@ -2592,20 +2651,34 @@
 
     async function reload(fresh) {
       const my = ++seq;
+      const gen = cacheGen;
       page = 0;
       const query = spec.query(0);
       const hit = fresh ? null : peek(EP.tasks, { query });
       if (hit) {
         scr.loadedAt = hit.at;
+        box.removeAttribute('aria-busy');
         paint(hit.data, false);
         return;
       }
       box.setAttribute('aria-busy', 'true');
-      if (box.dataset.state !== 'ok') box.replaceChildren(skelList(5));
+      // Прежний список — сразу, свежий придёт следом (те же правила, что у loadInto со spec.stale).
+      const old = fresh ? null : stale(EP.tasks, { query });
+      const snap = old ? JSON.stringify(old.data) : '';
+      if (old) {
+        scr.loadedAt = old.at;
+        paint(old.data, false);
+      } else if (box.dataset.state !== 'ok') box.replaceChildren(skelList(5));
       try {
         const data = await api(EP.tasks, { query, fresh: Boolean(fresh) });
+        while (posting) await settled();
         if (!scr.alive || my !== seq) return;
+        if (gen !== cacheGen) {
+          reload(true);
+          return;
+        }
         scr.loadedAt = Date.now();
+        if (old && snap === JSON.stringify(data)) return;
         paint(data, false);
       } catch (err) {
         if (!scr.alive || my !== seq || err.handled) return;
@@ -2623,7 +2696,8 @@
       setText(more, 'Загрузка…');
       try {
         const data = await api(EP.tasks, { query: spec.query(page + 1) });
-        if (!scr.alive || my !== seq) return;
+        // Кнопки уже нет на экране (список перерисован свежим ответом) — её страница не нужна.
+        if (!scr.alive || my !== seq || !more.isConnected) return;
         page += 1;
         more.remove();
         paint(data, true);
@@ -2745,6 +2819,7 @@
     const load = loadInto(scr, box, {
       request: () => ({ ep: EP.dashboard, opts: { query: { kind: teamPeriod.kind, offset: teamPeriod.offset } } }),
       skeleton: skelDashboard,
+      stale: true,
       render(d) {
         pc.update(d.period);
         return renderTeam(d);
@@ -2901,6 +2976,7 @@
     const load = loadInto(scr, box, {
       request: () => ({ ep: EP.userKpi, opts: { params: { user_id: userId }, query: { kind: ps.kind, offset: ps.offset } } }),
       skeleton: () => [skelHero(), sk('sk-block skel-on-page'), skelList(3)],
+      stale: true,
       render(d) {
         pc.update(d.period);
         if (!self && d.user) {
@@ -2948,7 +3024,7 @@
 
     // График последних недель не зависит от выбранного периода — он ниже того, что от периода зависит.
     out.push(h('section', { class: 'card' }, h('h2', { class: 'card-title' }, trendTitle()), trendChart(d.trend)));
-    out.push(historySection(scr, d, ps, userId));
+    out.push(historySection(scr, d, ps, userId, self));
     return out;
   }
 
@@ -2956,11 +3032,12 @@
     return h('div', { class: 'stat', role: 'listitem' }, h('span', { class: 'l' }, label), h('span', { class: 'v' }, value));
   }
 
-  function historySection(scr, d, ps, userId) {
+  function historySection(scr, d, ps, userId, self) {
     const hist = d.history || { items: [], page: 0, pages: 1, total: 0 };
     const wrap = h('div', null, sec('История оценок', hist.total ? String(hist.total) : null));
     if (!hist.items.length) {
-      wrap.appendChild(emptyState('Оценённых задач пока нет.', 'history'));
+      wrap.appendChild(emptyState('Оценённых задач пока нет.', 'history',
+        self && counts().open ? button('Сдать результат', () => go('#/submit'), '', null, 'send') : null));
       return wrap;
     }
     const list = h('ul', { class: 'list' }, hist.items.map(historyRow));
@@ -3080,6 +3157,9 @@
       row: { assignee: true },
       onCounts: chips.setCounts,
       searchText: () => tasksFilter.q.trim(),
+      clearSearch: () => search.reset(),
+      showAll: chips.showAll,
+      create: true,
     });
     scr.refresh = () => list.reload(true);
     list.reload();
@@ -3110,6 +3190,7 @@
       query: (page) => ({ scope: 'my', status: myFilter.status, page, limit: 20, counts: page === 0 ? 1 : null }),
       row: { onAccept: acceptInline },
       onCounts: chips.setCounts,
+      showAll: chips.showAll,
     });
     scr.refresh = () => list.reload(true);
     list.reload();
@@ -3122,9 +3203,15 @@
     const load = loadInto(scr, box, {
       request: () => ({ ep: EP.tasks, opts: { query: { scope: 'my', status: 'open', limit: 50 } } }),
       skeleton: () => skelList(4),
+      stale: true,
       render: (d) => (d.items.length
         ? h('ul', { class: 'list' }, d.items.map(submitRow))
-        : emptyState('Нет задач для сдачи. Здесь появятся задачи в работе и на доработке.', 'inbox')),
+        // Сдавать нечего, но задачи есть (на проверке, на подтверждении) — кнопка покажет их все.
+        : emptyState('Нет задач для сдачи. Здесь появятся задачи в работе и на доработке.', 'inbox',
+          counts().review || counts().proposed ? button('Мои задачи', () => {
+            myFilter.status = 'all';
+            go('#/my');
+          }, '', null, 'tasks') : null)),
     });
     scr.refresh = () => load(true);
     load();
@@ -3154,6 +3241,7 @@
     const load = loadInto(scr, box, {
       request: () => ({ ep: EP.task, opts: { params: { task_id: taskId } } }),
       skeleton: skelCard,
+      stale: true,
       render: (card) => {
         poll((card.submissions || []).some((sb) => sb.ai_pending));
         return renderCard(card);
@@ -3509,34 +3597,43 @@
     if (query.get('tab') === 'proposals' || query.get('tab') === 'results') reviewState.seg = query.get('tab');
     const head = screenHead('Проверка');
     const c = counts();
-    const seg = segmented([
-      { value: 'results', label: segLabel('Результаты', c.review) },
-      { value: 'proposals', label: segLabel('Поручения', c.proposals) },
-    ], reviewState.seg, (v) => {
+    const pick = (v) => {
       reviewState.seg = v;
       replaceQuery({ tab: v });
       box.dataset.state = '';
       load();
-    }, 'Что проверять');
+    };
+    const seg = segmented([
+      { value: 'results', label: segLabel('Результаты', c.review) },
+      { value: 'proposals', label: segLabel('Поручения', c.proposals) },
+    ], reviewState.seg, pick, 'Что проверять');
     const box = h('div', { role: 'tabpanel' });
     scr.el.append(head.el, seg.el, box);
     const load = loadInto(scr, box, {
       request: () => ({ ep: reviewState.seg === 'proposals' ? EP.proposals : EP.review }),
       skeleton: () => skelList(4),
+      stale: true,
       render(d) {
         const items = d.items || [];
-        if (reviewState.seg === 'proposals') {
-          seg.setLabel('proposals', segLabel('Поручения', items.length));
-          return items.length ? h('ul', { class: 'list' }, items.map((it) => proposalRow(it.task))) : emptyState('Новых поручений нет.', 'inbox');
-        }
-        seg.setLabel('results', segLabel('Результаты', items.length));
-        return items.length ? h('ul', { class: 'list' }, items.map(reviewRow)) : emptyState('Нечего проверять', 'done');
+        const mine = reviewState.seg === 'proposals';
+        seg.setLabel(reviewState.seg, mine ? segLabel('Поручения', items.length) : segLabel('Результаты', items.length));
+        if (items.length) return h('ul', { class: 'list' }, mine ? items.map((it) => proposalRow(it.task)) : items.map(reviewRow));
+        // Пусто здесь, а в соседней очереди что-то ждёт (бейдж вкладки считает обе) — кнопка ведёт туда.
+        const to = mine ? 'results' : 'proposals';
+        const n = mine ? counts().review : counts().proposals;
+        return emptyState(mine ? 'Новых поручений нет.' : 'Нечего проверять', mine ? 'inbox' : 'done',
+          n ? button(mine ? segLabel('Результаты', n) : segLabel('Поручения', n), () => {
+            seg.set(to);
+            pick(to);
+          }, '', null, mine ? 'review' : 'inbox') : null);
       },
     });
     scr.onCounts = () => {
       const fresh = counts();
       seg.setLabel('results', segLabel('Результаты', fresh.review));
       seg.setLabel('proposals', segLabel('Поручения', fresh.proposals));
+      // Пустое состояние: его кнопка в соседнюю очередь считается по этим же счётчикам.
+      if (box.dataset.state === 'ok' && !box.querySelector('.list')) load();
     };
     scr.refresh = () => load(true);
     load();
@@ -3601,8 +3698,7 @@
         primary.hide();
         return [
           h('section', { class: 'card' }, h('h2', { class: 'task-title' }, own(t.title)), h('div', { class: 'pills' }, statusPill(t))),
-          emptyState('Результат уже обработан или ещё не сдан.', 'done'),
-          button('Открыть карточку задачи', () => go('#/task/' + t.id, { replace: true }), 'btn-block'),
+          emptyState('Результат уже обработан или ещё не сдан.', 'done', button('Открыть карточку задачи', () => go('#/task/' + t.id, { replace: true }))),
         ];
       }
       const canConfirm = Boolean(sb.ai && isNum(sb.ai.score));
@@ -3868,8 +3964,7 @@
         primary.hide();
         return [
           h('section', { class: 'card' }, h('h2', { class: 'task-title' }, own(t.title)), h('div', { class: 'pills' }, statusPill(t))),
-          emptyState('Поручение уже обработано.', 'done'),
-          button('Открыть карточку задачи', () => go('#/task/' + t.id, { replace: true }), 'btn-block'),
+          emptyState('Поручение уже обработано.', 'done', button('Открыть карточку задачи', () => go('#/task/' + t.id, { replace: true }))),
         ];
       }
       const expired = Date.parse(t.deadline) <= serverNow();
@@ -3976,6 +4071,7 @@
     const load = loadInto(scr, box, {
       request: () => ({ ep: EP.employees }),
       skeleton: skelForm,
+      keep: true,  // список сотрудников меняется редко, а перерисовка сорвала бы форму под руками
       render: (data) => newTaskForm(scr, d, data.items || [], () => load()),
     });
     load();
@@ -4017,7 +4113,7 @@
   function newTaskForm(scr, d, employees, rerender) {
     if (!employees.length) {
       primary.hide();
-      return emptyState(T.noEmployees, 'users');
+      return emptyState(T.noEmployees, 'users', counts().pending_users ? button('Перейти в чат', toChat, '', null, 'message') : null);
     }
     if (d.assignee_id && !employees.some((u) => String(u.id) === d.assignee_id)) d.assignee_id = '';
     const formErr = h('div', { class: 'form-error', role: 'alert' });
@@ -4272,8 +4368,7 @@
         const t = card.task;
         if (!t.actions || !t.actions.edit) {
           primary.hide();
-          return [emptyState('Эту задачу сейчас изменить нельзя: ' + own(statusText(t).toLowerCase()) + '.', 'lock'),
-            button('Открыть карточку задачи', () => go('#/task/' + t.id, { replace: true }), 'btn-block')];
+          return emptyState('Эту задачу сейчас изменить нельзя: ' + own(statusText(t).toLowerCase()) + '.', 'lock', button('Открыть карточку задачи', () => go('#/task/' + t.id, { replace: true })));
         }
         form = editForm(scr, t);
         return form.el;
@@ -4527,8 +4622,8 @@
           primary.hide();
           return [
             h('section', { class: 'card' }, h('h2', { class: 'task-title' }, own(t.title)), h('div', { class: 'pills' }, statusPill(t))),
-            emptyState(NOT_OPEN_TEXTS[t.status] || 'Задача не в работе — сдать результат нельзя.', 'info'),
-            button('К моим задачам', () => go('#/my', { reset: true }), 'btn-block', null, 'tasks'),
+            emptyState(NOT_OPEN_TEXTS[t.status] || 'Задача не в работе — сдать результат нельзя.', 'info',
+              button('К моим задачам', () => go('#/my', { reset: true }), '', null, 'tasks')),
           ];
         }
         form = submitForm(scr, t, box);
@@ -4788,6 +4883,7 @@
     "Внесите поручение, полученное устно: начальник подтвердит его.": "Ogʻzaki olingan topshiriqni kiriting: boshliq uni tasdiqlaydi.",
     "Время": "Vaqt",
     "Все": "Hammasi",
+    "Все задачи": "Barcha vazifalar",
     "Все сотрудники": "Barcha xodimlar",
     "Все файлы вместе — не больше {} МБ.": "Barcha fayllar birgalikda {} MB dan oshmasin.",
     "Вы написали:": "Siz yozdingiz:",

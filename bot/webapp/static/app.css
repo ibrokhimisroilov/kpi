@@ -747,6 +747,9 @@ body.sheet-open { overflow: hidden; }
 .sheet-head h2 { flex: 1; min-width: 0; margin: 0; font-size: var(--fs-head); line-height: 1.25; font-weight: 700; overflow-wrap: break-word; }
 @keyframes sheet-in { from { transform: translateY(100%); } to { transform: none; } }
 @keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
+/* Новый экран появляется мягко. Перерисовки внутри экрана и «скелет» запуска не анимируются. */
+.main > .screen { animation: screen-in .18s ease-out; }
+@keyframes screen-in { from { opacity: 0; transform: translateY(6px); } }
 @keyframes mic-pulse { 0%, 100% { box-shadow: 0 0 0 0 rgba(196, 53, 43, .45); } 50% { box-shadow: 0 0 0 8px rgba(196, 53, 43, 0); } }
 
 /* --- Утилиты (последними: побеждают правила компонентов) --- */
