@@ -2358,6 +2358,36 @@
     return true;
   }
 
+  /**
+   * «Осталось заполнить: …» — строка в конце формы. Основная кнопка формы активна всегда: нажатие с пустыми
+   * обязательными полями подсвечивает их (firstInvalid) и называет в подсказке (warn).
+   * items: [{label, ok: () => boolean}].
+   */
+  function formGuide(items) {
+    const el = h('p', { class: 'form-left', 'aria-live': 'polite' });
+    const left = () => items.filter((item) => !item.ok()).map((item) => item.label);
+    let shown = null;
+    function refresh() {
+      const names = left();
+      if (names.join() === shown) return;  // без перемен строку не трогаем: её читает экранный диктор
+      shown = names.join();
+      el.classList.toggle('is-ok', !names.length);
+      el.replaceChildren();
+      appendKids(el, names.length
+        ? [icon('info', 'ic-sm'), h('span', null, 'Осталось заполнить: ', names.map((name, i) => (i ? [', ', name] : name)))]
+        : [icon('check', 'ic-sm'), h('span', null, 'Всё заполнено')]);
+    }
+    refresh();
+    return {
+      el,
+      refresh,
+      warn() {
+        const names = left();
+        if (names.length) toast(tr('Осталось заполнить:') + ' ' + names.map((name) => tr(name)).join(', '), 'alert');
+      },
+    };
+  }
+
   // --- Строки списков -----------------------------------------------------------------------
 
   const STATUS_ICONS = { proposed: 'inbox', active: 'work', submitted: 'review', rework: 'undo', done: 'done', cancelled: 'ban', rejected: 'reject' };
@@ -3740,9 +3770,9 @@
     const comment = field({
       label: 'Что нужно доработать?', required: true, multiline: true, rows: 4, max: 2000,
       requiredText: 'Напишите, что нужно доработать',
-      placeholder: 'Например: добавьте расчёт по 12 договорам с нарушениями', onInput: () => sync(),
+      placeholder: 'Например: добавьте расчёт по 12 договорам с нарушениями',
     });
-    const picker = deadlinePicker(dl, { label: 'Новый срок', onChange: () => sync() });
+    const picker = deadlinePicker(dl, { label: 'Новый срок' });
     const pickerWrap = h('div', { hidden: mode !== 'new' }, picker.el);
     const groupName = uid('rw');
     const keep = h('input', { type: 'radio', name: groupName, value: 'keep', checked: mode === 'keep', disabled: past });
@@ -3751,16 +3781,7 @@
       mode = r.value;
       pickerWrap.hidden = mode !== 'new';
       haptic.sel();
-      sync();
     }));
-
-    function ready() {
-      return comment.get().trim() !== '' && (mode === 'keep' || Boolean(picker.value()));
-    }
-
-    function sync() {
-      primary.update({ enabled: ready() }, 'sheet');
-    }
 
     sheet.show({
       title: 'Вернуть на доработку',
@@ -3776,14 +3797,8 @@
       dirty: () => comment.get().trim() !== '',
       primary: {
         text: 'Вернуть на доработку',
-        enabled: false,
         onClick: async () => {
-          const okComment = comment.validate();
-          const okDate = mode === 'keep' || picker.validate();
-          if (!okComment || !okDate) {
-            haptic.err();
-            return;
-          }
+          if (!firstInvalid([comment, mode === 'new' ? picker : null])) return;
           primary.update({ progress: true }, 'sheet');
           try {
             const body = { comment: comment.get().trim() };
@@ -3841,7 +3856,7 @@
       // Вес у поручения пока временный — это подсказка (AI или по умолчанию): он выбран заранее.
       const suggested = isNum(t.weight) && t.weight >= 1 && t.weight <= 100 ? t.weight : null;
       if (model.weight === null && suggested !== null) model.weight = suggested;
-      const wp = weightPicker(model, { onChange: () => primary.update({ enabled: wp.filled() }) });
+      const wp = weightPicker(model);
       const pr = segmented(PRIORITIES, model.priority, (v) => {
         model.priority = v;
       }, 'Приоритет', 'radio');
@@ -3883,7 +3898,7 @@
         }
       }
 
-      primary.set({ text: 'Подтвердить поручение', enabled: wp.filled(), onClick: approve });
+      primary.set({ text: 'Подтвердить поручение', onClick: approve });
       return [
         h('section', { class: 'card' },
           h('h2', { class: 'task-title' }, own(t.title)),
@@ -4037,13 +4052,17 @@
     }, 'Приоритет', 'radio');
     const weight = weightPicker(d, { onChange: changed });
 
-    function filled() {
-      return Boolean(d.assignee_id && d.title.trim() && d.expected_result.trim() && d.deadline.date && weight.filled());
-    }
+    const guide = formGuide([
+      { label: 'Сотрудник', ok: () => Boolean(d.assignee_id) },
+      { label: 'Задача', ok: () => Boolean(d.title.trim()) },
+      { label: 'Ожидаемый результат', ok: () => Boolean(d.expected_result.trim()) },
+      { label: 'Срок', ok: () => Boolean(d.deadline.date) },
+      { label: 'Вес задачи', ok: () => weight.filled() },
+    ]);
 
     function changed() {
       ai.refresh();
-      primary.update({ enabled: filled() });
+      guide.refresh();
       syncClosingSoon();
     }
 
@@ -4067,7 +4086,10 @@
 
     async function submit() {
       formErr.replaceChildren();
-      if (!firstInvalid([who, title, result, plan, deadline, weight])) return;
+      if (!firstInvalid([who, title, result, plan, deadline, weight])) {
+        guide.warn();
+        return;
+      }
       const body = {
         assignee_id: Number(d.assignee_id), title: d.title.trim(), expected_result: d.expected_result.trim(),
         deadline: deadline.value(), priority: d.priority, weight: d.weight,
@@ -4097,7 +4119,7 @@
       }
     }
 
-    primary.set({ text: 'Поставить задачу', enabled: filled(), onClick: submit });
+    primary.set({ text: 'Поставить задачу', onClick: submit });
     refreshLoad();
     const dictate = dictateBar('Надиктовать задачу целиком', (data) => {
       applyDictation(d, data);
@@ -4107,9 +4129,11 @@
     return h('form', { class: 'form', novalidate: true, onsubmit: (e) => e.preventDefault() },
       dictate,
       formErr,
-      who.el, title.el, result.el, plan.el, deadline.el,
-      h('div', { class: 'field' }, h('div', { class: 'label' }, 'Приоритет'), priority.el),
-      weight.el);
+      // Три блока: что и кому поручаем · к какому сроку · насколько это важно.
+      h('section', { class: 'card' }, who.el, title.el, result.el, plan.el),
+      h('section', { class: 'card' }, deadline.el),
+      h('section', { class: 'card' }, h('div', { class: 'field' }, h('div', { class: 'label' }, 'Приоритет'), priority.el), weight.el),
+      guide.el);
   }
 
   function ProposeView(scr) {
@@ -4154,19 +4178,24 @@
     result.el.insertBefore(ai.el, result.el.lastChild);
     const deadline = deadlinePicker(d.deadline, { onChange: changed });
 
-    function filled() {
-      return Boolean(d.title.trim() && d.expected_result.trim() && d.deadline.date);
-    }
+    const guide = formGuide([
+      { label: 'Задача', ok: () => Boolean(d.title.trim()) },
+      { label: 'Ожидаемый результат', ok: () => Boolean(d.expected_result.trim()) },
+      { label: 'Срок', ok: () => Boolean(d.deadline.date) },
+    ]);
 
     function changed() {
       ai.refresh();
-      primary.update({ enabled: filled() });
+      guide.refresh();
       syncClosingSoon();
     }
 
     async function submit() {
       formErr.replaceChildren();
-      if (!firstInvalid([title, result, plan, deadline])) return;
+      if (!firstInvalid([title, result, plan, deadline])) {
+        guide.warn();
+        return;
+      }
       const body = { title: d.title.trim(), expected_result: d.expected_result.trim(), deadline: deadline.value() };
       if (d.description && d.description !== body.expected_result) body.description = d.description.slice(0, 2000);
       const pv = String(d.plan_value || '').trim();
@@ -4194,14 +4223,17 @@
       }
     }
 
-    primary.set({ text: 'Отправить начальнику', enabled: filled(), onClick: submit });
+    primary.set({ text: 'Отправить начальнику', onClick: submit });
     const dictate = dictateBar('Надиктовать поручение целиком', (data) => {
       applyDictation(d, data);
       toast('Готово — проверьте поля перед отправкой.', 'mic');
       rerender();
     });
     return h('form', { class: 'form', novalidate: true, onsubmit: (e) => e.preventDefault() },
-      dictate, formErr, title.el, result.el, plan.el, deadline.el);
+      dictate, formErr,
+      h('section', { class: 'card' }, title.el, result.el, plan.el),
+      h('section', { class: 'card' }, deadline.el),
+      guide.el);
   }
 
   function EditTaskView(scr, args) {
@@ -4238,7 +4270,10 @@
     };
     const init = JSON.parse(JSON.stringify(m));
     const formErr = h('div', { class: 'form-error', role: 'alert' });
-    const parts = [formErr];
+    const main = [];  // что сделать
+    const when = [];  // срок
+    const rank = [];  // приоритет и вес
+    const parts = [];
     let title = null;
     let result = null;
     let plan = null;
@@ -4247,27 +4282,27 @@
 
     if (fields.has('title')) {
       title = field({ label: 'Задача', required: true, max: 255, value: m.title, requiredText: 'Название не может быть пустым', onInput: (v) => { m.title = v; changed(); } });
-      parts.push(title.el);
+      main.push(title.el);
     }
     if (fields.has('expected_result')) {
       result = field({ label: 'Ожидаемый результат', required: true, multiline: true, rows: 4, max: 2000, value: m.expected_result, requiredText: 'Опишите ожидаемый результат', onInput: (v) => { m.expected_result = v; changed(); } });
-      parts.push(result.el);
+      main.push(result.el);
     }
     if (fields.has('plan')) {
       plan = planFields(m, { onChange: changed });
-      parts.push(plan.el);
+      main.push(plan.el);
     }
     if (fields.has('deadline')) {
       deadline = deadlinePicker(m.deadline, { onChange: () => { changed(); refreshLoad(); } });
-      parts.push(deadline.el);
+      when.push(deadline.el);
     }
     if (fields.has('priority')) {
       const pr = segmented(PRIORITIES, m.priority, (v) => { m.priority = v; changed(); }, 'Приоритет', 'radio');
-      parts.push(h('div', { class: 'field' }, h('div', { class: 'label' }, 'Приоритет'), pr.el));
+      rank.push(h('div', { class: 'field' }, h('div', { class: 'label' }, 'Приоритет'), pr.el));
     }
     if (fields.has('weight')) {
       weight = weightPicker(m, { onChange: changed });
-      parts.push(weight.el);
+      rank.push(weight.el);
     }
     if (t.status === 'proposed') parts.push(note('Вес и приоритет назначаются при подтверждении поручения.', 'info', null, 'weight'));
 
@@ -4316,7 +4351,6 @@
     }
 
     function changed() {
-      primary.update({ enabled: hasChanges() });
       syncClosingSoon();
     }
 
@@ -4324,7 +4358,10 @@
       formErr.replaceChildren();
       if (!firstInvalid([title, result, plan, deadline, weight])) return;
       const body = changes();
-      if (!Object.keys(body).length) return;
+      if (!Object.keys(body).length) {  // кнопка активна всегда: без правок — просто говорим об этом
+        toast('Изменений нет', 'info');
+        return;
+      }
       primary.update({ progress: true });
       try {
         const r = await api(EP.updateTask, { params: { task_id: t.id }, body });
@@ -4335,7 +4372,7 @@
         syncClosing();
         await goBack();
         // Остались на экране (переход отменён) — форма снова рабочая, а не «сохраняется» навсегда.
-        if (scr.alive) primary.update({ progress: false, enabled: hasChanges() });
+        if (scr.alive) primary.update({ progress: false });
       } catch (err) {
         if (!scr.alive) return;
         primary.update({ progress: false });
@@ -4347,10 +4384,11 @@
       }
     }
 
-    primary.set({ text: 'Сохранить', enabled: false, onClick: save });
+    primary.set({ text: 'Сохранить', onClick: save });
     refreshLoad();
     return {
-      el: h('form', { class: 'form', novalidate: true, onsubmit: (e) => e.preventDefault() }, parts),
+      el: h('form', { class: 'form', novalidate: true, onsubmit: (e) => e.preventDefault() },
+        formErr, [main, when, rank].map((kids) => (kids.length ? h('section', { class: 'card' }, kids) : null)), parts),
       changed: hasChanges,
     };
   }
@@ -4532,8 +4570,10 @@
       return !sent && Boolean(m.fact.trim() || m.result.trim() || m.value.trim() || m.materials.trim() || m.files.length);
     }
 
+    const guide = formGuide([{ label: 'Что фактически сделано?', ok: () => m.fact.trim().length >= 3 }]);
+
     function changed() {
-      primary.update({ enabled: m.fact.trim().length > 0 });
+      guide.refresh();
       syncClosingSoon();
     }
 
@@ -4546,7 +4586,10 @@
 
     async function send() {
       formErr.replaceChildren();
-      if (!firstInvalid([fact, result, value, files, materials])) return;
+      if (!firstInvalid([fact, result, value, files, materials])) {
+        guide.warn();
+        return;
+      }
       const fd = new FormData();
       fd.append('fact_text', m.fact.trim());
       if (m.result.trim()) fd.append('result_text', m.result.trim());
@@ -4595,7 +4638,7 @@
       }
     }
 
-    primary.set({ text: 'Отправить', enabled: false, onClick: send });
+    primary.set({ text: 'Отправить', onClick: send });
 
     const intro = h('section', { class: 'card' },
       h('h2', { class: 'task-title' }, 'Задача #' + t.id + ': ' + own(t.title)),
@@ -4611,7 +4654,11 @@
     return {
       el: [intro, reworkNote, lateNote,
         h('form', { class: 'form', novalidate: true, onsubmit: (e) => e.preventDefault() },
-          formErr, fact.el, result.el, value ? value.el : null, files.el, materials.el, progress)],
+          formErr,
+          // Два блока: что сделано · чем это подтверждается.
+          h('section', { class: 'card' }, fact.el, result.el, value ? value.el : null),
+          h('section', { class: 'card' }, files.el, materials.el),
+          guide.el, progress)],
       guard: () => (uploading ? T.leaveUpload : dirty()),
     };
   }
@@ -4981,6 +5028,8 @@
     "Сделать измеримым": "Oʻlchanadigan qilish",
     "Отклонить поручение #{}": "#{} topshiriqni rad etish",
     "Отклонить поручение": "Topshiriqni rad etish",
+    "Осталось заполнить:": "Toʻldirish kerak:",
+    "Всё заполнено": "Hammasi toʻldirildi",
     "Ещё действия": "Boshqa amallar",
     "Поручение #{} отклонено": "#{} topshiriq rad etildi",
     "Поручение отклонено начальником — сдавать результат не нужно.": "Topshiriq boshliq tomonidan rad etilgan — natija topshirish shart emas.",

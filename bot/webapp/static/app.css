@@ -521,6 +521,9 @@ details.fold > .fold-body { padding: 0 var(--pad) var(--pad); }
   border: 0; border-radius: 999px; background: var(--info-bg); color: var(--info);
   font-size: var(--fs-meta); font-weight: 600; line-height: 1;
 }
+/* Микрофон у поля — компактный, чтобы строки подписей шли ровно; область касания — те же 44 px. */
+.field-head .mic-btn { position: relative; min-width: 36px; min-height: 36px; margin: -6px 0 6px; padding: 0 8px; }
+.field-head .mic-btn::after { content: ""; position: absolute; inset: -4px; }
 .mic-btn.rec { background: var(--bad); color: var(--badge-text); animation: mic-pulse 1.4s ease-in-out infinite; }
 .mic-btn.busy, .mic-btn:disabled { opacity: .65; }
 .mic-btn.mic-big { width: 100%; min-height: 48px; margin: 0; padding: 10px var(--pad); border-radius: var(--radius-sm); font-size: var(--fs-body); line-height: 1.25; }
@@ -536,7 +539,7 @@ details.fold > .fold-body { padding: 0 var(--pad) var(--pad); }
   -webkit-appearance: none; appearance: none;
   transition: border-color .15s ease, box-shadow .15s ease;
 }
-.card .input, .sheet .input { background: var(--fill); border-color: transparent; }
+.card .input, .sheet .input { background-color: var(--fill); border-color: transparent; }
 textarea.input { resize: vertical; min-height: 92px; }
 .input::-webkit-date-and-time-value { text-align: left; }
 select.input {
@@ -556,7 +559,8 @@ select.input {
 .pair { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 3fr); gap: 8px; }
 .pair-dt { display: grid; grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); gap: 8px; margin-top: 8px; }
 .inline-input { display: flex; align-items: center; gap: 8px; margin-top: 4px; }
-.inline-input .input { max-width: 140px; }
+.inline-input > label { flex: none; }
+.inline-input .input { min-width: 0; max-width: 140px; }
 .radio-line, .field > label.radio-line {
   display: flex; align-items: flex-start; justify-content: flex-start; flex-wrap: nowrap; gap: 10px;
   min-height: var(--tap); padding: 10px var(--gap); margin: 0 0 8px;
@@ -567,6 +571,10 @@ select.input {
 .radio-line.is-disabled { opacity: .6; cursor: default; }
 .radio-line .why { display: block; font-size: var(--fs-meta); color: var(--bad); }
 .form-error { margin: 0 0 var(--gap); }
+/* Что осталось заполнить — строка в конце формы (основная кнопка активна всегда). */
+.form-left { display: flex; align-items: flex-start; gap: 8px; margin: 0 4px var(--gap); font-size: var(--fs-meta); color: var(--muted); }
+.form-left .ic { margin-top: 2px; }
+.form-left.is-ok { color: var(--good); }
 .form-error .note { margin: 0; }
 .search { position: relative; margin-bottom: 10px; }
 .search .input { padding-left: 42px; padding-right: 44px; }
