@@ -214,8 +214,44 @@ def test_no_external_addresses(name: str, allowed: set[str]) -> None:
 def test_css_loads_nothing() -> None:
     css = _read(APP_CSS)
     assert "@import" not in css
-    assert "url(" not in css, "картинки и шрифты извне не грузим (иконки — эмодзи)"
+    assert "url(" not in css, "картинки и шрифты извне не грузим (значки — встроенные SVG из app.js)"
     assert "@font-face" not in css
+
+
+# --- Значки -----------------------------------------------------------------------------------------
+
+# Эмодзи и знаки-картинки (стрелки-треугольники, крестики, часы): в приложении их заменяют значки ICONS.
+_EMOJI_RE = re.compile("[\U0001f000-\U0001faff\U00002600-\U000027bf\U00002b00-\U00002bff\U0000231a-\U000023ff\U000025a0-\U000025ff\U0000fe0f\U0000200d]")
+
+
+def _icon_names() -> set[str]:
+    block = _read(APP_JS).split("const ICONS = {", 1)[1].split("\n  };", 1)[0]
+    return set(re.findall(r"^\s+(\w+): '", block, flags=re.MULTILINE))
+
+
+def test_js_has_no_emoji() -> None:
+    """Значки — свой набор линейных SVG: эмодзи нет ни в надписях приложения, ни в словаре перевода."""
+    found = sorted(set(_EMOJI_RE.findall(_read(APP_JS))))
+    assert not found, f"в app.js остались эмодзи: {[hex(ord(ch)) for ch in found]}"
+
+
+def test_js_icons_are_defined_and_used() -> None:
+    """Имена значков в коде есть в наборе ICONS, и в наборе нет значков без применения (лимит размера)."""
+    js = _read(APP_JS)
+    names = _icon_names()
+    assert len(names) >= 40, names
+    used = set(re.findall(r"\bicon\('(\w+)'", js)) | set(re.findall(r"\bicon: '(\w+)'", js))
+    assert used <= names, f"значков нет в ICONS: {sorted(used - names)}"
+    head, rest = js.split("const ICONS = {", 1)
+    code = head + rest.split("\n  };", 1)[1]
+    unused = sorted(name for name in names if f"'{name}'" not in code)
+    assert not unused, f"значки без применения: {unused}"
+
+
+def test_css_styles_icons_from_text_colour() -> None:
+    """Значок — контур цвета текста: тема Telegram и тон статуса красят его без отдельных правил."""
+    block = _block(_read(APP_CSS), ".ic")
+    assert "stroke: currentColor" in block and "fill: none" in block
 
 
 @pytest.mark.parametrize(

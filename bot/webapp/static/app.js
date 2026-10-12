@@ -77,14 +77,14 @@
   const T = {
     network: 'Нет связи с сервером. Проверьте интернет и нажмите «Повторить».',
     timeout: 'Сервер долго не отвечает. Проверьте интернет и нажмите «Повторить».',
-    generic: '⚠️ Произошла ошибка, попробуйте ещё раз',
+    generic: 'Произошла ошибка, попробуйте ещё раз',
     openFromTelegram: 'Откройте приложение из Telegram: кнопка «Открыть» в чате с ботом.',
     leave: 'Выйти без сохранения?',
     leaveUpload: 'Результат ещё отправляется. Уйти с этого экрана?',
-    retry: '🔄 Повторить',
+    retry: 'Повторить',
     uploadTimeout: 'Отправка заняла слишком много времени. Проверьте интернет и попробуйте ещё раз.',
-    aiTimeout: '⚠️ AI не ответил вовремя. Попробуйте ещё раз или сформулируйте результат сами.',
-    noEmployees: 'Нет активных сотрудников. Подтвердите заявки в чате: «👥 Сотрудники».',
+    aiTimeout: 'AI не ответил вовремя. Попробуйте ещё раз или сформулируйте результат сами.',
+    noEmployees: 'Нет активных сотрудников. Подтвердите заявки в чате: «Сотрудники».',
   };
 
   const STATUS_FILTERS = [
@@ -102,18 +102,22 @@
     { value: 'year', label: 'Год' },
   ];
   const PRIORITIES = [
-    { value: 'high', label: '🔴 Высокий' },
-    { value: 'medium', label: '🟡 Средний' },
-    { value: 'low', label: '🟢 Низкий' },
+    { value: 'high', label: 'Высокий', tone: 'bad' },
+    { value: 'medium', label: 'Средний', tone: 'warn' },
+    { value: 'low', label: 'Низкий', tone: 'good' },
   ];
+  const PRIORITY_TONES = { high: 'bad', medium: 'warn', low: 'good' };
+  // Цветной кружок перед подписью приоритета в строках журнала с сервера («приоритет ⟨кружок⟩ Высокий»):
+  // убирается только он — такой же кружок в словах пользователя (причина, название) остаётся.
+  const PRIORITY_DOTS = new RegExp('[' + String.fromCodePoint(0x1F534, 0x1F7E1, 0x1F7E2) + '] (?=Высокий|Средний|Низкий|Yuqori|Oʻrta|Past)', 'gu');
   const NOT_OPEN_TEXTS = {
-    submitted: '📝 Результат уже отправлен и ждёт проверки начальника.',
-    done: '✅ Задача уже выполнена и оценена — сдавать результат не нужно.',
-    cancelled: '🚫 Задача отменена начальником — сдавать результат не нужно.',
-    proposed: '📥 Поручение ещё не подтверждено начальником — сдать результат можно после подтверждения.',
-    rejected: '❌ Поручение отклонено начальником — сдавать результат не нужно.',
+    submitted: 'Результат уже отправлен и ждёт проверки начальника.',
+    done: 'Задача уже выполнена и оценена — сдавать результат не нужно.',
+    cancelled: 'Задача отменена начальником — сдавать результат не нужно.',
+    proposed: 'Поручение ещё не подтверждено начальником — сдать результат можно после подтверждения.',
+    rejected: 'Поручение отклонено начальником — сдавать результат не нужно.',
   };
-  const KIND_ICONS = { document: '📄', photo: '🖼️', video: '🎬', other: '📎' };
+  const KIND_ICONS = { document: 'file', photo: 'image', video: 'video', other: 'clip' };
   const MONTHS_GEN = ['января', 'февраля', 'марта', 'апреля', 'мая', 'июня', 'июля', 'августа',
     'сентября', 'октября', 'ноября', 'декабря'];
   const WEEKDAYS = ['вс', 'пн', 'вт', 'ср', 'чт', 'пт', 'сб'];
@@ -311,6 +315,91 @@
   }
 
   // ---------------------------------------------------------------------------------------------
+  // 1a. Значки: свой набор линейных SVG 24×24 (одна толщина линии, цвет — от текста)
+  // ---------------------------------------------------------------------------------------------
+
+  /** Контуры значков (атрибут d одного <path>). Имена — по смыслу в приложении, а не по рисунку. */
+  const ICONS = {
+    chart: 'M6 20L6 14M12 20L12 4M18 20L18 10',
+    tasks: 'M3 6.5l1.5 1.5L7.5 5M3 12.5l1.5 1.5 3-3M3 18.5l1.5 1.5 3-3M11 6.5L21 6.5M11 12.5L21 12.5M11 18.5L21 18.5',
+    review: 'M15 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2M10 2h4a1 1 0 0 1 1 1v2a1 1 0 0 1-1 1h-4a1 1 0 0 1-1-1v-2a1 1 0 0 1 1-1zM9 14l2 2 4-4',
+    plus: 'M12 5L12 19M5 12L19 12',
+    send: 'M21 3L10.5 13.5M21 3l-6.5 18-4-7.5L3 9.5z',
+    trend: 'M22 7L13.5 15.5L8.5 10.5L2 17M16 7L22 7L22 13',
+    back: 'M15 18L9 12L15 6',
+    next: 'M9 18L15 12L9 6',
+    x: 'M18 6L6 18M6 6L18 18',
+    search: 'M4 11a7 7 0 1 0 14 0a7 7 0 1 0-14 0M20 20L16 16',
+    globe: 'M3 12a9 9 0 1 0 18 0a9 9 0 1 0-18 0M3 12L21 12M12 3a13.8 13.8 0 0 1 3.6 9 13.8 13.8 0 0 1-3.6 9 13.8 13.8 0 0 1-3.6-9A13.8 13.8 0 0 1 12 3z',
+    refresh: 'M20 11a8 8 0 0 0-14.6-4.5L4 8M4 4v4h4M4 13a8 8 0 0 0 14.6 4.5L20 16M20 20v-4h-4',
+    check: 'M20 6L9 17L4 12',
+    done: 'M3 12a9 9 0 1 0 18 0a9 9 0 1 0-18 0M8.5 12.2l2.4 2.4 4.6-4.9',
+    work: 'M3 12a9 9 0 1 0 18 0a9 9 0 1 0-18 0M10 8.6v6.8l5.4-3.4z',
+    clock: 'M3 12a9 9 0 1 0 18 0a9 9 0 1 0-18 0M12 7L12 12L15.5 14',
+    wait: 'M6 3h12M6 21h12M7 3v3.2a5 5 0 0 0 2 4L12 12l3-1.8a5 5 0 0 0 2-4V3M7 21v-3.2a5 5 0 0 1 2-4L12 12l3 1.8a5 5 0 0 1 2 4V21',
+    undo: 'M9 14L4 9L9 4M20 20v-7a4 4 0 0 0-4-4H4',
+    ban: 'M3 12a9 9 0 1 0 18 0a9 9 0 1 0-18 0M5.7 5.7L18.3 18.3',
+    reject: 'M3 12a9 9 0 1 0 18 0a9 9 0 1 0-18 0M15 9L9 15M9 9L15 15',
+    inbox: 'M21 12L16 12L14 15L10 15L8 12L3 12M5.9 5.2L3 12v6a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-6l-2.9-6.8A2 2 0 0 0 16.3 4H7.7a2 2 0 0 0-1.8 1.2z',
+    alert: 'M10.3 4.2L2.6 17.5A2 2 0 0 0 4.3 20.5h15.4a2 2 0 0 0 1.7-3L13.7 4.2a2 2 0 0 0-3.4 0zM12 9.5L12 13.5M12 17h.01',
+    info: 'M3 12a9 9 0 1 0 18 0a9 9 0 1 0-18 0M12 16.5L12 11.5M12 8h.01',
+    flag: 'M5 15s1-1 3.8-1 4.4 2 7.2 2 3-1 3-1V4s-.2 1-3 1-4.4-2-7.2-2S5 4 5 4zM5 22L5 15',
+    calendar: 'M5 5h14a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-14a2 2 0 0 1-2-2v-12a2 2 0 0 1 2-2zM16 3L16 7M8 3L8 7M3 10.5L21 10.5',
+    user: 'M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2M8.5 7.5a3.5 3.5 0 1 0 7 0a3.5 3.5 0 1 0-7 0',
+    users: 'M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2M5.5 7.5a3.5 3.5 0 1 0 7 0a3.5 3.5 0 1 0-7 0M22 21v-2a4 4 0 0 0-3-3.85M15.5 4.2a3.5 3.5 0 0 1 0 6.6',
+    boss: 'M5 7.5h14a2 2 0 0 1 2 2v8.5a2 2 0 0 1-2 2h-14a2 2 0 0 1-2-2v-8.5a2 2 0 0 1 2-2zM8.5 7.5V6a2 2 0 0 1 2-2h3a2 2 0 0 1 2 2v1.5M3 13h18',
+    bolt: 'M13 2.5L4.5 13.5H12l-1 8 8.5-11H12z',
+    weight: 'M12 4L12 20M7.5 20L16.5 20M4.5 7.5h3c1.6 0 3-.6 4.5-1.6 1.5 1 2.9 1.6 4.5 1.6h3M3 14.5L5.6 8l2.6 6.5a3.4 3.4 0 0 1-5.2 0zM15.8 14.5L18.4 8l2.6 6.5a3.4 3.4 0 0 1-5.2 0z',
+    target: 'M3 12a9 9 0 1 0 18 0a9 9 0 1 0-18 0M7 12a5 5 0 1 0 10 0a5 5 0 1 0-10 0M11 12a1 1 0 1 0 2 0a1 1 0 1 0-2 0',
+    message: 'M20 15a2 2 0 0 1-2 2H8l-4 4V6a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2z',
+    clip: 'M20.5 11.3l-8.4 8.4a5.5 5.5 0 0 1-7.8-7.8l8.4-8.4a3.7 3.7 0 0 1 5.2 5.2l-8.4 8.4a1.8 1.8 0 0 1-2.6-2.6l7.8-7.7',
+    file: 'M13.5 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8.5zM13.5 3L13.5 8.5L19 8.5',
+    image: 'M5 4h14a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-14a2 2 0 0 1-2-2v-12a2 2 0 0 1 2-2zM7 9a1.5 1.5 0 1 0 3 0a1.5 1.5 0 1 0-3 0M21 15.5L16 10.5L6 20',
+    video: 'M4.5 6h9a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-9a2 2 0 0 1-2-2v-8a2 2 0 0 1 2-2zM15.5 10.5l6-3.5v10l-6-3.5',
+    mic: 'M12 2.5h0a3 3 0 0 1 3 3v5.5a3 3 0 0 1-3 3h0a3 3 0 0 1-3-3v-5.5a3 3 0 0 1 3-3zM18.5 11a6.5 6.5 0 0 1-13 0M12 17.5L12 21.5M8.5 21.5L15.5 21.5',
+    stop: 'M8.5 6.5h7a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2h-7a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2z',
+    edit: 'M16.5 3.6a2.5 2.5 0 0 1 3.9 3.9L8 20l-4.5 1 1-4.5zM14.5 5.6L18.4 9.5',
+    ai: 'M10.5 4.5c.5 4 2.5 6 6.5 6.5-4 .5-6 2.5-6.5 6.5-.5-4-2.5-6-6.5-6.5 4-.5 6-2.5 6.5-6.5zM18.5 15L18.5 20M16 17.5L21 17.5M19 3L19 6M17.5 4.5L20.5 4.5',
+    history: 'M3.5 12A8.5 8.5 0 1 0 6 6L3.5 8.5M3.5 3.5L3.5 8.5L8.5 8.5M12 7.5L12 12L15 13.8',
+    table: 'M5 4.5h14a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2h-14a2 2 0 0 1-2-2v-11a2 2 0 0 1 2-2zM3 10L21 10M3 15L21 15M9.5 10L9.5 19.5',
+    calc: 'M7 3h10a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-10a2 2 0 0 1-2-2v-14a2 2 0 0 1 2-2zM8.5 7.5L15.5 7.5M8.5 12h.01M12 12h.01M15.5 12h.01M8.5 16.5h.01M12 16.5h.01M15.5 16.5h.01',
+    add: 'M8 3.5h8a4.5 4.5 0 0 1 4.5 4.5v8a4.5 4.5 0 0 1-4.5 4.5h-8a4.5 4.5 0 0 1-4.5-4.5v-8a4.5 4.5 0 0 1 4.5-4.5zM12 8.2L12 15.8M8.2 12L15.8 12',
+    offline: 'M3 3L21 21M8.5 16.4a5.5 5.5 0 0 1 7 0M5 12.7a10 10 0 0 1 4-2.2M14.5 10.3a10 10 0 0 1 4.5 2.4M2 9a15 15 0 0 1 3.5-2.3M10.5 5.1A15 15 0 0 1 22 9M12 20h.01',
+    lock: 'M6.5 11h11a2 2 0 0 1 2 2v6a2 2 0 0 1-2 2h-11a2 2 0 0 1-2-2v-6a2 2 0 0 1 2-2zM8 11V7.5a4 4 0 0 1 8 0V11',
+    phone: 'M9 2.5h6a2.5 2.5 0 0 1 2.5 2.5v14a2.5 2.5 0 0 1-2.5 2.5h-6a2.5 2.5 0 0 1-2.5-2.5v-14a2.5 2.5 0 0 1 2.5-2.5zM12 18h.01',
+    adduser: 'M15 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2M5 7.5a3.5 3.5 0 1 0 7 0a3.5 3.5 0 1 0-7 0M19 8L19 14M16 11L22 11',
+    bulb: 'M9 18h6M10 21.5h4M15 14.5c.2-1 .7-1.7 1.5-2.5A5.5 5.5 0 0 0 18 8 6 6 0 0 0 6 8c0 1.4.5 2.8 1.5 4 .8.8 1.3 1.5 1.5 2.5',
+    empty: 'M21 19a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h4.5l2 2.5H19a2 2 0 0 1 2 2z',
+  };
+
+  /** icon('clock') -> <svg class="ic">. cls — размер и тон: ic-sm | ic-lg | ic-xl, tone-good | tone-warn | tone-bad. */
+  function icon(name, cls) {
+    if (!ICONS[name] && CONFIG.debug && window.console) console.error('unknown icon: ' + name);  // опечатка в имени видна при отладке
+    return s('svg', { class: 'ic' + (cls ? ' ' + cls : ''), viewBox: '0 0 24 24', width: 20, height: 20, 'aria-hidden': 'true', focusable: 'false' },
+      s('path', { d: ICONS[name] || ICONS.info }));
+  }
+
+  /** Значок и подпись кнопки или строки. Менять подпись — тоже здесь: setText стёр бы значок. */
+  function setLabel(el, name, text) {
+    el.replaceChildren();
+    appendKids(el, [name ? icon(name) : null, text]);
+  }
+
+  /**
+   * Подписи сервера (статус, решение, ошибки, уведомления) начинаются с эмодзи — так они выглядят в чате.
+   * В приложении эмодзи убирается (stripLeadingEmoji), а значок того же смысла подбирается по его коду.
+   */
+  const MARK_ICONS = {
+    0x2705: 'done', 0x2714: 'done', 0x26A0: 'alert', 0x274C: 'reject', 0x26D4: 'ban', 0x1F6AB: 'ban',
+    0x23F3: 'wait', 0x231B: 'wait', 0x23F1: 'clock', 0x23F0: 'clock', 0x1F4E5: 'inbox', 0x1F4E4: 'send',
+    0x1F4DD: 'review', 0x1F3A4: 'mic', 0x1F4CE: 'clip', 0x21A9: 'undo',
+  };
+
+  function markIcon(text) {
+    return MARK_ICONS[String(text || '').codePointAt(0)] || null;
+  }
+
+  // ---------------------------------------------------------------------------------------------
   // 2. Форматирование (числа как fmt_pct / fmt_num в чате, время — местное из настроек)
   // ---------------------------------------------------------------------------------------------
 
@@ -418,8 +507,9 @@
     return notice ? text + '\n' + notice : text;
   }
 
+  /** Текст сервера без эмодзи в начале: «⟨эмодзи⟩ На проверке» -> «На проверке» (значок рисует приложение). */
   function stripLeadingEmoji(text) {
-    return String(text || '').replace(/^(?:\p{Extended_Pictographic}|️|‍)+\s*/u, '');
+    return String(text || '').replace(/^(?:\p{Extended_Pictographic}|\uFE0F|\u200D)+\s*/u, '');
   }
 
   // ---------------------------------------------------------------------------------------------
@@ -610,7 +700,7 @@
     };
   }());
 
-  /** BackButton Telegram (6.1+); вне Telegram — ссылка «‹ Назад» в шапке экрана. */
+  /** BackButton Telegram (6.1+); вне Telegram — ссылка «Назад» в шапке экрана. */
   const back = {
     native: tgv('6.1') && Boolean(tg.BackButton),
     mount() {
@@ -661,10 +751,17 @@
 
   let toastTimer = 0;
 
-  function toast(text) {
+  /** Тост. name — значок («done» после успешного действия); у текста сервера значок берётся по его эмодзи. */
+  function toast(text, name) {
     const box = document.getElementById('toast');
     if (!box || !text) return;
-    const msg = h('div', { class: 'toast-msg' }, text);
+    const mark = name || markIcon(text);
+    // Строки после первой — пояснения сервера («уведомление не доставлено»): значок остаётся при своей строке.
+    const body = String(text).split('\n').map((row, i) => {
+      const rowMark = i ? markIcon(row) : null;
+      return [i ? '\n' : null, rowMark ? [icon(rowMark, 'ic-sm'), ' '] : null, stripLeadingEmoji(row)];
+    });
+    const msg = h('div', { class: 'toast-msg' }, mark ? icon(mark) : null, h('span', null, body));
     box.classList.remove('show');
     box.replaceChildren(msg);
     void msg.offsetWidth;  // перезапуск анимации появления
@@ -679,8 +776,9 @@
     if (!version || !CONFIG.version || version === CONFIG.version || versionNoticed) return;
     versionNoticed = true;
     const bar = h('div', { class: 'banner', role: 'status' },
-      h('span', null, '🔄 Приложение обновилось'),
-      h('button', { type: 'button', class: 'btn', onclick: () => window.location.reload() }, 'Обновить'));
+      icon('refresh'),
+      h('span', null, 'Приложение обновилось'),
+      h('button', { type: 'button', class: 'btn btn-sm', onclick: () => window.location.reload() }, 'Обновить'));
     const slot = shell ? shell.bannerSlot : appRoot;
     if (slot) slot.prepend(bar);
   }
@@ -830,7 +928,7 @@
     } else if (err.status === 429) {
       err.handled = true;
       haptic.warn();
-      toast(err.message);
+      toast(err.message, 'alert');
     }
     return err;
   }
@@ -857,7 +955,7 @@
   function reportError(err) {
     if (err.handled) return;
     haptic.err();
-    toast(err.message || T.generic);
+    toast(err.message || T.generic, 'alert');
   }
 
   let meTimer = 0;
@@ -925,7 +1023,7 @@
       const panel = h('section', { class: 'sheet', role: 'dialog', 'aria-modal': 'true', 'aria-labelledby': titleId },
         h('div', { class: 'sheet-head' },
           title,
-          h('button', { type: 'button', class: 'sheet-close', 'aria-label': 'Закрыть', onclick: () => requestClose() }, '✕')),
+          h('button', { type: 'button', class: 'sheet-close', 'aria-label': 'Закрыть', onclick: () => requestClose() }, icon('x'))),
         opts.body);
       const backdrop = h('div', { class: 'sheet-backdrop' }, panel);
       backdrop.addEventListener('click', (event) => {
@@ -976,16 +1074,16 @@
 
   const TABS = {
     manager: [
-      { id: 'team', hash: '#/team', icon: '📊', label: 'Команда' },
-      { id: 'tasks', hash: '#/tasks', icon: '📋', label: 'Задачи' },
-      { id: 'review', hash: '#/review', icon: '📝', label: 'Проверка', badge: (c) => (c.review || 0) + (c.proposals || 0) },
-      { id: 'new', hash: '#/new', icon: '➕', label: 'Новая' },
+      { id: 'team', hash: '#/team', icon: 'chart', label: 'Команда' },
+      { id: 'tasks', hash: '#/tasks', icon: 'tasks', label: 'Задачи' },
+      { id: 'review', hash: '#/review', icon: 'review', label: 'Проверка', badge: (c) => (c.review || 0) + (c.proposals || 0) },
+      { id: 'new', hash: '#/new', icon: 'add', label: 'Новая' },
     ],
     employee: [
-      { id: 'my', hash: '#/my', icon: '📋', label: 'Мои задачи', badge: (c) => (c.unaccepted || 0) + (c.rework || 0) },
-      { id: 'submit', hash: '#/submit', icon: '📤', label: 'Сдать', badge: (c) => c.overdue || 0 },
-      { id: 'kpi', hash: '#/kpi', icon: '📈', label: 'Мой KPI' },
-      { id: 'propose', hash: '#/propose', icon: '➕', label: 'Поручение' },
+      { id: 'my', hash: '#/my', icon: 'tasks', label: 'Мои задачи', badge: (c) => (c.unaccepted || 0) + (c.rework || 0) },
+      { id: 'submit', hash: '#/submit', icon: 'send', label: 'Сдать', badge: (c) => c.overdue || 0 },
+      { id: 'kpi', hash: '#/kpi', icon: 'trend', label: 'Мой KPI' },
+      { id: 'propose', hash: '#/propose', icon: 'add', label: 'Поручение' },
     ],
   };
 
@@ -1217,7 +1315,7 @@
         type: 'button', class: 'tab', 'aria-current': isCurrent ? 'page' : null,
         onclick: () => onTab(tab),
       },
-      h('span', { class: 't-ico', 'aria-hidden': 'true' }, tab.icon),
+      h('span', { class: 't-ico' }, icon(tab.icon, 'ic-lg')),
       h('span', { class: 't-label' }, tab.label),
       n > 0 ? h('span', { class: 'badge', 'aria-hidden': 'true' }, n > 99 ? '99+' : String(n)) : null,
       n > 0 ? h('span', { class: 'sr-only' }, ', требуют внимания: ' + n) : null);
@@ -1248,7 +1346,7 @@
   function langButton() {
     const next = i18n.lang === 'uz' ? 'ru' : 'uz';
     const btn = h('button', { type: 'button', class: 'lang-btn', lang: next, 'aria-label': next === 'uz' ? 'Oʻzbek tiliga oʻtish' : 'Перейти на русский язык' },
-      '🌐 ', own(next === 'uz' ? 'Oʻzbekcha' : 'Русский'));
+      icon('globe', 'ic-sm'), own(next === 'uz' ? 'Oʻzbekcha' : 'Русский'));
     btn.addEventListener('click', async () => {
       if (btn.disabled) return;
       btn.disabled = true;
@@ -1272,16 +1370,16 @@
     return btn;
   }
 
-  /** Шапка экрана: заголовок h1 (на него переходит фокус), подзаголовок, «‹ Назад» вне Telegram. */
+  /** Шапка экрана: заголовок h1 (на него переходит фокус), подзаголовок, «Назад» вне Telegram. */
   function screenHead(title, sub) {
     setDocTitle(title);
     const nested = Boolean(nav.current && (!nav.current.route.root || nav.stack.length > 1));
     const h1 = h('h1', { tabindex: '-1' }, title);
     const subEl = h('p', { class: 'sub', hidden: !sub }, sub || '');
     const el = h('header', { class: 'screen-head' },
-      nested && !back.native ? h('button', { type: 'button', class: 'back-link', onclick: () => goBack() }, '‹ Назад') : null,
-      nested ? null : langButton(),
-      h1, subEl);
+      nested && !back.native ? h('button', { type: 'button', class: 'back-link', onclick: () => goBack() }, icon('back'), 'Назад') : null,
+      h('div', { class: 'head-row' }, h1, nested ? null : langButton()),
+      subEl);
     return {
       el,
       setTitle(text) {
@@ -1337,31 +1435,41 @@
     return [block(), block(), block()];
   }
 
-  function emptyState(text, icon) {
-    return h('div', { class: 'state' }, h('div', { class: 'state-ico', 'aria-hidden': 'true' }, icon || '🗂️'), h('p', null, text));
+  /** Пустое состояние: крупный значок (name из ICONS) и пояснение. */
+  function emptyState(text, name) {
+    return h('div', { class: 'state' }, h('div', { class: 'state-ico' }, icon(name || 'empty', 'ic-xl')), h('p', null, text));
   }
 
   function errorState(err, retry) {
     const offline = err.status === 0;
     const final = err.status === 404 || err.status === 403;
     return h('div', { class: 'state state-error', role: 'alert' },
-      h('div', { class: 'state-ico', 'aria-hidden': 'true' }, offline ? '📡' : err.status === 404 ? '🔍' : '⚠️'),
+      h('div', { class: 'state-ico' }, icon(offline ? 'offline' : err.status === 404 ? 'search' : 'alert', 'ic-xl')),
       h('p', null, stripLeadingEmoji(err.message || T.generic)),
       final
-        ? h('button', { type: 'button', class: 'btn', onclick: () => goBack() }, '‹ Назад')
-        : retry ? h('button', { type: 'button', class: 'btn btn-primary', onclick: retry }, T.retry) : null);
+        ? button('Назад', () => goBack(), '', null, 'back')
+        : retry ? button(T.retry, retry, 'btn-primary', null, 'refresh') : null);
   }
 
-  function note(text, tone, extra) {
-    return h('div', { class: 'note' + (tone ? ' ' + tone : '') }, text, extra || null);
+  const NOTE_ICONS = { info: 'info', warn: 'alert', bad: 'alert', good: 'done' };
+
+  /** Плашка-пояснение: значок по тону (или name), текст, под ним — extra (кнопка, комментарий). */
+  function note(text, tone, extra, name) {
+    const mark = name || (typeof text === 'string' && markIcon(text)) || NOTE_ICONS[tone] || 'info';
+    return h('div', { class: 'note' + (tone ? ' ' + tone : '') }, icon(mark),
+      h('div', { class: 'note-body' }, typeof text === 'string' ? stripLeadingEmoji(text) : text, extra || null));
   }
 
-  function pill(text, tone) {
-    return h('span', { class: 'pill' + (tone ? ' ' + tone : '') }, h('span', { class: 'dot', 'aria-hidden': 'true' }), text);
+  /** Метка статуса: цвет по тону (good | warn | bad | info), значок name или точка. */
+  function pill(text, tone, name) {
+    return h('span', { class: 'pill' + (tone ? ' ' + tone : '') },
+      name ? icon(name, 'ic-sm') : h('span', { class: 'dot', 'aria-hidden': 'true' }), stripLeadingEmoji(text));
   }
 
-  function line(label, value, cls) {
-    return h('p', { class: 'line' + (cls ? ' ' + cls : '') }, label ? h('span', { class: 'muted' }, label + ' ') : null, value);
+  /** Строка «подпись: значение»; name — значок слева (текст рядом с ним переносится ровным столбцом). */
+  function line(label, value, cls, name) {
+    const text = [label ? h('span', { class: 'muted' }, label + ' ') : null, value];
+    return h('p', { class: 'line' + (name ? ' has-ic' : '') + (cls ? ' ' + cls : '') }, name ? [icon(name, 'ic-sm'), h('span', null, text)] : text);
   }
 
   function kvBlock(label, value, extra) {
@@ -1369,8 +1477,10 @@
     return h('div', { class: 'kvb' }, h('div', { class: 'kvb-k' }, label), h('div', { class: 'kvb-v pre' }, typeof value === 'string' ? own(value) : value), extra || null);
   }
 
-  function button(text, onClick, cls, attrs) {
-    return h('button', Object.assign({ type: 'button', class: 'btn' + (cls ? ' ' + cls : ''), onclick: onClick }, attrs || {}), text);
+  /** Кнопка; name — значок перед подписью (подпись такой кнопки меняет setLabel, а не setText). */
+  function button(text, onClick, cls, attrs, name) {
+    return h('button', Object.assign({ type: 'button', class: 'btn' + (cls ? ' ' + cls : ''), onclick: onClick }, attrs || {}),
+      name ? icon(name) : null, text);
   }
 
   function chip(content, pressed, onClick, ariaLabel) {
@@ -1390,7 +1500,7 @@
     const btns = items.map((item) => h('button', {
       type: 'button', role: isRadio ? 'radio' : 'tab',
       onclick: () => pick(item.value, true),
-    }, item.label));
+    }, item.tone ? h('span', { class: 'dot ' + item.tone, 'aria-hidden': 'true' }) : null, item.label));
     const el = h('div', { class: 'seg', role: isRadio ? 'radiogroup' : 'tablist', 'aria-label': label }, btns);
     el.addEventListener('keydown', (event) => {
       if (event.key !== 'ArrowRight' && event.key !== 'ArrowLeft') return;
@@ -1616,10 +1726,10 @@
   function voiceErrorText(err) {
     const name = err && err.name;
     if (name === 'NotAllowedError' || name === 'SecurityError') {
-      return '🎤 Нет доступа к микрофону. Разрешите микрофон для Telegram в настройках телефона и попробуйте ещё раз.';
+      return 'Нет доступа к микрофону. Разрешите микрофон для Telegram в настройках телефона и попробуйте ещё раз.';
     }
-    if (name === 'NotFoundError' || name === 'OverconstrainedError') return '🎤 Микрофон не найден.';
-    return '🎤 Не удалось включить микрофон. Попробуйте ещё раз или введите текст с клавиатуры.';
+    if (name === 'NotFoundError' || name === 'OverconstrainedError') return 'Микрофон не найден.';
+    return 'Не удалось включить микрофон. Попробуйте ещё раз или введите текст с клавиатуры.';
   }
 
   function fmtClock(ms) {
@@ -1632,9 +1742,9 @@
    * o.onResult(data) — ответ POST /api/voice. o.text — подпись большой кнопки (иначе только значок).
    */
   function micButton(o) {
-    const idle = o.text || '🎤';
+    const idle = o.text || '';
     const label = o.label || 'Надиктовать голосом';
-    const btn = h('button', { type: 'button', class: 'mic-btn' + (o.text ? ' mic-big' : ''), 'aria-label': label, title: label }, idle);
+    const btn = h('button', { type: 'button', class: 'mic-btn' + (o.text ? ' mic-big' : ''), 'aria-label': label, title: label }, icon('mic'), idle);
     let recorder = null;
     let chunks = [];
     let startedAt = 0;
@@ -1646,11 +1756,14 @@
       btn.classList.toggle('busy', stage === 'starting' || stage === 'sending');
       btn.disabled = stage === 'starting' || stage === 'sending';
       if (stage === 'rec') {
-        setText(btn, '⏹ ' + fmtClock(Date.now() - startedAt));
+        setLabel(btn, 'stop', fmtClock(Date.now() - startedAt));
         btn.setAttribute('aria-label', tr('Остановить запись'));
+      } else if (stage === 'sending') {
+        setLabel(btn, 'wait', o.text ? 'Распознаю…' : '');
+        btn.setAttribute('aria-label', tr('Распознаю речь'));
       } else {
-        setText(btn, stage === 'sending' ? (o.text ? '⏳ Распознаю…' : '⏳') : idle);
-        btn.setAttribute('aria-label', tr(stage === 'sending' ? 'Распознаю речь' : label));
+        setLabel(btn, 'mic', idle);
+        btn.setAttribute('aria-label', tr(label));
       }
     }
 
@@ -1675,7 +1788,7 @@
       } catch (err) {
         reset();
         haptic.err();
-        toast(voiceErrorText(err));
+        toast(voiceErrorText(err), 'mic');
         return;
       }
       if (stage !== 'starting') return;
@@ -1688,7 +1801,7 @@
         } catch (err) {
           reset();
           voiceRelease(true);
-          toast(voiceErrorText(err));
+          toast(voiceErrorText(err), 'mic');
           return;
         }
       }
@@ -1700,7 +1813,7 @@
       recorder.addEventListener('error', () => {
         reset();
         voiceRelease(true);
-        toast(voiceErrorText(null));
+        toast(voiceErrorText(null), 'mic');
       });
       startedAt = Date.now();
       recorder.start();
@@ -1730,7 +1843,7 @@
       voiceRelease(false);
       if (took < VOICE_MIN_MS || !blob.size) {
         reset();
-        toast('🎤 Запись слишком короткая. Нажмите, скажите фразу и нажмите ещё раз.');
+        toast('Запись слишком короткая. Нажмите, скажите фразу и нажмите ещё раз.', 'mic');
         return;
       }
       stage = 'sending';
@@ -1921,7 +2034,7 @@
     function sync(byUser) {
       chips.forEach((c, i) => c.setAttribute('aria-pressed', String(quick[i].date === model.date)));
       setText(caption, model.date
-        ? '📅 ' + own(humanDate(model.date)) + ', ' + model.time
+        ? own(humanDate(model.date)) + ', ' + model.time
         : 'Выберите дату кнопкой или в календаре');
       if (byUser) {
         setError('');
@@ -1953,7 +2066,7 @@
     };
   }
 
-  /** Вес задачи: чипы weight_options (⚠️ — неделя перегружена) + своё число 1..100; model.weight. */
+  /** Вес задачи: чипы weight_options (значок «внимание» — неделя перегружена) + своё число 1..100; model.weight. */
   function weightPicker(model, o) {
     const opts = o || {};
     const options = cfg().weight_options || [];
@@ -1988,7 +2101,7 @@
 
     function paint() {
       chipsBox.replaceChildren.apply(chipsBox, options.map((w) => chip(
-        w + ' %' + (over[w] ? ' ⚠️' : ''),
+        [w + ' %', over[w] ? icon('alert', 'ic-sm tone-warn') : null],
         model.weight === w,
         () => {
           model.weight = w;
@@ -2002,7 +2115,7 @@
       if (load !== null) {
         parts.push(tr('Сейчас на неделе: ' + load + ' %. Рекомендуется, чтобы сумма весов за неделю была ≈100 %.'));
         if (isNum(model.weight) && model.weight > 0 && load + model.weight > 100) {
-          parts.push(tr('⚠️ С этой задачей будет ' + (load + model.weight) + ' %.'));
+          parts.push(tr('С этой задачей будет ' + (load + model.weight) + ' %.'));
         }
         if (week) parts.push(own(week));
       } else {
@@ -2065,7 +2178,7 @@
       unit.value = '';
       changed();
       value.focus();
-    } }, '✕ Убрать план');
+    } }, icon('x', 'ic-sm'), 'Убрать план');
     const err = h('p', { class: 'field-error', id: errId, 'aria-live': 'polite' });
     value.addEventListener('input', () => {
       model.plan_value = value.value;
@@ -2135,11 +2248,11 @@
     };
   }
 
-  /** Кнопка «✨ Сделать измеримым» (§11.9): запрос к AI и лист с вариантом. */
+  /** Кнопка «Сделать измеримым» (§11.9): запрос к AI и лист с вариантом. */
   function aiHelper(scr, o) {
     let busy = false;
     let raw0 = '';
-    const btn = h('button', { type: 'button', class: 'btn', onclick: () => run(null) }, '✨ Сделать измеримым');
+    const btn = button('Сделать измеримым', () => run(null), 'btn-sm', null, 'ai');
     const status = h('span', { class: 'ai-status', role: 'status' });
 
     function refresh() {
@@ -2153,7 +2266,7 @@
       if (!title || raw0.length < 3) return;
       busy = true;
       refresh();
-      setText(status, '⏳ Формулирую измеримый результат…');
+      setText(status, 'Формулирую измеримый результат…');
       try {
         const body = { title, raw_result: raw0 };
         if (previous) body.previous = previous.slice(0, 1000);
@@ -2162,7 +2275,7 @@
       } catch (err) {
         if (scr.alive && !err.handled) {
           haptic.err();
-          toast(err.code === 'timeout' ? T.aiTimeout : err.message);
+          toast(err.code === 'timeout' ? T.aiTimeout : err.message, 'alert');
         }
       } finally {
         busy = false;
@@ -2174,27 +2287,27 @@
     function showSuggestion(sg) {
       const hasPlan = isNum(sg.plan_value);
       sheet.show({
-        title: sg.source === 'ai' ? '🤖 Измеримая формулировка' : '📐 Подсказка без AI',
+        title: sg.source === 'ai' ? 'Измеримая формулировка' : 'Подсказка без AI',
         body: h('div', null,
           sg.notice ? note(sg.notice, 'warn') : null,
           h('p', { class: 'muted small' }, 'Вы написали: ', h('i', null, raw0)),
           h('p', { class: 'suggest' }, own(sg.expected_result)),
-          hasPlan ? line('📊 План:', h('b', { class: 'num' }, own(fmtNum(sg.plan_value) + (sg.plan_unit ? ' ' + sg.plan_unit : '')))) : null,
-          sg.note ? h('p', { class: 'line' }, h('i', null, '💡 ' + own(sg.note))) : null,
+          hasPlan ? line('План:', h('b', { class: 'num' }, own(fmtNum(sg.plan_value) + (sg.plan_unit ? ' ' + sg.plan_unit : ''))), '', 'target') : null,
+          sg.note ? line('', h('i', null, own(sg.note)), '', 'bulb') : null,
           sg.source === 'rules' ? h('p', { class: 'line' }, h('span', { class: 'tag' }, 'по правилам, без AI')) : null,
           h('div', { class: 'btn-row mt12' },
-            button('🔁 Другой вариант', () => {
+            button('Другой вариант', () => {
               sheet.close(true);
               run(sg.expected_result);
-            }),
-            button('📝 Оставить как написал', () => sheet.close(false)))),
+            }, '', null, 'refresh'),
+            button('Оставить как написал', () => sheet.close(false)))),
         primary: {
-          text: '✅ Принять',
+          text: 'Принять',
           onClick: () => {
             o.onAccept(sg, raw0);
             sheet.close(false);
             haptic.ok();
-            toast('✅ Формулировка подставлена');
+            toast('Формулировка подставлена', 'done');
           },
         },
       });
@@ -2237,19 +2350,47 @@
 
   // --- Строки списков -----------------------------------------------------------------------
 
+  const STATUS_ICONS = { proposed: 'inbox', active: 'work', submitted: 'review', rework: 'undo', done: 'done', cancelled: 'ban', rejected: 'reject' };
+
+  /** Значок статуса — по полям status и overdue (эмодзи из подписи сервера приложению не нужен). */
   function statusIcon(t) {
-    return String(t.status_label || '•').split(' ')[0];
+    return t.overdue ? 'clock' : STATUS_ICONS[t.status] || 'info';
   }
 
   function statusText(t) {
-    const label = String(t.status_label || '');
-    const i = label.indexOf(' ');
-    return i > 0 ? label.slice(i + 1) : label;
+    return stripLeadingEmoji(t.status_label);
   }
 
+  /** Цвет статуса: синий — в работе, жёлтый — ждёт решения или доработки, красный — просрочено, зелёный — выполнено. */
   function statusTone(t) {
     if (t.overdue) return 'bad';
-    return { done: 'good', submitted: 'info', rework: 'warn', active: 'info', proposed: 'warn' }[t.status] || '';
+    return { done: 'good', submitted: 'warn', rework: 'warn', active: 'info', proposed: 'warn' }[t.status] || '';
+  }
+
+  /** Метка статуса задачи: цвет, значок и подпись. */
+  function statusPill(t) {
+    return pill(t.status_label, statusTone(t), statusIcon(t));
+  }
+
+  /** Значок статуса в строке списка. */
+  function statusMark(t) {
+    return h('span', { class: 'ico tone-' + (statusTone(t) || 'none') }, icon(statusIcon(t)));
+  }
+
+  /** Приоритет: цветная точка и подпись сервера («Высокий») без эмодзи. */
+  function priorityMark(t) {
+    return h('span', { class: 'prio' }, h('span', { class: 'dot ' + (PRIORITY_TONES[t.priority] || ''), 'aria-hidden': 'true' }),
+      own(stripLeadingEmoji(t.priority_label)));
+  }
+
+  /** Стрелка «дальше» в конце строки списка, которая открывает другой экран. */
+  function chevron() {
+    return h('span', { class: 'chev' }, icon('next', 'ic-sm'));
+  }
+
+  /** Части подписи через « · » — отдельными узлами (значки и точки внутри строки не склеить в текст). */
+  function dotted(parts) {
+    return parts.filter(Boolean).map((part, i) => (i ? [' · ', part] : part));
   }
 
   /** Строка задачи: «#12 Название», справа tail, ниже исполнитель · приоритет · вес. */
@@ -2257,24 +2398,23 @@
     const opts = o || {};
     const unaccepted = t.status === 'active' && !t.accepted;
     const meta = [];
-    // Части подписи переводятся до склейки: рядом с ними — подписи сервера и слова пользователя.
     if (opts.assignee && t.assignee) meta.push(own(t.assignee.short_name));
-    if (t.status !== 'proposed') meta.push(own(t.priority_label), tr('вес ' + t.weight + ' %'));
-    else meta.push(tr('ждёт подтверждения начальника'));
+    if (t.status !== 'proposed') meta.push(priorityMark(t), 'вес ' + t.weight + ' %');
+    else meta.push('ждёт подтверждения начальника');
     const warn = unaccepted ? h('span', { class: 'warn' }, ' · не принята') : null;
     const tailClass = 'row-tail' + (t.overdue ? ' is-bad' : '') + (t.status === 'done' ? ' is-score' : '');
     const li = h('li', null, h('button', { type: 'button', class: 'row-main', onclick: () => go('#/task/' + t.id) },
-      h('span', { class: 'ico', 'aria-hidden': 'true' }, statusIcon(t)),
+      statusMark(t),
       h('span', { class: 'row-body' },
         h('span', { class: 'row-top' },
           h('span', { class: 'row-title' }, h('span', { class: 'id' }, '#' + t.id), own(t.title)),
           h('span', { class: tailClass }, t.tail)),
-        h('span', { class: 'row-sub' }, h('span', { class: 'sr-only' }, statusText(t) + '. '), meta.join(' · '), warn))));
+        h('span', { class: 'row-sub' }, h('span', { class: 'sr-only' }, statusText(t) + '. '), dotted(meta), warn))));
     if (opts.onAccept && unaccepted) {
       const accept = h('button', {
         type: 'button', class: 'row-action', 'aria-label': 'Принять задачу #' + t.id + ' в работу',
         onclick: () => opts.onAccept(t, accept, warn),
-      }, '✅ Принять');
+      }, icon('check', 'ic-sm'), 'Принять');
       li.classList.add('has-action');
       li.appendChild(accept);
     }
@@ -2283,14 +2423,14 @@
 
   /** «Принять» прямо в строке списка — оптимистично: кнопка сразу сменяется отметкой. */
   async function acceptInline(t, btn, warn) {
-    const done = h('span', { class: 'row-done', role: 'status' }, '✔️ Принята');
+    const done = h('span', { class: 'row-done', role: 'status' }, icon('check', 'ic-sm'), 'Принята');
     btn.replaceWith(done);
     if (warn) warn.hidden = true;
     haptic.sel();
     try {
       await api(EP.acceptTask, { params: { task_id: t.id } });
       haptic.ok();
-      toast('✅ Задача #' + t.id + ' принята в работу');
+      toast('Задача #' + t.id + ' принята в работу', 'done');
       afterMutation();
     } catch (err) {
       done.replaceWith(btn);
@@ -2352,7 +2492,7 @@
         box.dataset.state = 'ok';
         if (!data.items.length) {
           box.replaceChildren.apply(box, nodes([
-            emptyState(q ? 'По запросу «' + own(q) + '» ничего не найдено.' : spec.emptyText || 'Задач нет.', q ? '🔍' : '🗂️'),
+            emptyState(q ? 'По запросу «' + own(q) + '» ничего не найдено.' : spec.emptyText || 'Задач нет.', q ? 'search' : 'empty'),
             notes]));
           return;
         }
@@ -2426,7 +2566,7 @@
       clearTimeout(timer);
       onSearch('');
       input.focus();
-    } }, '✕');
+    } }, icon('x', 'ic-sm'));
     input.addEventListener('input', () => {
       clear.hidden = !input.value;
       clearTimeout(timer);
@@ -2442,11 +2582,11 @@
     scr.onDestroy(() => clearTimeout(timer));
     return h('div', { class: 'search', role: 'search' },
       h('label', { for: id, class: 'sr-only' }, 'Поиск задач'),
-      h('span', { class: 's-ico', 'aria-hidden': 'true' }, '🔍'),
+      h('span', { class: 's-ico' }, icon('search')),
       input, clear);
   }
 
-  /** Переключатель периода: «Неделя · Месяц · Квартал · Год» и «◀ {label} ▶». */
+  /** Переключатель периода: «Неделя · Месяц · Квартал · Год» и стрелки «назад — {label} — вперёд». */
   function periodControl(ps, onChange) {
     const label = h('div', { class: 'label', 'aria-live': 'polite' }, '…');
     const prev = h('button', { type: 'button', class: 'icon-btn', 'aria-label': 'Предыдущий период', onclick: () => {
@@ -2454,13 +2594,13 @@
       ps.offset -= 1;
       haptic.sel();
       onChange();
-    } }, '◀');
+    } }, icon('back'));
     const next = h('button', { type: 'button', class: 'icon-btn', 'aria-label': 'Следующий период', disabled: ps.offset >= 0, onclick: () => {
       if (ps.offset >= 0) return;
       ps.offset += 1;
       haptic.sel();
       onChange();
-    } }, '▶');
+    } }, icon('next'));
     const seg = segmented(PERIOD_KINDS, ps.kind, (kind) => {
       ps.kind = kind;
       ps.offset = 0;
@@ -2488,7 +2628,7 @@
     const head = screenHead('Команда');
     const pc = periodControl(teamPeriod, () => load());
     const box = h('div');
-    const exportBtn = button('📤 Excel-отчёт в чат', () => exportReport(), 'btn-block');
+    const exportBtn = button('Excel-отчёт в чат', () => exportReport(), 'btn-block', null, 'table');
     // nodes(): заявок нет — pendingBanner() даёт null, а append(null) вставил бы текст «null».
     scr.el.append.apply(scr.el, nodes([head.el, pendingBanner(), pc.el, box, exportBtn]));
 
@@ -2503,16 +2643,16 @@
 
     async function exportReport() {
       exportBtn.disabled = true;
-      setText(exportBtn, '⏳ Готовлю отчёт…');
+      setLabel(exportBtn, 'wait', 'Готовлю отчёт…');
       try {
         const r = await api(EP.exportReport, { query: { kind: teamPeriod.kind, offset: teamPeriod.offset } });
         haptic.ok();
-        toast(r.message || '📤 Отчёт придёт в чат с ботом через несколько секунд.');
+        toast(r.message || 'Отчёт придёт в чат с ботом через несколько секунд.', 'send');
       } catch (err) {
         reportError(err);
       } finally {
         exportBtn.disabled = false;
-        setText(exportBtn, '📤 Excel-отчёт в чат');
+        setLabel(exportBtn, 'table', 'Excel-отчёт в чат');
       }
     }
 
@@ -2530,7 +2670,7 @@
   function pendingBanner() {
     const n = counts().pending_users || 0;
     if (!n) return null;
-    const el = note('📥 Заявок на доступ: ' + n + ' — подтвердите в чате («👥 Сотрудники»)', 'info');
+    const el = note('Заявок на доступ: ' + n + ' — подтвердите в чате («Сотрудники»)', 'info', null, 'adduser');
     el.classList.add('pending-banner');
     return el;
   }
@@ -2546,14 +2686,14 @@
       h('p', { class: 'hero-cap' }, isNum(d.team.kpi) ? 'Эффективность команды' : 'Оценённых задач в периоде пока нет'),
       kpiBar(d.team.kpi, max, d.team.kpi_text));
     const totals = h('div', { class: 'totals', role: 'list', 'aria-label': 'Итоги периода' },
-      totalTile('✅', t.done, 'выполнено'),
-      totalTile('⏰', t.overdue_total, 'просрочено'),
-      totalTile('🔄', t.in_progress, 'в работе'),
-      totalTile('📝', t.on_review, 'на проверке'));
+      totalTile('done', 'good', t.done, 'выполнено'),
+      totalTile('clock', 'bad', t.overdue_total, 'просрочено'),
+      totalTile('work', 'info', t.in_progress, 'в работе'),
+      totalTile('review', 'warn', t.on_review, 'на проверке'));
     const trend = h('section', { class: 'card' }, h('h2', { class: 'card-title' }, trendTitle()), trendChart(d.trend));
     const people = rows.length
       ? h('ul', { class: 'list' }, rows.map((r) => teamRow(r, max)))
-      : emptyState('Активных сотрудников пока нет. Подтвердите заявки в чате с ботом: «👥 Сотрудники».', '👥');
+      : emptyState('Активных сотрудников пока нет. Подтвердите заявки в чате с ботом: «Сотрудники».', 'users');
     return [hero, totals, trend, sec('Сотрудники', rows.length ? String(rows.length) : null), people];
   }
 
@@ -2564,15 +2704,18 @@
     return 'Последние ' + plural(n, 'неделя', 'недели', 'недель') + ' (до сегодня)';
   }
 
-  function totalTile(icon, value, label) {
+  /** Плитка итога: значок в цвете своего статуса, число, подпись. */
+  function totalTile(name, tone, value, label) {
     return h('div', { class: 'total', role: 'listitem' },
-      h('span', { class: 'v' }, h('span', { 'aria-hidden': 'true' }, icon + ' '), isNum(value) ? String(value) : '0'),
+      h('span', { class: 'v' }, icon(name, 'tone-' + tone), isNum(value) ? String(value) : '0'),
       h('span', { class: 'l' }, label));
   }
 
+  /** Счётчики сотрудника в одну строку: выполнено · просрочено · в работе · на проверке (значки те же, что у плиток). */
   function statsLine(st) {
     if (!st || !st.total) return 'задач нет';
-    return '✅ ' + st.done + ' · ⏰ ' + st.overdue_total + ' · 🔄 ' + st.in_progress + ' · 📝 ' + st.on_review;
+    const cell = (name, n) => h('span', { class: 'mini' }, icon(name, 'ic-sm'), String(n));
+    return dotted([cell('done', st.done), cell('clock', st.overdue_total), cell('work', st.in_progress), cell('review', st.on_review)]);
   }
 
   function teamRow(r, max) {
@@ -2590,7 +2733,7 @@
           h('span', { class: 'sr-only' }, r.stats && r.stats.total
             ? 'Выполнено ' + r.stats.done + ', просрочено ' + r.stats.overdue_total + ', в работе ' + r.stats.in_progress + ', на проверке ' + r.stats.on_review
             : 'Задач нет'))),
-      h('span', { class: 'chev', 'aria-hidden': 'true' }, '›')));
+      chevron()));
   }
 
   function normKind(kind) {
@@ -2633,7 +2776,7 @@
         pc.update(d.period);
         if (!self && d.user) {
           head.setTitle(own(d.user.full_name));
-          head.setSub([own(d.user.position), d.user.status === 'blocked' ? tr('⛔ заблокирован') : null].filter(Boolean).join(' · '));
+          head.setSub([own(d.user.position), d.user.status === 'blocked' ? tr('заблокирован') : null].filter(Boolean).join(' · '));
         }
         return renderKpi(scr, d, ps, self, userId);
       },
@@ -2657,7 +2800,7 @@
       kpiBar(cur.kpi, max, cur.kpi_text)));
 
     if (!st.total) {
-      out.push(emptyState('Задач в этом периоде нет.', '🗓️'));
+      out.push(emptyState('Задач в этом периоде нет.', 'calendar'));
     } else {
       out.push(h('div', { class: 'stats', role: 'list', 'aria-label': 'Показатели периода' },
         statCell(st.done + ' из ' + st.total, 'Выполнено'),
@@ -2674,22 +2817,22 @@
 
     const items = cur.items || [];
     if (items.length) {
-      out.push(sec('🧮 Вошли в расчёт', String(items.length)));
+      out.push(sec('Вошли в расчёт', String(items.length)));
       out.push(h('ul', { class: 'list' }, items.map((it) => h('li', null,
         h('button', { type: 'button', class: 'row-main', onclick: () => go('#/task/' + it.task_id) },
           h('span', { class: 'row-body' },
             h('span', { class: 'row-top' },
               h('span', { class: 'row-title' }, h('span', { class: 'id' }, '#' + it.task_id), own(it.title)),
               h('span', { class: 'row-tail is-score' + (it.zero_overdue ? ' is-bad' : '') }, pct(it.score))),
-            h('span', { class: 'row-sub' }, 'вес ' + it.weight + ' % × ' + pct(it.score) + (it.zero_overdue ? ' · ⏰ просрочена' : ''))),
-          h('span', { class: 'chev', 'aria-hidden': 'true' }, '›'))))));
+            h('span', { class: 'row-sub' }, 'вес ' + it.weight + ' % × ' + pct(it.score) + (it.zero_overdue ? ' · просрочена' : ''))),
+          chevron())))));
     }
 
     out.push(historySection(scr, d, ps, userId));
 
     if (!self && isManager()) {
-      // Как «📋 Задачи сотрудника» в чате (ListCB scope=emp, status=all): все задачи, включая выполненные.
-      out.push(button('📋 Задачи сотрудника', () => go('#/tasks?user=' + userId + '&status=all'), 'btn-block mt12'));
+      // Как «Задачи сотрудника» в чате (ListCB scope=emp, status=all): все задачи, включая выполненные.
+      out.push(button('Задачи сотрудника', () => go('#/tasks?user=' + userId + '&status=all'), 'btn-block mt12', null, 'tasks'));
     }
     return out;
   }
@@ -2700,9 +2843,9 @@
 
   function historySection(scr, d, ps, userId) {
     const hist = d.history || { items: [], page: 0, pages: 1, total: 0 };
-    const wrap = h('div', null, sec('📜 История оценок', hist.total ? String(hist.total) : null));
+    const wrap = h('div', null, sec('История оценок', hist.total ? String(hist.total) : null));
     if (!hist.items.length) {
-      wrap.appendChild(emptyState('Оценённых задач пока нет.', '📜'));
+      wrap.appendChild(emptyState('Оценённых задач пока нет.', 'history'));
       return wrap;
     }
     const list = h('ul', { class: 'list' }, hist.items.map(historyRow));
@@ -2736,17 +2879,18 @@
 
   function historyRow(it) {
     const meta = [it.completed_local || '—', tr('вес ' + it.weight + ' %')];
-    if (it.is_late) meta.push(tr('⚠️ с опозданием'));
-    if (it.rework_count) meta.push(tr('↩️ доработок: ' + it.rework_count));
-    let score = '🏁 ' + it.final_score_text;
-    if (it.decision === 'changed') score = (isNum(it.ai_score) ? '🤖 ' + pct(it.ai_score) + ' → ' : '') + '🏁 ' + it.final_score_text + ' ✏️ изменена';
-    else if (it.decision === 'approved') score = '🏁 ' + it.final_score_text + ' ✅ подтверждена';
+    if (it.is_late) meta.push(tr('с опозданием'));
+    if (it.rework_count) meta.push(tr('доработок: ' + it.rework_count));
+    // Итоговая оценка; у изменённой начальником — «оценка AI → итоговая».
+    let score = it.final_score_text;
+    if (it.decision === 'changed') score = (isNum(it.ai_score) ? pct(it.ai_score) + ' → ' : '') + it.final_score_text + ' изменена';
+    else if (it.decision === 'approved') score = it.final_score_text + ' подтверждена';
     return h('li', null, h('button', { type: 'button', class: 'row-main', onclick: () => go('#/task/' + it.task_id) },
       h('span', { class: 'row-body' },
         h('span', { class: 'row-title' }, h('span', { class: 'id' }, '#' + it.task_id), own(it.title)),
         h('span', { class: 'hist-line' }, meta.join(' · ')),
-        h('span', { class: 'hist-score' }, score)),
-      h('span', { class: 'chev', 'aria-hidden': 'true' }, '›')));
+        h('span', { class: 'hist-score' }, icon('flag', 'ic-sm'), score)),
+      chevron()));
   }
 
   // ---------------------------------------------------------------------------------------------
@@ -2851,23 +2995,22 @@
       skeleton: () => skelList(4),
       render: (d) => (d.items.length
         ? h('ul', { class: 'list' }, d.items.map(submitRow))
-        : emptyState('Нет задач для сдачи. Здесь появятся задачи в работе и на доработке.', '📭')),
+        : emptyState('Нет задач для сдачи. Здесь появятся задачи в работе и на доработке.', 'inbox')),
     });
     scr.refresh = () => load(true);
     load();
   }
 
   function submitRow(t) {
-    const icon = t.overdue ? '⏰' : t.status === 'rework' ? '↩️' : '📌';
-    const sub = t.status === 'rework' ? '↩️ на доработке' + (t.rework_count > 1 ? ' · возвратов: ' + t.rework_count : '') : 'вес ' + t.weight + ' %';
+    const sub = t.status === 'rework' ? 'на доработке' + (t.rework_count > 1 ? ' · возвратов: ' + t.rework_count : '') : 'вес ' + t.weight + ' %';
     return h('li', null, h('button', { type: 'button', class: 'row-main', onclick: () => go('#/submit/' + t.id) },
-      h('span', { class: 'ico', 'aria-hidden': 'true' }, icon),
+      statusMark(t),
       h('span', { class: 'row-body' },
         h('span', { class: 'row-top' },
           h('span', { class: 'row-title' }, h('span', { class: 'id' }, '#' + t.id), own(t.title)),
           h('span', { class: 'row-tail' + (t.overdue ? ' is-bad' : '') }, t.tail)),
         h('span', { class: 'row-sub' }, h('span', { class: 'sr-only' }, statusText(t) + '. '), sub)),
-      h('span', { class: 'chev', 'aria-hidden': 'true' }, '›')));
+      chevron()));
   }
 
   // ---------------------------------------------------------------------------------------------
@@ -2900,22 +3043,22 @@
       out.push(h('section', { class: 'card' },
         h('h2', { class: 'task-title' }, own(t.title)),
         h('div', { class: 'pills' },
-          pill(t.status_label, statusTone(t)),
-          t.status === 'done' && t.final_score_text ? pill('🏁 ' + t.final_score_text, 'good') : null),
-        h('p', { class: 'deadline-line' }, '📅 ', t.deadline_label),
+          statusPill(t),
+          t.status === 'done' && t.final_score_text ? pill(t.final_score_text, 'good', 'flag') : null),
+        line('', t.deadline_label, 'deadline-line', 'calendar'),
         acceptanceLine(t, isM),
-        t.auto_note ? h('p', { class: 'line small muted' }, t.auto_note) : null));
+        t.auto_note ? autoNote(t.auto_note) : null));
       out.push(actionsBlock(card, isM));
       out.push(h('section', { class: 'card' },
-        kvBlock('🎯 Ожидаемый результат', t.expected_result),
-        t.plan_text ? line('📊 План:', h('b', { class: 'num' }, own(t.plan_text))) : null,
-        t.description ? kvBlock('💬 Описание', t.description) : null));
+        kvBlock('Ожидаемый результат', t.expected_result),
+        t.plan_text ? line('План:', h('b', { class: 'num' }, own(t.plan_text)), '', 'target') : null,
+        t.description ? kvBlock('Описание', t.description) : null));
       out.push(h('section', { class: 'card' },
-        peopleLines(t, isM).map((p) => line(p[0], p[1])),
+        peopleLines(t, isM).map((p) => line(p[0], p[1], '', p[2])),
         t.weight_pending
-          ? line('⚖️', 'Вес и приоритет: назначит начальник при подтверждении')
-          : [line('⚡ Приоритет:', t.priority_label), line('⚖️ Вес:', t.weight + ' %')],
-        t.rework_count ? line('↩️ Возвратов на доработку:', String(t.rework_count)) : null));
+          ? line('', 'Вес и приоритет: назначит начальник при подтверждении', '', 'weight')
+          : [line('Приоритет:', priorityMark(t), '', 'bolt'), line('Вес:', t.weight + ' %', '', 'weight')],
+        t.rework_count ? line('Возвратов на доработку:', String(t.rework_count), '', 'undo') : null));
       out.push(submissionsBlock(card, isM));
       out.push(eventsBlock(card.events));
       return out;
@@ -2927,37 +3070,37 @@
       const main = [];
       const extra = [];
       if (a.accept) {
-        const acceptBtn = button('✅ Принял в работу', () => acceptOnCard(acceptBtn), 'btn-primary btn-block');
+        const acceptBtn = button('Принял в работу', () => acceptOnCard(acceptBtn), 'btn-primary btn-block', null, 'check');
         main.push(acceptBtn);
       }
-      if (a.submit) main.push(button('📤 Сдать результат', () => go('#/submit/' + t.id), (a.accept ? '' : 'btn-primary ') + 'btn-block'));
-      if (a.review) main.push(button('🔍 Проверить результат', () => go('#/review/' + t.id), 'btn-primary btn-block'));
-      if (a.approve) main.push(button('✅ Подтвердить', () => go('#/proposal/' + t.id), 'btn-primary btn-block'));
+      if (a.submit) main.push(button('Сдать результат', () => go('#/submit/' + t.id), (a.accept ? '' : 'btn-primary ') + 'btn-block', null, 'send'));
+      if (a.review) main.push(button('Проверить результат', () => go('#/review/' + t.id), 'btn-primary btn-block', null, 'review'));
+      if (a.approve) main.push(button('Подтвердить', () => go('#/proposal/' + t.id), 'btn-primary btn-block', null, 'check'));
       if (a.revise) {
         // Оценку подтвердил бот (начальник не ответил вовремя) — её ещё можно изменить.
         const subs = card.submissions || [];
         const last = subs.length ? subs[subs.length - 1] : null;
         if (last && last.id === a.revise_submission_id) {
-          main.push(button('✏️ Изменить оценку' + (a.revise_until_text ? ' (до ' + a.revise_until_text + ')' : ''),
-            () => scoreSheet(scr, last, { revise: true, onDone: () => load(true) }), 'btn-block'));
+          main.push(button('Изменить оценку' + (a.revise_until_text ? ' (до ' + a.revise_until_text + ')' : ''),
+            () => scoreSheet(scr, last, { revise: true, onDone: () => load(true) }), 'btn-block', null, 'edit'));
         }
       }
-      if (a.edit) extra.push(button('✏️ Изменить', () => go('#/task/' + t.id + '/edit')));
-      if (a.reject) extra.push(button('❌ Отклонить', () => rejectSheet(scr, t, () => go('#/review?tab=proposals', { force: true, reset: true })), 'btn-danger'));
-      if (a.cancel) extra.push(button('🚫 Отменить', () => cancelSheet(scr, t, (task) => {
+      if (a.edit) extra.push(button('Изменить', () => go('#/task/' + t.id + '/edit'), '', null, 'edit'));
+      if (a.reject) extra.push(button('Отклонить', () => rejectSheet(scr, t, () => go('#/review?tab=proposals', { force: true, reset: true })), 'btn-danger', null, 'reject'));
+      if (a.cancel) extra.push(button('Отменить', () => cancelSheet(scr, t, (task) => {
         card.task = task;
         repaint(card);
-      }), 'btn-danger'));
+      }), 'btn-danger', null, 'ban'));
       if (!main.length && !extra.length) return null;
       return h('div', { class: 'actions' }, main, extra.length ? h('div', { class: 'btn-row' }, extra) : null);
 
       async function acceptOnCard(btn) {
         btn.disabled = true;
-        setText(btn, '⏳ Принимаю…');
+        setLabel(btn, 'wait', 'Принимаю…');
         try {
           const r = await api(EP.acceptTask, { params: { task_id: t.id } });
           haptic.ok();
-          toast('✅ Задача #' + t.id + ' принята в работу');
+          toast('Задача #' + t.id + ' принята в работу', 'done');
           afterMutation();
           if (scr.alive && r && r.task) {
             card.task = r.task;
@@ -2966,7 +3109,7 @@
         } catch (err) {
           if (!scr.alive) return;
           btn.disabled = false;
-          setText(btn, '✅ Принял в работу');
+          setLabel(btn, 'check', 'Принял в работу');
           reportError(err);
         }
       }
@@ -2995,20 +3138,26 @@
   function acceptanceLine(t, isM) {
     if (t.status !== 'active') return null;
     if (!t.accepted) {
-      return h('p', { class: 'line tone-warn' }, isM ? '⏳ Исполнитель ещё не подтвердил получение' : '⏳ Вы ещё не подтвердили получение');
+      return line('', isM ? 'Исполнитель ещё не подтвердил получение' : 'Вы ещё не подтвердили получение', 'tone-warn', 'wait');
     }
-    return h('p', { class: 'line muted' }, '✔️ Принята в работу: ' + fmtDmHm(t.accepted_at));
+    return line('', 'Принята в работу: ' + fmtDmHm(t.accepted_at), 'muted', 'check');
   }
 
+  /** Пояснение сервера об автоподтверждении: эмодзи в его начале заменяется значком того же смысла. */
+  function autoNote(text, cls) {
+    return line('', stripLeadingEmoji(text), 'small muted' + (cls ? ' ' + cls : ''), markIcon(text) || 'clock');
+  }
+
+  /** Строки «кто»: [подпись, значение, значок]. */
   function peopleLines(t, isM) {
     const out = [];
-    if (isM && t.assignee) out.push(['👤 Исполнитель:', own(t.assignee.short_name + (t.assignee.position ? ', ' + t.assignee.position : ''))]);
+    if (isM && t.assignee) out.push(['Исполнитель:', own(t.assignee.short_name + (t.assignee.position ? ', ' + t.assignee.position : '')), 'user']);
     if (t.source === 'employee') {
-      out.push(['✋', 'Внесена сотрудником (устное поручение)']);
-      if (t.manager) out.push(['🧑‍💼 Ответственный начальник:', own(t.manager.short_name)]);
+      out.push(['', 'Внесена сотрудником (устное поручение)', 'message']);
+      if (t.manager) out.push(['Ответственный начальник:', own(t.manager.short_name), 'boss']);
     } else {
-      if (t.created_by) out.push(['🧑‍💼 Постановщик:', own(t.created_by.short_name)]);
-      if (t.manager && t.created_by && t.manager.id !== t.created_by.id) out.push(['🧑‍💼 Ответственный начальник:', own(t.manager.short_name)]);
+      if (t.created_by) out.push(['Постановщик:', own(t.created_by.short_name), 'boss']);
+      if (t.manager && t.created_by && t.manager.id !== t.created_by.id) out.push(['Ответственный начальник:', own(t.manager.short_name), 'boss']);
     }
     return out;
   }
@@ -3033,40 +3182,50 @@
     return [
       h('div', { class: 'sub-head' },
         h('span', { class: 't' }, 'Попытка ' + sb.attempt + ' · ' + sb.created_local),
-        pill(sb.late_text, sb.is_late ? 'bad' : 'good')),
-      kvBlock('✅ Что сделано', sb.fact_text),
-      sb.result_text ? kvBlock('📈 Результат', sb.result_text) : null,
-      sb.fact_line ? h('p', { class: 'line num' }, own(sb.fact_line)) : null,
+        pill(sb.late_text, sb.is_late ? 'bad' : 'good', sb.is_late ? 'clock' : 'check')),
+      kvBlock('Что сделано', sb.fact_text),
+      sb.result_text ? kvBlock('Результат', sb.result_text) : null,
+      factLine(sb),
       filesBlock(sb, isM),
       aiBlock(sb, isM),
       decisionBlock(sb),
     ];
   }
 
+  /** «План: 100 → Факт: 110 (110 %)» — готовая строка сервера, без эмодзи в начале. */
+  function factLine(sb) {
+    return sb.fact_line ? line('', own(stripLeadingEmoji(sb.fact_line)), 'num', 'calc') : null;
+  }
+
+  /** Подпись предварительной оценки: AI или расчёт по правилам (значок — по источнику). */
+  function aiLabel(ai) {
+    return h('div', { class: 'ai-label' }, icon(ai.source === 'ai' ? 'ai' : 'calc', 'ic-sm'), stripLeadingEmoji(ai.label));
+  }
+
   function filesBlock(sb, isM) {
     const files = sb.attachments || [];
     if (!files.length) return null;
     const list = h('ul', { class: 'files' }, files.map((f) => h('li', { class: 'file' },
-      h('span', { class: 'thumb', 'aria-hidden': 'true' }, KIND_ICONS[f.kind] || '📎'),
+      h('span', { class: 'thumb' }, icon(KIND_ICONS[f.kind] || 'clip')),
       h('span', { class: 'fname' }, own(f.name)),
       isNum(f.size) ? h('span', { class: 'fsize' }, fileSize(f.size)) : null)));
     let send = null;
     if (isM) {
-      send = button('📎 Прислать файлы в чат', async () => {
+      send = button('Прислать файлы в чат', async () => {
         send.disabled = true;
         try {
           await api(EP.sendFiles, { params: { sub_id: sb.id } });
           haptic.ok();
-          toast('📎 Файлы придут в чат с ботом');
+          toast('Файлы придут в чат с ботом', 'send');
         } catch (err) {
           reportError(err);
         } finally {
           send.disabled = false;
         }
-      }, 'btn-block');
+      }, 'btn-block', null, 'send');
     }
     return h('div', { class: 'files-block' },
-      h('p', { class: 'line muted' }, '📎 Файлы (' + files.length + ')' + (isM ? '' : ' — сохранены в чате с ботом')),
+      line('', 'Файлы (' + files.length + ')' + (isM ? '' : ' — сохранены в чате с ботом'), 'muted', 'clip'),
       list, send);
   }
 
@@ -3074,19 +3233,19 @@
     if (isM) {
       if (sb.ai) {
         return h('div', { class: 'ai-box' },
-          h('div', { class: 'ai-label' }, sb.ai.label),
+          aiLabel(sb.ai),
           h('div', { class: 'ai-score' }, sb.ai.score_text),
           sb.ai.rationale ? h('p', { class: 'ai-why' }, own(sb.ai.rationale)) : null);
       }
       if (sb.ai_pending) {
         return h('div', { class: 'ai-box', role: 'status' },
-          h('div', { class: 'ai-label' }, '⏳ Предварительная оценка ещё рассчитывается'),
+          h('div', { class: 'ai-label' }, icon('wait', 'ic-sm'), 'Предварительная оценка ещё рассчитывается'),
           h('p', { class: 'small muted' }, 'Экран обновится сам — обычно это занимает до пары минут.'));
       }
       return null;
     }
-    if (sb.ai_hidden) return note('📝 Результат на проверке у начальника. Решение придёт в чат с ботом.', 'info');
-    if (sb.ai) return h('p', { class: 'line muted' }, sb.ai.label + ': ' + sb.ai.score_text);
+    if (sb.ai_hidden) return note('Результат на проверке у начальника. Решение придёт в чат с ботом.', 'info', null, 'review');
+    if (sb.ai) return h('p', { class: 'line muted' }, stripLeadingEmoji(sb.ai.label) + ': ' + sb.ai.score_text);
     return null;
   }
 
@@ -3094,25 +3253,26 @@
     if (!sb.decision) return null;
     const out = [];
     if (sb.decision === 'rework') {
-      out.push(h('p', { class: 'line' }, h('b', null, sb.decision_label || '↩️ Возвращено на доработку')));
+      out.push(line('', h('b', null, stripLeadingEmoji(sb.decision_label || 'Возвращено на доработку')), '', 'undo'));
     } else {
-      out.push(h('p', { class: 'line' }, '🏁 Итоговая оценка: ', h('b', { class: 'num' }, sb.final_score_text || pct(sb.final_score)),
-        sb.decision_label ? ' — ' + sb.decision_label : ''));
+      out.push(line('Итоговая оценка:', [h('b', { class: 'num' }, sb.final_score_text || pct(sb.final_score)),
+        sb.decision_label ? ' — ' + stripLeadingEmoji(sb.decision_label) : ''], '', 'flag'));
     }
     if (sb.reviewer) {
-      out.push(h('p', { class: 'line small muted' }, '🧑‍💼 Проверка: ' + own(sb.reviewer.short_name) + (sb.reviewed_at ? ', ' + fmtDmHm(sb.reviewed_at) : '')));
+      out.push(line('', 'Проверка: ' + own(sb.reviewer.short_name) + (sb.reviewed_at ? ', ' + fmtDmHm(sb.reviewed_at) : ''), 'small muted', 'boss'));
     }
-    if (sb.review_comment) out.push(kvBlock('💬 Комментарий начальника', sb.review_comment));
+    if (sb.review_comment) out.push(kvBlock('Комментарий начальника', sb.review_comment));
     return h('div', { class: 'decision' }, out);
   }
 
+  /** Журнал задачи: строки сервера; эмодзи сервера (у автора-бота, кружок приоритета) не показываются. */
   function eventsBlock(events) {
     if (!events || !events.length) return null;
     return h('details', { class: 'fold', 'data-key': 'history' },
-      h('summary', null, h('span', null, '📜 История · ' + events.length)),
+      h('summary', null, h('span', null, icon('history'), 'История · ' + events.length)),
       h('div', { class: 'fold-body' }, h('ul', { class: 'events' }, events.map((ev) => h('li', null,
-        h('span', { class: 'when' }, ev.at_local + ' — ' + own(ev.actor_name)),
-        own(ev.text))))));
+        h('span', { class: 'when' }, ev.at_local + ' — ' + own(ev.actor ? ev.actor_name : stripLeadingEmoji(ev.actor_name))),
+        own(String(ev.text || '').replace(PRIORITY_DOTS, '')))))));
   }
 
   // --- Листы действий над задачей -----------------------------------------------------------
@@ -3120,7 +3280,7 @@
   function cancelSheet(scr, t, after) {
     const reason = field({ label: 'Причина (необязательно)', multiline: true, rows: 3, max: 1000, placeholder: 'Например: задача больше не актуальна' });
     sheet.show({
-      title: '🚫 Отменить задачу #' + t.id,
+      title: 'Отменить задачу #' + t.id,
       body: h('div', null, h('p', { class: 'muted' }, 'Сотрудник получит уведомление об отмене.'), reason.el),
       dirty: () => reason.get().trim() !== '',
       primary: {
@@ -3134,7 +3294,7 @@
             const r = await api(EP.cancelTask, { params: { task_id: t.id }, body: { reason: reason.get().trim() || null } });
             sheet.close(true);
             haptic.ok();
-            toast(withNotice('🚫 Задача #' + t.id + ' отменена', r.notice));
+            toast(withNotice('Задача #' + t.id + ' отменена', r.notice), 'done');
             afterMutation();
             if (scr.alive && r.task) after(r.task);
           } catch (err) {
@@ -3149,7 +3309,7 @@
   function rejectSheet(scr, t, after) {
     const reason = field({ label: 'Причина (необязательно)', multiline: true, rows: 3, max: 1000, placeholder: 'Например: эту работу уже выполняет другой сотрудник' });
     sheet.show({
-      title: '❌ Отклонить поручение #' + t.id,
+      title: 'Отклонить поручение #' + t.id,
       body: h('div', null, h('p', { class: 'muted' }, 'Сотрудник получит уведомление' + ' и увидит причину, если вы её укажете.'), reason.el),
       dirty: () => reason.get().trim() !== '',
       primary: {
@@ -3162,7 +3322,7 @@
             const r = await api(EP.rejectTask, { params: { task_id: t.id }, body: { reason: reason.get().trim() || null } });
             sheet.close(true);
             haptic.ok();
-            toast(withNotice('❌ Поручение #' + t.id + ' отклонено', r.notice));
+            toast(withNotice('Поручение #' + t.id + ' отклонено', r.notice), 'done');
             afterMutation();
             if (scr.alive) after(r);
           } catch (err) {
@@ -3206,10 +3366,10 @@
         const items = d.items || [];
         if (reviewState.seg === 'proposals') {
           seg.setLabel('proposals', segLabel('Поручения', items.length));
-          return items.length ? h('ul', { class: 'list' }, items.map((it) => proposalRow(it.task))) : emptyState('Новых поручений нет.', '📭');
+          return items.length ? h('ul', { class: 'list' }, items.map((it) => proposalRow(it.task))) : emptyState('Новых поручений нет.', 'inbox');
         }
         seg.setLabel('results', segLabel('Результаты', items.length));
-        return items.length ? h('ul', { class: 'list' }, items.map(reviewRow)) : emptyState('Нечего проверять 🎉', '✨');
+        return items.length ? h('ul', { class: 'list' }, items.map(reviewRow)) : emptyState('Нечего проверять', 'done');
       },
     });
     scr.onCounts = () => {
@@ -3225,19 +3385,20 @@
     const t = item.task;
     const sb = item.submission;
     const ai = sb && sb.ai;
-    const tail = ai ? (ai.source === 'ai' ? '🤖 ' : '📐 ') + ai.score_text : '⏳';
+    // Значок у оценки: AI, расчёт по правилам или «ещё считается».
+    const mark = ai ? (ai.source === 'ai' ? 'ai' : 'calc') : 'wait';
     return h('li', null, h('button', { type: 'button', class: 'row-main', onclick: () => go('#/review/' + t.id) },
       h('span', { class: 'row-body' },
         h('span', { class: 'row-sub row-kicker' }, own(t.assignee ? t.assignee.short_name : '')),
         h('span', { class: 'row-top' },
           h('span', { class: 'row-title' }, h('span', { class: 'id' }, '#' + t.id), own(t.title)),
           h('span', { class: 'row-tail is-score' },
-            h('span', { 'aria-hidden': 'true' }, tail),
+            h('span', { 'aria-hidden': 'true' }, icon(mark, 'ic-sm'), ai ? ai.score_text : null),
             h('span', { class: 'sr-only' }, ai ? 'Предварительная оценка ' + ai.score_text : 'Оценка рассчитывается'))),
         sb ? h('span', { class: 'row-sub' }, 'сдано ' + sb.created_local + ' · ',
           h('span', { class: sb.is_late ? 'tone-bad' : null }, sb.late_text),
           sb.attempt > 1 ? ' · попытка ' + sb.attempt : '') : null),
-      h('span', { class: 'chev', 'aria-hidden': 'true' }, '›')));
+      chevron()));
   }
 
   function proposalRow(t) {
@@ -3246,7 +3407,7 @@
         h('span', { class: 'row-sub row-kicker' }, own(t.assignee ? t.assignee.short_name : '')),
         h('span', { class: 'row-top' }, h('span', { class: 'row-title' }, h('span', { class: 'id' }, '#' + t.id), own(t.title))),
         h('span', { class: 'row-sub' + (t.overdue || Date.parse(t.deadline) <= serverNow() ? ' tone-bad' : '') }, 'срок ' + own(t.deadline_local))),
-      h('span', { class: 'chev', 'aria-hidden': 'true' }, '›')));
+      chevron()));
   }
 
   function backToQueue(tab) {
@@ -3277,32 +3438,32 @@
       if (!t.actions || !t.actions.review || !sb) {
         primary.hide();
         return [
-          h('section', { class: 'card' }, h('h2', { class: 'task-title' }, own(t.title)), h('div', { class: 'pills' }, pill(t.status_label, statusTone(t)))),
-          emptyState('Результат уже обработан или ещё не сдан.', '✔️'),
+          h('section', { class: 'card' }, h('h2', { class: 'task-title' }, own(t.title)), h('div', { class: 'pills' }, statusPill(t))),
+          emptyState('Результат уже обработан или ещё не сдан.', 'done'),
           button('Открыть карточку задачи', () => go('#/task/' + t.id, { replace: true }), 'btn-block'),
         ];
       }
       const canConfirm = Boolean(sb.ai && isNum(sb.ai.score));
-      primary.set(canConfirm ? { text: '✅ Подтвердить ' + sb.ai.score_text, onClick: () => confirmScore(t, sb) } : null);
+      primary.set(canConfirm ? { text: 'Подтвердить ' + sb.ai.score_text, onClick: () => confirmScore(t, sb) } : null);
       return [
         h('section', { class: 'card' },
           h('h2', { class: 'task-title' }, '#' + t.id + ' ' + own(t.title)),
-          h('p', { class: 'line muted mt8' }, '👤 ' + own(t.assignee ? t.assignee.short_name : '—') + ' · попытка ' + sb.attempt + ' · вес ' + t.weight + ' %')),
+          line('', own(t.assignee ? t.assignee.short_name : '—') + ' · попытка ' + sb.attempt + ' · вес ' + t.weight + ' %', 'muted mt8', 'user')),
         h('section', { class: 'card' },
-          kvBlock('🎯 План', t.expected_result, t.plan_text ? line('📊', h('b', { class: 'num' }, own(t.plan_text))) : null),
-          kvBlock('✅ Факт', sb.fact_text),
-          sb.result_text ? kvBlock('📈 Результат', sb.result_text) : null,
-          sb.fact_line ? h('p', { class: 'line num' }, own(sb.fact_line)) : null),
+          kvBlock('План', t.expected_result, t.plan_text ? line('', h('b', { class: 'num' }, own(t.plan_text)), '', 'target') : null),
+          kvBlock('Факт', sb.fact_text),
+          sb.result_text ? kvBlock('Результат', sb.result_text) : null,
+          factLine(sb)),
         h('section', { class: 'card' },
-          line('📅 Срок:', fmtFull(sb.deadline_at_submit)),
-          h('p', { class: 'line' }, h('span', { class: 'muted' }, '📤 Сдано: '), sb.created_local + ' — ', h('span', { class: sb.is_late ? 'tone-bad' : 'tone-good' }, sb.late_text)),
+          line('Срок:', fmtFull(sb.deadline_at_submit), '', 'calendar'),
+          line('Сдано:', [sb.created_local + ' — ', h('span', { class: sb.is_late ? 'tone-bad' : 'tone-good' }, sb.late_text)], '', 'send'),
           filesBlock(sb, true)),
         aiReviewCard(sb),
         h('p', { class: 'muted small center' }, 'Окончательное решение — за начальником.'),
-        t.auto_note ? h('p', { class: 'muted small center' }, t.auto_note) : null,
+        t.auto_note ? autoNote(t.auto_note, 'center') : null,
         h('div', { class: 'btn-row' },
-          button('✏️ Изменить оценку', () => scoreSheet(scr, sb)),
-          button('↩ На доработку', () => reworkSheet(scr, t, sb))),
+          button('Изменить оценку', () => scoreSheet(scr, sb), '', null, 'edit'),
+          button('На доработку', () => reworkSheet(scr, t, sb), '', null, 'undo')),
         h('button', { type: 'button', class: 'link-btn center-block', onclick: () => go('#/task/' + t.id) }, 'Открыть карточку задачи'),
       ];
     }
@@ -3312,7 +3473,7 @@
       try {
         const r = await api(EP.confirm, { params: { sub_id: sb.id } });
         haptic.ok();
-        toast(withNotice('✅ Подтверждено: ' + sb.ai.score_text, r.notice));
+        toast(withNotice('Подтверждено: ' + sb.ai.score_text, r.notice), 'done');
         afterMutation();
         backToQueue('results');
       } catch (err) {
@@ -3337,17 +3498,17 @@
   function aiReviewCard(sb) {
     if (sb.ai) {
       return h('section', { class: 'card ai-card', 'aria-label': 'Предварительная оценка' },
-        h('div', { class: 'ai-label' }, sb.ai.label),
+        aiLabel(sb.ai),
         h('div', { class: 'kpi-num' }, String(Math.floor(sb.ai.score + 0.5)), h('span', { class: 'unit' }, '%')),
         sb.ai.rationale ? h('p', { class: 'ai-why' }, own(sb.ai.rationale)) : null,
         sb.ai.model ? h('p', { class: 'small muted mt8' }, 'Модель: ' + own(sb.ai.model)) : null);
     }
     if (sb.ai_pending) {
       return h('section', { class: 'card ai-card', role: 'status' },
-        h('div', { class: 'ai-label' }, '⏳ Предварительная оценка ещё рассчитывается'),
+        h('div', { class: 'ai-label' }, icon('wait', 'ic-sm'), 'Предварительная оценка ещё рассчитывается'),
         h('p', { class: 'small muted' }, 'Экран обновится сам. Можно не ждать — изменить оценку или вернуть на доработку.'));
     }
-    return h('section', { class: 'card ai-card' }, h('div', { class: 'ai-label' }, '🤖 Предварительной оценки нет — выставьте оценку сами.'));
+    return h('section', { class: 'card ai-card' }, h('div', { class: 'ai-label' }, icon('ai', 'ic-sm'), 'Предварительной оценки нет — выставьте оценку сами.'));
   }
 
   /** Лист оценки. o.revise — изменить оценку, подтверждённую автоматически (o.onDone — что сделать после). */
@@ -3382,7 +3543,7 @@
     const comment = field({ label: 'Комментарий для сотрудника (необязательно)', multiline: true, rows: 3, max: 2000, placeholder: 'Например: не хватает расчёта по двум договорам' });
 
     function paintChips() {
-      chipsBox.replaceChildren.apply(chipsBox, options.map((o) => chip((o === marked ? '🤖 ' : '') + o + ' %', value === o, () => {
+      chipsBox.replaceChildren.apply(chipsBox, options.map((o) => chip([o === marked ? icon('ai', 'ic-sm tone-info') : null, o + ' %'], value === o, () => {
         value = o;
         custom.set('');
         custom.setError('');
@@ -3401,10 +3562,10 @@
 
     paintChips();
     sheet.show({
-      title: '✏️ Изменить оценку',
+      title: 'Изменить оценку',
       body: h('div', null,
-        revise ? h('p', { class: 'muted' }, '🏁 Сейчас: ', h('b', { class: 'num' }, sb.final_score_text || pct(sb.final_score)), ' — подтверждена автоматически') : null,
-        sb.ai ? h('p', { class: 'muted' }, sb.ai.label + ': ', h('b', { class: 'num' }, sb.ai.score_text)) : h('p', { class: 'muted' }, '🤖 Предварительной оценки AI нет.'),
+        revise ? h('p', { class: 'muted' }, 'Сейчас: ', h('b', { class: 'num' }, sb.final_score_text || pct(sb.final_score)), ' — подтверждена автоматически') : null,
+        sb.ai ? h('p', { class: 'muted' }, stripLeadingEmoji(sb.ai.label) + ': ', h('b', { class: 'num' }, sb.ai.score_text)) : h('p', { class: 'muted' }, 'Предварительной оценки AI нет.'),
         chipsBox, custom.el, comment.el),
       dirty: () => value !== null || comment.get().trim() !== '',
       primary: {
@@ -3421,7 +3582,7 @@
             const r = await api(revise ? EP.reviseScore : EP.setScore, { params: { sub_id: sb.id }, body: { score: value, comment: comment.get().trim() || null } });
             sheet.close(true);
             haptic.ok();
-            toast(withNotice('✅ Оценка: ' + fmtNum(value) + ' %', r.notice));
+            toast(withNotice('Оценка: ' + fmtNum(value) + ' %', r.notice), 'done');
             afterMutation();
             if (revise) {
               if (o.onDone) o.onDone();
@@ -3477,15 +3638,15 @@
     }
 
     sheet.show({
-      title: '↩ Вернуть на доработку',
+      title: 'Вернуть на доработку',
       body: h('div', null,
         comment.el,
         h('div', { class: 'field', role: 'radiogroup', 'aria-label': 'Срок доработки' },
           h('div', { class: 'label' }, 'Срок доработки'),
           h('label', { class: 'radio-line' + (past ? ' is-disabled' : '') }, keep,
-            h('span', null, '📌 Оставить текущий (' + own(t.deadline_local) + ')',
+            h('span', null, 'Оставить текущий (' + own(t.deadline_local) + ')',
               past ? h('span', { class: 'why' }, 'срок уже прошёл — укажите новый') : null)),
-          h('label', { class: 'radio-line' }, fresh, h('span', null, '📅 Новый срок'))),
+          h('label', { class: 'radio-line' }, fresh, h('span', null, 'Новый срок'))),
         pickerWrap),
       dirty: () => comment.get().trim() !== '',
       primary: {
@@ -3505,7 +3666,7 @@
             const r = await api(EP.rework, { params: { sub_id: sb.id }, body });
             sheet.close(true);
             haptic.ok();
-            toast(withNotice('↩ Возвращено на доработку', r.notice));
+            toast(withNotice('Возвращено на доработку', r.notice), 'undo');
             afterMutation();
             backToQueue('results');
           } catch (err) {
@@ -3545,8 +3706,8 @@
       if (!t.actions || !t.actions.approve) {
         primary.hide();
         return [
-          h('section', { class: 'card' }, h('h2', { class: 'task-title' }, own(t.title)), h('div', { class: 'pills' }, pill(t.status_label, statusTone(t)))),
-          emptyState('Поручение уже обработано.', '✔️'),
+          h('section', { class: 'card' }, h('h2', { class: 'task-title' }, own(t.title)), h('div', { class: 'pills' }, statusPill(t))),
+          emptyState('Поручение уже обработано.', 'done'),
           button('Открыть карточку задачи', () => go('#/task/' + t.id, { replace: true }), 'btn-block'),
         ];
       }
@@ -3576,7 +3737,7 @@
         try {
           const r = await api(EP.approveTask, { params: { task_id: t.id }, body: { weight: model.weight, priority: model.priority } });
           haptic.ok();
-          toast(withNotice('✅ Поручение #' + t.id + ' подтверждено — задача в работе', r.notice));
+          toast(withNotice('Поручение #' + t.id + ' подтверждено — задача в работе', r.notice), 'done');
           afterMutation();
           backToQueue('proposals');
         } catch (err) {
@@ -3585,40 +3746,40 @@
           if (err.handled) return;
           haptic.err();
           if (/уже обработан/i.test(err.ru || '')) {
-            toast(err.message);
+            toast(err.message, 'alert');
             afterMutation();
             backToQueue('proposals');
             return;
           }
           formErr.replaceChildren(note(err.message, 'bad', /срок/i.test(err.ru || '')
-            ? h('div', { class: 'mt8' }, button('✏️ Изменить срок', () => go('#/task/' + t.id + '/edit')))
+            ? h('div', { class: 'mt8' }, button('Изменить срок', () => go('#/task/' + t.id + '/edit'), 'btn-sm', null, 'edit'))
             : null));
           safely(() => formErr.scrollIntoView({ block: 'center', behavior: scrollBehavior() }));
         }
       }
 
-      primary.set({ text: '✅ Подтвердить поручение', enabled: wp.filled(), onClick: approve });
+      primary.set({ text: 'Подтвердить поручение', enabled: wp.filled(), onClick: approve });
       return [
         h('section', { class: 'card' },
           h('h2', { class: 'task-title' }, own(t.title)),
-          h('p', { class: 'line muted mt8' }, '👤 ' + own(t.assignee ? t.assignee.short_name : '—') + ' · ✋ внесено сотрудником (устное поручение)'),
-          h('p', { class: 'deadline-line' }, '📅 ', t.deadline_label)),
-        expired ? note('⚠️ Срок поручения уже прошёл — сначала измените срок.', 'bad',
-          h('div', { class: 'mt8' }, button('✏️ Изменить срок', () => go('#/task/' + t.id + '/edit')))) : null,
+          line('', own(t.assignee ? t.assignee.short_name : '—') + ' · внесено сотрудником (устное поручение)', 'muted mt8', 'user'),
+          line('', t.deadline_label, 'deadline-line', 'calendar')),
+        expired ? note('Срок поручения уже прошёл — сначала измените срок.', 'bad',
+          h('div', { class: 'mt8' }, button('Изменить срок', () => go('#/task/' + t.id + '/edit'), 'btn-sm', null, 'edit'))) : null,
         h('section', { class: 'card' },
-          kvBlock('🎯 Ожидаемый результат', t.expected_result),
-          t.plan_text ? line('📊 План:', h('b', { class: 'num' }, own(t.plan_text))) : null,
-          t.description ? kvBlock('💬 Описание', t.description) : null),
+          kvBlock('Ожидаемый результат', t.expected_result),
+          t.plan_text ? line('План:', h('b', { class: 'num' }, own(t.plan_text)), '', 'target') : null,
+          t.description ? kvBlock('Описание', t.description) : null),
         sec('Подтвердить'),
         h('section', { class: 'card' },
           h('div', { class: 'field' }, h('div', { class: 'label' }, 'Приоритет'), pr.el),
           wp.el,
-          suggested !== null ? h('p', { class: 'field-hint' }, '💡 Предлагаемый вес: ' + suggested + ' %') : null),
-        t.auto_note && !expired ? h('p', { class: 'muted small center' }, t.auto_note) : null,
+          suggested !== null ? h('p', { class: 'field-hint' }, 'Предлагаемый вес: ' + suggested + ' %') : null),
+        t.auto_note && !expired ? autoNote(t.auto_note, 'center') : null,
         formErr,
         h('div', { class: 'btn-row' },
-          button('✏️ Изменить', () => go('#/task/' + t.id + '/edit')),
-          button('❌ Отклонить', () => rejectSheet(scr, t, () => backToQueue('proposals')), 'btn-danger')),
+          button('Изменить', () => go('#/task/' + t.id + '/edit'), '', null, 'edit'),
+          button('Отклонить', () => rejectSheet(scr, t, () => backToQueue('proposals')), 'btn-danger', null, 'reject')),
       ];
     }
 
@@ -3695,7 +3856,7 @@
   function newTaskForm(scr, d, employees, rerender) {
     if (!employees.length) {
       primary.hide();
-      return emptyState(T.noEmployees, '👥');
+      return emptyState(T.noEmployees, 'users');
     }
     if (d.assignee_id && !employees.some((u) => String(u.id) === d.assignee_id)) d.assignee_id = '';
     const formErr = h('div', { class: 'form-error', role: 'alert' });
@@ -3797,7 +3958,7 @@
         const r = await api(EP.createTask, { body });
         drafts.newTask = null;
         haptic.ok();
-        toast(withNotice('✅ Задача #' + r.task.id + ' поставлена', r.notice));
+        toast(withNotice('Задача #' + r.task.id + ' поставлена', r.notice), 'done');
         afterMutation();
         syncClosing();
         go('#/task/' + r.task.id, { force: true });
@@ -3813,9 +3974,9 @@
 
     primary.set({ text: 'Поставить задачу', enabled: filled(), onClick: submit });
     refreshLoad();
-    const dictate = dictateBar('🎤 Надиктовать задачу целиком', (data) => {
+    const dictate = dictateBar('Надиктовать задачу целиком', (data) => {
       applyDictation(d, data);
-      toast('🎤 Готово — проверьте поля. Вес и приоритет выберите сами.');
+      toast('Готово — проверьте поля. Вес и приоритет выберите сами.', 'mic');
       if (rerender) rerender();
     });
     return h('form', { class: 'form', novalidate: true, onsubmit: (e) => e.preventDefault() },
@@ -3893,7 +4054,7 @@
         const r = await api(EP.propose, { body });
         drafts.propose = null;
         haptic.ok();
-        toast(r.notice || '📤 Поручение #' + r.task.id + ' отправлено начальнику на подтверждение');
+        toast(r.notice || 'Поручение #' + r.task.id + ' отправлено начальнику на подтверждение', r.notice ? null : 'send');
         afterMutation();
         syncClosing();
         go('#/task/' + r.task.id, { force: true });
@@ -3908,10 +4069,10 @@
       }
     }
 
-    primary.set({ text: '📤 Отправить начальнику', enabled: filled(), onClick: submit });
-    const dictate = dictateBar('🎤 Надиктовать поручение целиком', (data) => {
+    primary.set({ text: 'Отправить начальнику', enabled: filled(), onClick: submit });
+    const dictate = dictateBar('Надиктовать поручение целиком', (data) => {
       applyDictation(d, data);
-      toast('🎤 Готово — проверьте поля перед отправкой.');
+      toast('Готово — проверьте поля перед отправкой.', 'mic');
       rerender();
     });
     return h('form', { class: 'form', novalidate: true, onsubmit: (e) => e.preventDefault() },
@@ -3933,7 +4094,7 @@
         const t = card.task;
         if (!t.actions || !t.actions.edit) {
           primary.hide();
-          return [emptyState('Эту задачу сейчас изменить нельзя: ' + own(statusText(t).toLowerCase()) + '.', '🔒'),
+          return [emptyState('Эту задачу сейчас изменить нельзя: ' + own(statusText(t).toLowerCase()) + '.', 'lock'),
             button('Открыть карточку задачи', () => go('#/task/' + t.id, { replace: true }), 'btn-block')];
         }
         form = editForm(scr, t);
@@ -3983,7 +4144,7 @@
       weight = weightPicker(m, { onChange: changed });
       parts.push(weight.el);
     }
-    if (t.status === 'proposed') parts.push(note('⚖️ Вес и приоритет назначаются при подтверждении поручения.', 'info'));
+    if (t.status === 'proposed') parts.push(note('Вес и приоритет назначаются при подтверждении поручения.', 'info', null, 'weight'));
 
     let loadTimer = 0;
     scr.onDestroy(() => clearTimeout(loadTimer));
@@ -4044,7 +4205,7 @@
         const r = await api(EP.updateTask, { params: { task_id: t.id }, body });
         Object.assign(init, JSON.parse(JSON.stringify(m)));
         haptic.ok();
-        toast(withNotice(r.changed && r.changed.length ? '✅ Сохранено' : 'Изменений нет', r.notice));
+        toast(withNotice(r.changed && r.changed.length ? 'Сохранено' : 'Изменений нет', r.notice), r.changed && r.changed.length ? 'done' : 'info');
         afterMutation();
         syncClosing();
         await goBack();
@@ -4085,7 +4246,7 @@
     const id = uid('files');
     const errId = id + '-err';
     const input = h('input', { id, type: 'file', multiple: true, class: 'sr-only', tabindex: '-1', 'aria-hidden': 'true' });
-    const pick = button('📎 Выбрать файлы', () => input.click(), 'btn-block', { 'aria-describedby': errId });
+    const pick = button('Выбрать файлы', () => input.click(), 'btn-block', { 'aria-describedby': errId }, 'clip');
     const list = h('ul', { class: 'files' });
     const summary = h('p', { class: 'field-hint' });
     const err = h('p', { class: 'field-error', id: errId, 'aria-live': 'polite' });
@@ -4119,7 +4280,7 @@
       list.replaceChildren.apply(list, items.map((it, index) => {
         const bad = problemOf(it.file);
         return h('li', { class: 'file' + (bad ? ' is-bad' : '') },
-          it.url ? h('img', { class: 'thumb', src: it.url, alt: '' }) : h('span', { class: 'thumb', 'aria-hidden': 'true' }, '📄'),
+          it.url ? h('img', { class: 'thumb', src: it.url, alt: '' }) : h('span', { class: 'thumb' }, icon('file')),
           h('span', { class: 'fname' }, it.file.name),
           h('span', { class: 'fsize' }, fileSize(it.file.size)),
           h('button', { type: 'button', class: 'x', 'aria-label': 'Убрать файл «' + own(it.file.name) + '»', onclick: () => {
@@ -4129,13 +4290,13 @@
             validate();
             onChange();
             pick.focus();
-          } }, '✕'));
+          } }, icon('x', 'ic-sm')));
       }));
       const total = items.reduce((sum, it) => sum + it.file.size, 0);
       setText(summary, items.length
         ? plural(items.length, 'файл', 'файла', 'файлов') + ' · ' + own(fileSize(total)) + ' из ' + (cfg().max_total_mb || 50) + ' МБ'
         : 'До ' + maxCount + ' файлов, каждый до ' + (cfg().max_file_mb || 20) + ' МБ, всего до ' + (cfg().max_total_mb || 50) + ' МБ. Файлы сохранятся в чате с ботом.');
-      setText(pick, items.length ? '📎 Добавить ещё' : '📎 Выбрать файлы');
+      setLabel(pick, items.length ? 'plus' : 'clip', items.length ? 'Добавить ещё' : 'Выбрать файлы');
       pick.disabled = items.length >= maxCount;
     }
 
@@ -4181,9 +4342,9 @@
         if (!t.actions || !t.actions.submit) {
           primary.hide();
           return [
-            h('section', { class: 'card' }, h('h2', { class: 'task-title' }, own(t.title)), h('div', { class: 'pills' }, pill(t.status_label, statusTone(t)))),
-            emptyState(NOT_OPEN_TEXTS[t.status] || 'Задача не в работе — сдать результат нельзя.', 'ℹ️'),
-            button('📋 К моим задачам', () => go('#/my', { reset: true }), 'btn-block'),
+            h('section', { class: 'card' }, h('h2', { class: 'task-title' }, own(t.title)), h('div', { class: 'pills' }, statusPill(t))),
+            emptyState(NOT_OPEN_TEXTS[t.status] || 'Задача не в работе — сдать результат нельзя.', 'info'),
+            button('К моим задачам', () => go('#/my', { reset: true }), 'btn-block', null, 'tasks'),
           ];
         }
         form = submitForm(scr, t, box);
@@ -4278,17 +4439,17 @@
         afterMutation();
         syncClosing();
         if (!scr.alive) {
-          toast('✅ Результат по задаче #' + t.id + ' отправлен начальнику на проверку.');
+          toast('Результат по задаче #' + t.id + ' отправлен начальнику на проверку.', 'done');
           return;
         }
         primary.hide();
         const doneHead = h('h2', { tabindex: '-1' }, 'Результат отправлен');
         box.replaceChildren(h('div', { class: 'done-screen', role: 'status' },
-          h('div', { class: 'big', 'aria-hidden': 'true' }, '✅'),
+          h('div', { class: 'big' }, icon('done', 'ic-xl')),
           doneHead,
-          h('p', null, '✅ Результат отправлен начальнику на проверку. Решение придёт в чат с ботом.'),
-          r.files ? h('p', null, '📎 Файлы сохранены в чате с ботом') : null,
-          button('📋 К моим задачам', () => go('#/my', { reset: true }), 'btn-primary btn-block mt12')));
+          h('p', null, 'Результат отправлен начальнику на проверку. Решение придёт в чат с ботом.'),
+          r.files ? line('', 'Файлы сохранены в чате с ботом', 'center', 'clip') : null,
+          button('К моим задачам', () => go('#/my', { reset: true }), 'btn-primary btn-block mt12', null, 'tasks')));
         safely(() => doneHead.focus({ preventScroll: true }));
         window.scrollTo(0, 0);
       } catch (err) {
@@ -4309,18 +4470,18 @@
       }
     }
 
-    primary.set({ text: '📤 Отправить', enabled: false, onClick: send });
+    primary.set({ text: 'Отправить', enabled: false, onClick: send });
 
     const intro = h('section', { class: 'card' },
-      h('h2', { class: 'task-title' }, '📌 Задача #' + t.id + ': ' + own(t.title)),
-      h('div', { class: 'mt12' }, kvBlock('🎯 Ожидаемый результат', t.expected_result,
-        t.plan_text ? line('📊 План:', h('b', { class: 'num' }, own(t.plan_text))) : null)),
-      line('⏳ Срок:', t.deadline_label),
-      t.attempts > 0 ? line('🔁', 'Попытка сдачи №' + (t.attempts + 1)) : null);
+      h('h2', { class: 'task-title' }, 'Задача #' + t.id + ': ' + own(t.title)),
+      h('div', { class: 'mt12' }, kvBlock('Ожидаемый результат', t.expected_result,
+        t.plan_text ? line('План:', h('b', { class: 'num' }, own(t.plan_text)), '', 'target') : null)),
+      line('Срок:', t.deadline_label, '', 'calendar'),
+      t.attempts > 0 ? line('', 'Попытка сдачи №' + (t.attempts + 1), '', 'refresh') : null);
     const reworkNote = t.status === 'rework'
-      ? note('↩️ Задача возвращена на доработку', 'warn', t.rework_comment ? h('p', { class: 'line pre mt8' }, '💬 Комментарий начальника: ' + own(t.rework_comment)) : null)
+      ? note('Задача возвращена на доработку', 'warn', t.rework_comment ? h('p', { class: 'line pre mt8' }, 'Комментарий начальника: ' + own(t.rework_comment)) : null, 'undo')
       : null;
-    const lateNote = t.overdue ? note('⚠️ Срок уже прошёл — результат будет отмечен как сданный с опозданием.', 'bad') : null;
+    const lateNote = t.overdue ? note('Срок уже прошёл — результат будет отмечен как сданный с опозданием.', 'bad', null, 'clock') : null;
 
     return {
       el: [intro, reworkNote, lateNote,
@@ -4335,12 +4496,12 @@
   // ---------------------------------------------------------------------------------------------
 
   const BLOCK_SCREENS = {
-    outside: { icon: '📱', title: 'Откройте из Telegram', action: null },
-    session: { icon: '⌛', title: 'Сессия устарела', action: 'Закрыть' },
-    not_registered: { icon: '👋', title: 'Нужна регистрация', action: 'Перейти в чат' },
-    unregistered: { icon: '👋', title: 'Нужна регистрация', action: 'Перейти в чат' },
-    pending: { icon: '⏳', title: 'Заявка на рассмотрении', action: 'Перейти в чат' },
-    blocked: { icon: '⛔', title: 'Доступ закрыт', action: 'Перейти в чат' },
+    outside: { icon: 'phone', title: 'Откройте из Telegram', action: null },
+    session: { icon: 'clock', title: 'Сессия устарела', action: 'Закрыть' },
+    not_registered: { icon: 'adduser', title: 'Нужна регистрация', action: 'Перейти в чат' },
+    unregistered: { icon: 'adduser', title: 'Нужна регистрация', action: 'Перейти в чат' },
+    pending: { icon: 'wait', title: 'Заявка на рассмотрении', action: 'Перейти в чат' },
+    blocked: { icon: 'ban', title: 'Доступ закрыт', action: 'Перейти в чат' },
   };
 
   function teardown() {
@@ -4369,7 +4530,7 @@
       ? button(conf.action, () => safely(() => tg.close()), 'btn-primary')
       : null;
     appRoot.replaceChildren(h('div', { class: 'fullscreen', role: 'alert' },
-      h('div', { class: 'big', 'aria-hidden': 'true' }, conf.icon),
+      h('div', { class: 'big' }, icon(conf.icon, 'ic-xl')),
       heading,
       h('p', null, stripLeadingEmoji(message || T.generic)),
       action));
@@ -4381,13 +4542,13 @@
     teardown();
     const heading = h('h1', { tabindex: '-1' }, 'Не удалось загрузить');
     appRoot.replaceChildren(h('div', { class: 'fullscreen', role: 'alert' },
-      h('div', { class: 'big', 'aria-hidden': 'true' }, err.status === 0 ? '📡' : '⚠️'),
+      h('div', { class: 'big' }, icon(err.status === 0 ? 'offline' : 'alert', 'ic-xl')),
       heading,
-      h('p', null, err.message || T.generic),
+      h('p', null, stripLeadingEmoji(err.message || T.generic)),
       button(T.retry, () => {
         appRoot.replaceChildren(bootSkeleton());
         start();
-      }, 'btn-primary')));
+      }, 'btn-primary', null, 'refresh')));
     appRoot.removeAttribute('aria-busy');
     safely(() => heading.focus({ preventScroll: true }));
   }
@@ -4422,7 +4583,7 @@
     "{} файлов · {u} из {} МБ": "{} ta fayl · {u} / {} MB",
     "· не принята": "· qabul qilinmagan",
     "· попытка {}": "· {}-urinish",
-    "Активных сотрудников пока нет. Подтвердите заявки в чате с ботом: «👥 Сотрудники».": "Faol xodimlar hali yoʻq. Arizalarni bot bilan chatda tasdiqlang: «👥 Xodimlar».",
+    "Активных сотрудников пока нет. Подтвердите заявки в чате с ботом: «Сотрудники».": "Faol xodimlar hali yoʻq. Arizalarni bot bilan chatda tasdiqlang: «Xodimlar».",
     "Быстрые оценки": "Tezkor baholar",
     "Быстрый выбор срока": "Muddatni tez tanlash",
     "В работе": "Bajarilmoqda",
@@ -4506,10 +4667,10 @@
     "Неделя": "Hafta",
     "Неделя:": "Hafta:",
     "Недостаточно данных для динамики": "Dinamika uchun maʼlumot yetarli emas",
-    "Нет активных сотрудников. Подтвердите заявки в чате: «👥 Сотрудники».": "Faol xodimlar yoʻq. Arizalarni chatda tasdiqlang: «👥 Xodimlar».",
+    "Нет активных сотрудников. Подтвердите заявки в чате: «Сотрудники».": "Faol xodimlar yoʻq. Arizalarni chatda tasdiqlang: «Xodimlar».",
     "Нет задач для сдачи. Здесь появятся задачи в работе и на доработке.": "Topshiriladigan vazifalar yoʻq. Bu yerda bajarilayotgan va qayta ishlashdagi vazifalar chiqadi.",
     "Нет связи с сервером. Проверьте интернет и нажмите «Повторить».": "Server bilan aloqa yoʻq. Internetni tekshirib, «Qayta urinish» tugmasini bosing.",
-    "Нечего проверять 🎉": "Tekshiradigan narsa yoʻq 🎉",
+    "Нечего проверять": "Tekshiradigan narsa yoʻq",
     "Новая": "Yangi",
     "Новая задача": "Yangi vazifa",
     "Новый срок": "Yangi muddat",
@@ -4625,9 +4786,9 @@
     "в работе": "bajarilmoqda",
     "вес {} %": "vazn {} %",
     "вес {} % × {} %": "vazn {} % × {} %",
-    "вес {} % × {} % · ⏰ просрочена": "vazn {} % × {} % · ⏰ muddati oʻtgan",
+    "вес {} % × {} % · просрочена": "vazn {} % × {} % · muddati oʻtgan",
     "вес {} % × —": "vazn {} % × —",
-    "вес {} % × — · ⏰ просрочена": "vazn {} % × — · ⏰ muddati oʻtgan",
+    "вес {} % × — · просрочена": "vazn {} % × — · muddati oʻtgan",
     "выполнено": "bajarildi",
     "ждёт подтверждения начальника": "boshliq tasdigʻini kutmoqda",
     "задач нет": "vazifalar yoʻq",
@@ -4642,134 +4803,127 @@
     "срок {u}": "muddat: {u}",
     "срок уже прошёл — укажите новый": "muddat oʻtib ketgan — yangisini koʻrsating",
     "— подтверждена автоматически": "— avtomatik tasdiqlangan",
-    "‹ Назад": "‹ Orqaga",
-    "↩ Вернуть на доработку": "↩ Qayta ishlashga qaytarish",
-    "↩ Возвращено на доработку": "↩ Qayta ishlashga qaytarildi",
-    "↩ На доработку": "↩ Qayta ishlashga",
-    "↩️ Возвратов на доработку:": "↩️ Qayta ishlashga qaytarishlar:",
-    "↩️ Возвращено на доработку": "↩️ Qayta ishlashga qaytarildi",
-    "↩️ Задача возвращена на доработку": "↩️ Vazifa qayta ishlashga qaytarildi",
-    "↩️ доработок: {}": "↩️ qayta ishlash: {}",
-    "↩️ на доработке": "↩️ qayta ishlashda",
-    "↩️ на доработке · возвратов: {}": "↩️ qayta ishlashda · qaytarishlar: {}",
-    "⏳ Вы ещё не подтвердили получение": "⏳ Siz hali qabul qilganingizni tasdiqlamadingiz",
-    "⏳ Готовлю отчёт…": "⏳ Hisobot tayyorlanmoqda…",
-    "⏳ Исполнитель ещё не подтвердил получение": "⏳ Ijrochi hali qabul qilganini tasdiqlamadi",
-    "⏳ Предварительная оценка ещё рассчитывается": "⏳ Dastlabki baho hali hisoblanmoqda",
-    "⏳ Принимаю…": "⏳ Qabul qilinmoqda…",
-    "⏳ Распознаю…": "⏳ Aniqlanmoqda…",
-    "⏳ Срок:": "⏳ Muddat:",
-    "⏳ Формулирую измеримый результат…": "⏳ Oʻlchanadigan natija taʼriflanmoqda…",
-    "⚖️ Вес и приоритет назначаются при подтверждении поручения.": "⚖️ Vazn va ustuvorlik topshiriqni tasdiqlashda belgilanadi.",
-    "⚖️ Вес:": "⚖️ Vazn:",
-    "⚠️ AI не ответил вовремя. Попробуйте ещё раз или сформулируйте результат сами.": "⚠️ AI oʻz vaqtida javob bermadi. Qayta urinib koʻring yoki natijani oʻzingiz taʼriflang.",
-    "⚠️ Произошла ошибка, попробуйте ещё раз": "⚠️ Xatolik yuz berdi, qayta urinib koʻring",
-    "⚠️ С этой задачей будет {} %.": "⚠️ Bu vazifa bilan {} % boʻladi.",
-    "⚠️ Срок поручения уже прошёл — сначала измените срок.": "⚠️ Topshiriq muddati oʻtib ketgan — avval muddatni oʻzgartiring.",
-    "⚠️ Срок уже прошёл — результат будет отмечен как сданный с опозданием.": "⚠️ Muddat oʻtib ketgan — natija kechikib topshirilgan deb belgilanadi.",
-    "⚠️ с опозданием": "⚠️ kechikib",
-    "⚡ Приоритет:": "⚡ Ustuvorlik:",
-    "⛔ заблокирован": "⛔ bloklangan",
-    "✅ Задача #{} поставлена": "✅ #{} vazifa qoʻyildi",
-    "✅ Задача #{} принята в работу": "✅ #{} vazifa ishga qabul qilindi",
-    "✅ Задача уже выполнена и оценена — сдавать результат не нужно.": "✅ Vazifa allaqachon bajarilgan va baholangan — natija topshirish shart emas.",
-    "✅ Оценка: {} %": "✅ Baho: {} %",
-    "✅ Подтвердить": "✅ Tasdiqlash",
-    "✅ Подтвердить {} %": "✅ {} % ni tasdiqlash",
-    "✅ Подтвердить поручение": "✅ Topshiriqni tasdiqlash",
-    "✅ Подтверждено: {} %": "✅ Tasdiqlandi: {} %",
-    "✅ Поручение #{} подтверждено — задача в работе": "✅ #{} topshiriq tasdiqlandi — vazifa ishga olindi",
-    "✅ Принял в работу": "✅ Ishga qabul qildim",
-    "✅ Принять": "✅ Qabul qilish",
-    "✅ Результат отправлен начальнику на проверку. Решение придёт в чат с ботом.": "✅ Natija tekshirish uchun boshliqqa yuborildi. Qaror bot bilan chatga keladi.",
-    "✅ Результат по задаче #{} отправлен начальнику на проверку.": "✅ #{} vazifa boʻyicha natija tekshirish uchun boshliqqa yuborildi.",
-    "✅ Сохранено": "✅ Saqlandi",
-    "✅ Факт": "✅ Fakt",
-    "✅ Формулировка подставлена": "✅ Taʼrif qoʻyildi",
-    "✅ Что сделано": "✅ Nima qilindi",
-    "✏️ Изменить": "✏️ Oʻzgartirish",
-    "✏️ Изменить оценку": "✏️ Bahoni oʻzgartirish",
-    "✏️ Изменить оценку (до {}.{} в {}:{})": "✏️ Bahoni oʻzgartirish ({}.{} {}:{} gacha)",
-    "✏️ Изменить срок": "✏️ Muddatni oʻzgartirish",
-    "✔️ Принята": "✔️ Qabul qilindi",
-    "✔️ Принята в работу: {}.{} {}:{}": "✔️ Ishga qabul qilingan: {}.{} {}:{}",
-    "✕ Убрать план": "✕ Rejani olib tashlash",
-    "✨ Сделать измеримым": "✨ Oʻlchanadigan qilish",
-    "❌ Отклонить": "❌ Rad etish",
-    "❌ Отклонить поручение #{}": "❌ #{} topshiriqni rad etish",
-    "❌ Поручение #{} отклонено": "❌ #{} topshiriq rad etildi",
-    "❌ Поручение отклонено начальником — сдавать результат не нужно.": "❌ Topshiriq boshliq tomonidan rad etilgan — natija topshirish shart emas.",
-    "🎤 Готово — проверьте поля перед отправкой.": "🎤 Tayyor — yuborishdan oldin maydonlarni tekshiring.",
-    "🎤 Готово — проверьте поля. Вес и приоритет выберите сами.": "🎤 Tayyor — maydonlarni tekshiring. Vazn va ustuvorlikni oʻzingiz tanlang.",
-    "🎤 Запись слишком короткая. Нажмите, скажите фразу и нажмите ещё раз.": "🎤 Yozuv juda qisqa. Tugmani bosing, gapni ayting va yana bosing.",
-    "🎤 Микрофон не найден.": "🎤 Mikrofon topilmadi.",
-    "🎤 Надиктовать задачу целиком": "🎤 Vazifani toʻliq aytib yozdirish",
-    "🎤 Надиктовать поручение целиком": "🎤 Topshiriqni toʻliq aytib yozdirish",
-    "🎤 Не удалось включить микрофон. Попробуйте ещё раз или введите текст с клавиатуры.": "🎤 Mikrofonni yoqib boʻlmadi. Qayta urinib koʻring yoki matnni klaviaturadan kiriting.",
-    "🎤 Нет доступа к микрофону. Разрешите микрофон для Telegram в настройках телефона и попробуйте ещё раз.": "🎤 Mikrofonga ruxsat yoʻq. Telefon sozlamalarida Telegram uchun mikrofonga ruxsat bering va qayta urinib koʻring.",
-    "🎯 Ожидаемый результат": "🎯 Kutilayotgan natija",
-    "🎯 План": "🎯 Reja",
-    "🏁 {} % ✅ подтверждена": "🏁 {} % ✅ tasdiqlangan",
-    "🏁 {} % ✏️ изменена": "🏁 {} % ✏️ oʻzgartirilgan",
-    "🏁 Итоговая оценка:": "🏁 Yakuniy baho:",
-    "🏁 Сейчас:": "🏁 Hozir:",
-    "👤 {u} · попытка {} · вес {} %": "👤 {u} · {}-urinish · vazn {} %",
-    "👤 {u} · ✋ внесено сотрудником (устное поручение)": "👤 {u} · ✋ xodim kiritgan (ogʻzaki topshiriq)",
-    "👤 Исполнитель:": "👤 Ijrochi:",
-    "💡 Предлагаемый вес: {} %": "💡 Taklif qilingan vazn: {} %",
-    "💬 Комментарий начальника": "💬 Boshliq izohi",
-    "💬 Комментарий начальника: {u}": "💬 Boshliq izohi: {u}",
-    "💬 Описание": "💬 Tavsif",
-    "📅 Новый срок": "📅 Yangi muddat",
-    "📅 Срок:": "📅 Muddat:",
-    "📈 Результат": "📈 Natija",
-    "📊 План:": "📊 Reja:",
-    "📋 Задачи сотрудника": "📋 Xodim vazifalari",
-    "📋 К моим задачам": "📋 Vazifalarimga",
-    "📌 Задача #{}: {u}": "📌 Vazifa #{}: {u}",
-    "📌 Оставить текущий ({u})": "📌 Joriy muddatni qoldirish ({u})",
-    "📎 Выбрать файлы": "📎 Fayllarni tanlash",
-    "📎 Добавить ещё": "📎 Yana qoʻshish",
-    "📎 Прислать файлы в чат": "📎 Fayllarni chatga yuborish",
-    "📎 Файлы ({})": "📎 Fayllar ({})",
-    "📎 Файлы ({}) — сохранены в чате с ботом": "📎 Fayllar ({}) — bot bilan chatda saqlangan",
-    "📎 Файлы придут в чат с ботом": "📎 Fayllar bot bilan chatga keladi",
-    "📎 Файлы сохранены в чате с ботом": "📎 Fayllar bot bilan chatda saqlangan",
-    "📐 Подсказка без AI": "📐 AIsiz maslahat",
-    "📜 История · {}": "📜 Tarix · {}",
-    "📜 История оценок": "📜 Baholar tarixi",
-    "📝 Оставить как написал": "📝 Yozganimcha qoldirish",
-    "📝 Результат на проверке у начальника. Решение придёт в чат с ботом.": "📝 Natija boshliq tekshiruvida. Qaror bot bilan chatga keladi.",
-    "📝 Результат уже отправлен и ждёт проверки начальника.": "📝 Natija allaqachon yuborilgan va boshliq tekshiruvini kutmoqda.",
-    "📤 Excel-отчёт в чат": "📤 Excel hisobotini chatga",
-    "📤 Отправить": "📤 Yuborish",
-    "📤 Отправить начальнику": "📤 Boshliqqa yuborish",
-    "📤 Отчёт придёт в чат с ботом через несколько секунд.": "📤 Hisobot bir necha soniyada bot bilan chatga keladi.",
-    "📤 Поручение #{} отправлено начальнику на подтверждение": "📤 #{} topshiriq tasdiqlash uchun boshliqqa yuborildi",
-    "📤 Сдано:": "📤 Topshirildi:",
-    "📤 Сдать результат": "📤 Natijani topshirish",
-    "📥 Заявок на доступ: {} — подтвердите в чате («👥 Сотрудники»)": "📥 Kirish uchun arizalar: {} — chatda tasdiqlang («👥 Xodimlar»)",
-    "📥 Поручение ещё не подтверждено начальником — сдать результат можно после подтверждения.": "📥 Topshiriq hali boshliq tomonidan tasdiqlanmagan — natijani tasdiqlangandan keyin topshirish mumkin.",
-    "🔁 Другой вариант": "🔁 Boshqa variant",
-    "🔄 Повторить": "🔄 Qayta urinish",
-    "🔄 Приложение обновилось": "🔄 Ilova yangilandi",
-    "🔍 Проверить результат": "🔍 Natijani tekshirish",
-    "🔴 Высокий": "🔴 Yuqori",
-    "🚫 Задача #{} отменена": "🚫 #{} vazifa bekor qilindi",
-    "🚫 Задача отменена начальником — сдавать результат не нужно.": "🚫 Vazifa boshliq tomonidan bekor qilingan — natija topshirish shart emas.",
-    "🚫 Отменить": "🚫 Bekor qilish",
-    "🚫 Отменить задачу #{}": "🚫 #{} vazifani bekor qilish",
-    "🟡 Средний": "🟡 Oʻrta",
-    "🟢 Низкий": "🟢 Past",
-    "🤖 {} % → 🏁 {} % ✏️ изменена": "🤖 {} % → 🏁 {} % ✏️ oʻzgartirilgan",
-    "🤖 Измеримая формулировка": "🤖 Oʻlchanadigan taʼrif",
-    "🤖 Предварительной оценки AI нет.": "🤖 AIning dastlabki bahosi yoʻq.",
-    "🤖 Предварительной оценки нет — выставьте оценку сами.": "🤖 Dastlabki baho yoʻq — bahoni oʻzingiz qoʻying.",
-    "🧑‍💼 Ответственный начальник:": "🧑‍💼 Masʼul boshliq:",
-    "🧑‍💼 Постановщик:": "🧑‍💼 Vazifa qoʻyuvchi:",
-    "🧑‍💼 Проверка: {u}": "🧑‍💼 Tekshirdi: {u}",
-    "🧑‍💼 Проверка: {u}, {}.{} {}:{}": "🧑‍💼 Tekshirdi: {u}, {}.{} {}:{}",
-    "🧮 Вошли в расчёт": "🧮 Hisobga kirganlar",
+    "Назад": "Orqaga",
+    "Возвращено на доработку": "Qayta ishlashga qaytarildi",
+    "На доработку": "Qayta ishlashga",
+    "Возвратов на доработку:": "Qayta ishlashga qaytarishlar:",
+    "Задача возвращена на доработку": "Vazifa qayta ishlashga qaytarildi",
+    "доработок: {}": "qayta ishlash: {}",
+    "на доработке": "qayta ishlashda",
+    "на доработке · возвратов: {}": "qayta ishlashda · qaytarishlar: {}",
+    "Вы ещё не подтвердили получение": "Siz hali qabul qilganingizni tasdiqlamadingiz",
+    "Готовлю отчёт…": "Hisobot tayyorlanmoqda…",
+    "Исполнитель ещё не подтвердил получение": "Ijrochi hali qabul qilganini tasdiqlamadi",
+    "Предварительная оценка ещё рассчитывается": "Dastlabki baho hali hisoblanmoqda",
+    "Принимаю…": "Qabul qilinmoqda…",
+    "Распознаю…": "Aniqlanmoqda…",
+    "Срок:": "Muddat:",
+    "Формулирую измеримый результат…": "Oʻlchanadigan natija taʼriflanmoqda…",
+    "Вес и приоритет назначаются при подтверждении поручения.": "Vazn va ustuvorlik topshiriqni tasdiqlashda belgilanadi.",
+    "Вес:": "Vazn:",
+    "AI не ответил вовремя. Попробуйте ещё раз или сформулируйте результат сами.": "AI oʻz vaqtida javob bermadi. Qayta urinib koʻring yoki natijani oʻzingiz taʼriflang.",
+    "Произошла ошибка, попробуйте ещё раз": "Xatolik yuz berdi, qayta urinib koʻring",
+    "С этой задачей будет {} %.": "Bu vazifa bilan {} % boʻladi.",
+    "Срок поручения уже прошёл — сначала измените срок.": "Topshiriq muddati oʻtib ketgan — avval muddatni oʻzgartiring.",
+    "Срок уже прошёл — результат будет отмечен как сданный с опозданием.": "Muddat oʻtib ketgan — natija kechikib topshirilgan deb belgilanadi.",
+    "с опозданием": "kechikib",
+    "с опозданием {} kun": "{} kun kechikib",
+    "Приоритет:": "Ustuvorlik:",
+    "заблокирован": "bloklangan",
+    "Задача #{} поставлена": "#{} vazifa qoʻyildi",
+    "Задача #{} принята в работу": "#{} vazifa ishga qabul qilindi",
+    "Задача уже выполнена и оценена — сдавать результат не нужно.": "Vazifa allaqachon bajarilgan va baholangan — natija topshirish shart emas.",
+    "Оценка: {} %": "Baho: {} %",
+    "Подтвердить {} %": "{} % ni tasdiqlash",
+    "Подтвердить поручение": "Topshiriqni tasdiqlash",
+    "Подтверждено: {} %": "Tasdiqlandi: {} %",
+    "Поручение #{} подтверждено — задача в работе": "#{} topshiriq tasdiqlandi — vazifa ishga olindi",
+    "Принял в работу": "Ishga qabul qildim",
+    "Принять": "Qabul qilish",
+    "Результат отправлен начальнику на проверку. Решение придёт в чат с ботом.": "Natija tekshirish uchun boshliqqa yuborildi. Qaror bot bilan chatga keladi.",
+    "Результат по задаче #{} отправлен начальнику на проверку.": "#{} vazifa boʻyicha natija tekshirish uchun boshliqqa yuborildi.",
+    "Сохранено": "Saqlandi",
+    "Факт": "Fakt",
+    "Формулировка подставлена": "Taʼrif qoʻyildi",
+    "Что сделано": "Nima qilindi",
+    "Изменить": "Oʻzgartirish",
+    "Изменить оценку": "Bahoni oʻzgartirish",
+    "Изменить оценку (до {}.{} в {}:{})": "Bahoni oʻzgartirish ({}.{} {}:{} gacha)",
+    "Изменить срок": "Muddatni oʻzgartirish",
+    "Принята": "Qabul qilindi",
+    "Принята в работу: {}.{} {}:{}": "Ishga qabul qilingan: {}.{} {}:{}",
+    "Убрать план": "Rejani olib tashlash",
+    "Сделать измеримым": "Oʻlchanadigan qilish",
+    "Отклонить поручение #{}": "#{} topshiriqni rad etish",
+    "Поручение #{} отклонено": "#{} topshiriq rad etildi",
+    "Поручение отклонено начальником — сдавать результат не нужно.": "Topshiriq boshliq tomonidan rad etilgan — natija topshirish shart emas.",
+    "Готово — проверьте поля перед отправкой.": "Tayyor — yuborishdan oldin maydonlarni tekshiring.",
+    "Готово — проверьте поля. Вес и приоритет выберите сами.": "Tayyor — maydonlarni tekshiring. Vazn va ustuvorlikni oʻzingiz tanlang.",
+    "Запись слишком короткая. Нажмите, скажите фразу и нажмите ещё раз.": "Yozuv juda qisqa. Tugmani bosing, gapni ayting va yana bosing.",
+    "Микрофон не найден.": "Mikrofon topilmadi.",
+    "Надиктовать задачу целиком": "Vazifani toʻliq aytib yozdirish",
+    "Надиктовать поручение целиком": "Topshiriqni toʻliq aytib yozdirish",
+    "Не удалось включить микрофон. Попробуйте ещё раз или введите текст с клавиатуры.": "Mikrofonni yoqib boʻlmadi. Qayta urinib koʻring yoki matnni klaviaturadan kiriting.",
+    "Нет доступа к микрофону. Разрешите микрофон для Telegram в настройках телефона и попробуйте ещё раз.": "Mikrofonga ruxsat yoʻq. Telefon sozlamalarida Telegram uchun mikrofonga ruxsat bering va qayta urinib koʻring.",
+    "План": "Reja",
+    "{} % подтверждена": "{} % tasdiqlangan",
+    "{} % изменена": "{} % oʻzgartirilgan",
+    "Итоговая оценка:": "Yakuniy baho:",
+    "Сейчас:": "Hozir:",
+    "{u} · попытка {} · вес {} %": "{u} · {}-urinish · vazn {} %",
+    "{u} · внесено сотрудником (устное поручение)": "{u} · xodim kiritgan (ogʻzaki topshiriq)",
+    "Исполнитель:": "Ijrochi:",
+    "Предлагаемый вес: {} %": "Taklif qilingan vazn: {} %",
+    "Комментарий начальника": "Boshliq izohi",
+    "Комментарий начальника: {u}": "Boshliq izohi: {u}",
+    "Описание": "Tavsif",
+    "Результат": "Natija",
+    "План:": "Reja:",
+    "Задачи сотрудника": "Xodim vazifalari",
+    "К моим задачам": "Vazifalarimga",
+    "Задача #{}: {u}": "Vazifa #{}: {u}",
+    "Оставить текущий ({u})": "Joriy muddatni qoldirish ({u})",
+    "Выбрать файлы": "Fayllarni tanlash",
+    "Добавить ещё": "Yana qoʻshish",
+    "Прислать файлы в чат": "Fayllarni chatga yuborish",
+    "Файлы ({})": "Fayllar ({})",
+    "Файлы ({}) — сохранены в чате с ботом": "Fayllar ({}) — bot bilan chatda saqlangan",
+    "Файлы придут в чат с ботом": "Fayllar bot bilan chatga keladi",
+    "Файлы сохранены в чате с ботом": "Fayllar bot bilan chatda saqlangan",
+    "Подсказка без AI": "AIsiz maslahat",
+    "История · {}": "Tarix · {}",
+    "История оценок": "Baholar tarixi",
+    "Оставить как написал": "Yozganimcha qoldirish",
+    "Результат на проверке у начальника. Решение придёт в чат с ботом.": "Natija boshliq tekshiruvida. Qaror bot bilan chatga keladi.",
+    "Результат уже отправлен и ждёт проверки начальника.": "Natija allaqachon yuborilgan va boshliq tekshiruvini kutmoqda.",
+    "Excel-отчёт в чат": "Excel hisobotini chatga",
+    "Отправить": "Yuborish",
+    "Отправить начальнику": "Boshliqqa yuborish",
+    "Отчёт придёт в чат с ботом через несколько секунд.": "Hisobot bir necha soniyada bot bilan chatga keladi.",
+    "Поручение #{} отправлено начальнику на подтверждение": "#{} topshiriq tasdiqlash uchun boshliqqa yuborildi",
+    "Сдано:": "Topshirildi:",
+    "Заявок на доступ: {} — подтвердите в чате («Сотрудники»)": "Kirish uchun arizalar: {} — chatda tasdiqlang («Xodimlar»)",
+    "Поручение ещё не подтверждено начальником — сдать результат можно после подтверждения.": "Topshiriq hali boshliq tomonidan tasdiqlanmagan — natijani tasdiqlangandan keyin topshirish mumkin.",
+    "Другой вариант": "Boshqa variant",
+    "Повторить": "Qayta urinish",
+    "Приложение обновилось": "Ilova yangilandi",
+    "Проверить результат": "Natijani tekshirish",
+    "Высокий": "Yuqori",
+    "Задача #{} отменена": "#{} vazifa bekor qilindi",
+    "Задача отменена начальником — сдавать результат не нужно.": "Vazifa boshliq tomonidan bekor qilingan — natija topshirish shart emas.",
+    "Отменить": "Bekor qilish",
+    "Отменить задачу #{}": "#{} vazifani bekor qilish",
+    "Средний": "Oʻrta",
+    "Низкий": "Past",
+    "{} % → {} % изменена": "{} % → {} % oʻzgartirilgan",
+    "Измеримая формулировка": "Oʻlchanadigan taʼrif",
+    "Предварительной оценки AI нет.": "AIning dastlabki bahosi yoʻq.",
+    "Предварительной оценки нет — выставьте оценку сами.": "Dastlabki baho yoʻq — bahoni oʻzingiz qoʻying.",
+    "Ответственный начальник:": "Masʼul boshliq:",
+    "Постановщик:": "Vazifa qoʻyuvchi:",
+    "Проверка: {u}": "Tekshirdi: {u}",
+    "Проверка: {u}, {}.{} {}:{}": "Tekshirdi: {u}, {}.{} {}:{}",
+    "Вошли в расчёт": "Hisobga kirganlar",
     /*UZ-END*/
   };
 
