@@ -1633,13 +1633,20 @@
       const again = box.dataset.state === 'ok';
       const opened = again ? openFolds(box) : null;
       const y = window.scrollY;
+      // spec.anchor: блок выше места чтения может вырасти (пришла оценка) — на месте остаётся не число
+      // прокрутки, а первый видимый блок: текст под глазами и кнопка под пальцем не уезжают.
+      const kids = again && spec.anchor ? Array.from(box.children) : [];
+      const at = kids.findIndex((el) => el.getBoundingClientRect().bottom > 0);
+      const was = at > 0 ? kids[at].getBoundingClientRect().top : 0;
       box.dataset.state = 'ok';
       box.replaceChildren.apply(box, nodes(spec.render(data)));
       if (!again) return;
       box.querySelectorAll('details[data-key]').forEach((d) => {
         if (opened.has(d.dataset.key)) d.open = true;
       });
-      if (window.scrollY !== y) window.scrollTo(0, y);
+      const to = at > 0 && box.children.length === kids.length
+        ? Math.max(0, Math.round(window.scrollY + box.children[at].getBoundingClientRect().top - was)) : y;
+      if (window.scrollY !== to) window.scrollTo(0, to);
     }
 
     async function run(fresh) {
@@ -3284,7 +3291,17 @@
     return h('div', { class: 'ai-label' }, icon(ai.source === 'ai' ? 'ai' : 'calc', 'ic-sm'), stripLeadingEmoji(ai.label));
   }
 
-  function filesBlock(sb, isM) {
+  /** Файлы сдачи на экране проверки — свёрнутый блок «Файлы · N»: список и «Прислать файлы в чат». */
+  function filesFold(sb) {
+    const files = sb.attachments || [];
+    if (!files.length) return null;
+    return h('details', { class: 'fold', 'data-key': 'files' },
+      h('summary', null, h('span', null, icon('clip'), 'Файлы · ' + files.length)),
+      h('div', { class: 'fold-body' }, filesBlock(sb, true, true)));
+  }
+
+  /** Файлы сдачи: список и (начальнику) «Прислать файлы в чат»; bare — без строки-заголовка «Файлы (N)». */
+  function filesBlock(sb, isM, bare) {
     const files = sb.attachments || [];
     if (!files.length) return null;
     const list = h('ul', { class: 'files' }, files.map((f) => h('li', { class: 'file' },
@@ -3307,7 +3324,7 @@
       }, 'btn-block', null, 'send');
     }
     return h('div', { class: 'files-block' },
-      line('', 'Файлы (' + files.length + ')' + (isM ? '' : ' — сохранены в чате с ботом'), 'muted', 'clip'),
+      bare ? null : line('', 'Файлы (' + files.length + ')' + (isM ? '' : ' — сохранены в чате с ботом'), 'muted', 'clip'),
       list, send);
   }
 
@@ -3521,6 +3538,7 @@
       request: () => ({ ep: EP.task, opts: { params: { task_id: taskId } } }),
       skeleton: skelCard,
       render: renderReview,
+      anchor: true,
     });
 
     function renderReview(card) {
@@ -3538,25 +3556,31 @@
       }
       const canConfirm = Boolean(sb.ai && isNum(sb.ai.score));
       primary.set(canConfirm ? { text: 'Подтвердить ' + sb.ai.score_text, onClick: () => confirmScore(t, sb) } : null);
+      // Сверху — то, ради чего экран открыли: что сдано, предварительная оценка и решение.
+      // Основание (план и факт) — ниже; файлы и журнал свёрнуты.
       return [
         h('section', { class: 'card' },
           h('h2', { class: 'task-title' }, '#' + t.id + ' ' + own(t.title)),
-          line('', own(t.assignee ? t.assignee.short_name : '—') + ' · попытка ' + sb.attempt + ' · вес ' + t.weight + ' %', 'muted mt8', 'user')),
+          h('div', { class: 'pills' }, pill(sb.late_text, sb.is_late ? 'bad' : 'good', sb.is_late ? 'clock' : 'check')),
+          line('', own(t.assignee ? t.assignee.short_name : '—') + ' · попытка ' + sb.attempt + ' · вес ' + t.weight + ' %', 'muted', 'user')),
+        aiReviewCard(sb),
+        h('div', { class: 'actions' },
+          button('Изменить оценку', () => scoreSheet(scr, sb), 'btn-block', null, 'edit'),
+          button('На доработку', () => reworkSheet(scr, t, sb), 'btn-block', null, 'undo')),
+        t.auto_note ? autoNote(t.auto_note) : null,
+        h('p', { class: 'muted small center decide-note' }, 'Окончательное решение — за начальником.'),
         h('section', { class: 'card' },
           kvBlock('План', t.expected_result, t.plan_text ? line('', h('b', { class: 'num' }, own(t.plan_text)), '', 'target') : null),
           kvBlock('Факт', sb.fact_text),
           sb.result_text ? kvBlock('Результат', sb.result_text) : null,
-          factLine(sb)),
+          // «План → Факт» числом: у оценки AI — в её карточке; у расчёта по правилам (его пояснение само
+          // начинается с этих чисел) и без оценки — здесь.
+          sb.ai && sb.ai.source === 'ai' ? null : factLine(sb)),
         h('section', { class: 'card' },
           line('Срок:', fmtFull(sb.deadline_at_submit), '', 'calendar'),
-          line('Сдано:', [sb.created_local + ' — ', h('span', { class: sb.is_late ? 'tone-bad' : 'tone-good' }, sb.late_text)], '', 'send'),
-          filesBlock(sb, true)),
-        aiReviewCard(sb),
-        h('p', { class: 'muted small center' }, 'Окончательное решение — за начальником.'),
-        t.auto_note ? autoNote(t.auto_note, 'center') : null,
-        h('div', { class: 'btn-row' },
-          button('Изменить оценку', () => scoreSheet(scr, sb), '', null, 'edit'),
-          button('На доработку', () => reworkSheet(scr, t, sb), '', null, 'undo')),
+          line('Сдано:', [sb.created_local + ' — ', h('span', { class: sb.is_late ? 'tone-bad' : 'tone-good' }, sb.late_text)], '', 'send')),
+        filesFold(sb),
+        eventsBlock(card.events),
         h('button', { type: 'button', class: 'link-btn center-block', onclick: () => go('#/task/' + t.id) }, 'Открыть карточку задачи'),
       ];
     }
@@ -3588,11 +3612,14 @@
     }
   }
 
+  /** Предварительная оценка на экране проверки. */
   function aiReviewCard(sb) {
     if (sb.ai) {
-      return h('section', { class: 'card ai-card', 'aria-label': 'Предварительная оценка' },
+      // Цвет карточки — по оценке (как у полос KPI): зелёный от 100 %, жёлтый от 80 %, ниже — красный.
+      return h('section', { class: 'card ai-card ' + toneOf(sb.ai.score), 'aria-label': 'Предварительная оценка' },
         aiLabel(sb.ai),
         h('div', { class: 'kpi-num' }, String(Math.floor(sb.ai.score + 0.5)), h('span', { class: 'unit' }, '%')),
+        sb.ai.source === 'ai' ? factLine(sb) : null,
         sb.ai.rationale ? h('p', { class: 'ai-why' }, own(sb.ai.rationale)) : null,
         sb.ai.model ? h('p', { class: 'small muted mt8' }, 'Модель: ' + own(sb.ai.model)) : null);
     }
@@ -3616,7 +3643,7 @@
       options.sort((a, b) => a - b);
     }
     let value = null;
-    const chipsBox = h('div', { class: 'chips wrap', role: 'group', 'aria-label': 'Быстрые оценки' });
+    const chipsBox = h('div', { class: 'chips wrap grid', role: 'group', 'aria-label': 'Быстрые оценки' });
     const custom = field({
       label: 'Своя оценка, %', inputmode: 'decimal', placeholder: '0–' + maxScore,
       check: (v) => {
@@ -3636,13 +3663,18 @@
     const comment = field({ label: 'Комментарий для сотрудника (необязательно)', multiline: true, rows: 3, max: 2000, placeholder: 'Например: не хватает расчёта по двум договорам' });
 
     function paintChips() {
-      chipsBox.replaceChildren.apply(chipsBox, options.map((o) => chip([o === marked ? icon('ai', 'ic-sm tone-info') : null, o + ' %'], value === o, () => {
-        value = o;
-        custom.set('');
-        custom.setError('');
-        paintChips();
-        sync();
-      }, o === marked ? o + ' % — предлагает AI' : null)));
+      chipsBox.replaceChildren.apply(chipsBox, options.map((o) => {
+        const byAi = sb.ai && sb.ai.source === 'ai';
+        const el = chip([o === marked ? icon(byAi ? 'ai' : 'calc', 'ic-sm tone-info') : null, o + ' %'], value === o, () => {
+          value = o;
+          custom.set('');
+          custom.setError('');
+          paintChips();
+          sync();
+        }, o === marked && byAi ? o + ' % — предлагает AI' : null);
+        if (o === marked) el.classList.add('is-ai');  // предложенная оценка обведена — её видно и без значка
+        return el;
+      }));
     }
 
     function valid() {
@@ -4982,6 +5014,7 @@
     "Добавить ещё": "Yana qoʻshish",
     "Прислать файлы в чат": "Fayllarni chatga yuborish",
     "Файлы ({})": "Fayllar ({})",
+    "Файлы · {}": "Fayllar · {}",
     "Файлы ({}) — сохранены в чате с ботом": "Fayllar ({}) — bot bilan chatda saqlangan",
     "Файлы придут в чат с ботом": "Fayllar bot bilan chatga keladi",
     "Файлы сохранены в чате с ботом": "Fayllar bot bilan chatda saqlangan",

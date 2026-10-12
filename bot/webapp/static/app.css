@@ -285,6 +285,10 @@ h2.sec, .sec { margin: 24px 4px 8px; display: flex; align-items: baseline; justi
 .chips::-webkit-scrollbar { display: none; }
 .chips:not(.wrap) { scroll-padding: 0 var(--pad); -webkit-mask-image: linear-gradient(90deg, #000 calc(100% - var(--pad)), transparent); mask-image: linear-gradient(90deg, #000 calc(100% - var(--pad)), transparent); }
 .chips.wrap { flex-wrap: wrap; overflow: visible; margin: 0 0 10px; padding: 4px 0; }
+/* Быстрые оценки в листе — ровной сеткой; предложенная обведена. */
+.chips.grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.chips.grid .chip { justify-content: center; padding: 0 4px; }
+.sheet .chip.is-ai { border-color: var(--accent); }
 .chip {
   position: relative; flex: 0 0 auto;
   display: inline-flex; align-items: center; gap: 6px;
@@ -434,6 +438,16 @@ h2.sec, .sec { margin: 24px 4px 8px; display: flex; align-items: baseline; justi
 .files-block .btn { margin-top: 4px; }
 .ai-card .kpi-num { margin: 4px 0 2px; }
 .ai-card .ai-why { margin-top: 10px; }
+/* Карточка предварительной оценки на экране проверки: цвет — по оценке (как у полос KPI). */
+.ai-card.good { background: linear-gradient(var(--good-bg), var(--good-bg)), var(--section); }
+.ai-card.good .kpi-num { color: var(--good); }
+.ai-card.warn { background: linear-gradient(var(--warn-bg), var(--warn-bg)), var(--section); }
+.ai-card.warn .kpi-num { color: var(--warn); }
+.ai-card.bad { background: linear-gradient(var(--bad-bg), var(--bad-bg)), var(--section); }
+.ai-card.bad .kpi-num { color: var(--bad); }
+.ai-card .kpi-num .unit { color: inherit; }
+.ai-card .line { margin-top: 8px; }
+.decide-note { margin: 8px 0 var(--pad); }
 
 .files { list-style: none; margin: 8px 0; padding: 0; display: grid; gap: 6px; }
 .file {
@@ -729,6 +743,8 @@ body.sheet-open { overflow: hidden; }
 @media (max-width: 374px) {
   :root { --fs-kpi: 44px; --fs-screen: 24px; }
   .chip { padding: 0 12px; }
+  .chips.grid { column-gap: 6px; }
+  .chips.grid .chip { gap: 4px; padding: 0 2px; }
   .seg [role="tab"], .seg [role="radio"] { padding: 4px 2px; }
 }
 
