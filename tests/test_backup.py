@@ -273,12 +273,42 @@ async def test_export_matches_database_row_by_row(file_db: FileDb, tmp_path: Pat
     try:
         assert exported.execute("PRAGMA integrity_check").fetchone() == ("ok",)
         assert exported.execute("PRAGMA journal_mode").fetchone() != ("wal",)  # один файл, без -wal
-        for table in Base.metadata.sorted_tables:
+        for table in backup.backup_tables():
             rows = table_rows(source, table.name)
             assert rows, f"в тестовых данных нет строк {table.name}"
             assert table_rows(exported, table.name) == rows, table.name
     finally:
         source.close()
+        exported.close()
+
+
+async def test_site_logins_and_sessions_stay_out_of_the_backup(file_db: FileDb, tmp_path: Path) -> None:
+    """Попытки входа на сайт и сессии браузеров в копию не попадают: файл копии уходит в чаты начальников,
+    а после восстановления базы люди просто входят на сайт заново. Сами таблицы в файле есть (пустые) —
+    бот открывает такой файл как обычную базу."""
+    from datetime import timedelta
+
+    from bot.db.models import WebLogin, WebSession
+
+    await seed_everything(file_db)
+    async with file_db.sessionmaker() as session:
+        user = await session.scalar(select(User).where(User.tg_id == MGR))
+        assert user is not None
+        soon = BACKUP_AT + timedelta(minutes=5)
+        session.add(WebLogin(token_hash="a" * 64, browser_hash="b" * 64, code="47", options="12,47,83", expires_at=soon))
+        session.add(WebSession(token_hash="c" * 64, user_id=user.id, expires_at=soon))
+        await session.commit()
+    assert {table.name for table in Base.metadata.sorted_tables} - {table.name for table in backup.backup_tables()} == {
+        "web_logins",
+        "web_sessions",
+    }
+
+    exported = restore(await backup.export_database(file_db.engine), tmp_path / "exported.db")
+    try:
+        for name in ("web_logins", "web_sessions"):
+            assert table_rows(exported, name) == []
+        assert table_rows(exported, "users")
+    finally:
         exported.close()
 
 
@@ -488,7 +518,7 @@ async def test_send_backup_from_real_postgres(pg_engine: AsyncEngine, bot: Bot, 
     path.write_bytes(files[0].content)
     exported = make_engine(f"sqlite+aiosqlite:///{path.as_posix()}")
     try:
-        for table in Base.metadata.sorted_tables:
+        for table in backup.backup_tables():
             query = select(table).order_by(*table.primary_key.columns)
             async with pg_engine.connect() as conn:
                 expected = (await conn.execute(query)).all()

@@ -22,12 +22,12 @@ from __future__ import annotations
 
 import logging
 
-from sqlalchemy import ColumnElement, func, inspect, select, update
+from sqlalchemy import ColumnElement, delete, func, inspect, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.attributes import set_committed_value
 
 from bot.config import get_settings
-from bot.db.models import Role, User, UserStatus
+from bot.db.models import Role, User, UserStatus, WebSession
 from bot.services.dbsafe import clean_text, clip, column_length, is_db_id
 from bot.services.errors import DomainError
 
@@ -374,5 +374,9 @@ async def _set_status(
         )
         return False
     set_committed_value(target, "status", status)
+    if status == UserStatus.BLOCKED:
+        # Сессии сайта заблокированного удаляются сразу (docs/MINIAPP_SPEC.md §15.3): после разблокировки
+        # человек входит заново, а cookie, которую могли украсть, не оживает.
+        await session.execute(delete(WebSession).where(WebSession.user_id == target.id))
     logger.info("Статус пользователя %s: %s (начальник %s)", target.id, status.value, actor.id)
     return True

@@ -5,6 +5,9 @@
 Telegram строке initData (``bot.webapp.auth``), права — по записи ``User`` в базе. Каждое действие
 вызывает те же сервисы и те же уведомления, что и чат.
 
+То же приложение открывается и как сайт в обычном браузере (§15, ``bot.webapp.site``): страница ``/``,
+вход ``/auth/*`` — через подтверждение в боте, дальше тот же ``/api/*`` по cookie сессии.
+
 Публичный вход:
 
 * ``setup_webapp(app, bot=…, sessionmaker=…, settings=…)`` — смонтировать всё в приложение aiohttp
@@ -147,15 +150,23 @@ class RateLimiter:
     тратит общие с оценкой сдач бесплатные квоты, поручение рассылается всем начальникам.
     """
 
+    SWEEP_EVERY = 1024  # раз во столько попыток записи, у которых всё вышло из окна, убираются из памяти
+
     def __init__(self, clock: Callable[[], float] = time.monotonic) -> None:
         self._clock = clock
         self._hits: dict[tuple[str, int], deque[float]] = {}
+        self._windows: dict[str, float] = {}  # самое длинное окно каждого вида действия
+        self._calls = 0
 
     def hit(self, kind: str, key: int, limits: Sequence[tuple[int, float]]) -> float | None:
         """Засчитать попытку, если ни один лимит ``(сколько, за сколько секунд)`` не превышен: -> None.
         Превышен — попытка не засчитывается: -> через сколько секунд можно снова (> 0)."""
         now = self._clock()
         longest = max((window for _, window in limits), default=0.0)
+        self._windows[kind] = max(self._windows.get(kind, 0.0), longest)
+        self._calls += 1
+        if self._calls % self.SWEEP_EVERY == 0:
+            self._sweep(now)
         hits = self._hits.get((kind, key))
         if hits is not None:
             while hits and hits[0] <= now - longest:
@@ -173,6 +184,17 @@ class RateLimiter:
         hits.append(now)
         return None
 
+    def _sweep(self, now: float) -> None:
+        """Забыть ключи, у которых все попытки вышли из окна: счётчик входа на сайт ведётся по адресам
+        посетителей, а их может быть сколько угодно — память сервера они занимать не должны."""
+        stale = [
+            item
+            for item, hits in self._hits.items()
+            if not hits or hits[-1] <= now - self._windows.get(item[0], 0.0)
+        ]
+        for item in stale:
+            del self._hits[item]
+
     def undo(self, kind: str, key: int) -> None:
         """Не засчитывать последнюю попытку (действие не выполнено — например, ошибка в данных)."""
         hits = self._hits.get((kind, key))
@@ -188,6 +210,9 @@ STATIC_FILES: dict[str, str] = {
     "app.js": "text/javascript; charset=utf-8",
     "app.css": "text/css; charset=utf-8",
 }
+# Файлы сайта (§15): страница и её стили поверх app.css. Их может не быть — тогда сайта нет, Mini App работает.
+SITE_INDEX_FILE = "site.html"
+SITE_FILES: dict[str, str] = {"site.css": "text/css; charset=utf-8"}
 VERSION_PLACEHOLDER = "__ASSET_VERSION__"
 CONFIG_PLACEHOLDER = "__KPI_CONFIG__"
 NOT_BUILT_TEXT = "Приложение ещё не собрано"
@@ -204,6 +229,7 @@ class _Assets:
     index: str
     files: dict[str, bytes]
     version: str
+    site: str | None = None  # страница сайта; None — файлов сайта нет
 
 
 class StaticBundle:
@@ -232,8 +258,24 @@ class StaticBundle:
             log.warning("Mini App: не удалось прочитать файлы приложения (%s)", type(exc).__name__)
             return None
         self._warned = False
-        digest = hashlib.sha256(files["app.js"] + files["app.css"]).hexdigest()[:12]
-        return _Assets(index=index, files=files, version=digest)
+        site = self._load_site(files)
+        # Стили сайта входят в версию: правка site.css тоже сбрасывает кэш браузера.
+        digest = hashlib.sha256(b"".join(files[name] for name in (*STATIC_FILES, *SITE_FILES) if name in files))
+        return _Assets(index=index, files=files, version=digest.hexdigest()[:12], site=site)
+
+    def _load_site(self, files: dict[str, bytes]) -> str | None:
+        """Страница сайта и её стили — если есть все файлы (их байты добавляются в ``files``)."""
+        names = [SITE_INDEX_FILE, *SITE_FILES]
+        if not all((self.static_dir / name).is_file() for name in names):
+            return None
+        try:
+            page = (self.static_dir / SITE_INDEX_FILE).read_text(encoding="utf-8")
+            extra = {name: (self.static_dir / name).read_bytes() for name in SITE_FILES}
+        except (OSError, UnicodeDecodeError) as exc:
+            log.warning("Сайт: не удалось прочитать файлы страницы (%s)", type(exc).__name__)
+            return None
+        files.update(extra)
+        return page
 
     def current(self) -> _Assets | None:
         if self.reload:
@@ -242,7 +284,8 @@ class StaticBundle:
 
     @property
     def version(self) -> str:
-        """ASSET_VERSION: первые 12 hex-символов sha256(app.js + app.css); "" — приложение не собрано."""
+        """ASSET_VERSION: первые 12 hex-символов sha256(app.js + app.css [+ site.css]); "" — приложение не
+        собрано."""
         assets = self._assets if not self.reload else self.current()
         return assets.version if assets is not None else ""
 
@@ -277,9 +320,9 @@ async def _index(request: web.Request) -> web.Response:
 
 async def _static(request: web.Request) -> web.Response:
     name = request.match_info.get("name", "")
-    content_type = STATIC_FILES.get(name)
+    content_type = STATIC_FILES.get(name) or SITE_FILES.get(name)
     assets = request.app[CTX].static.current() if content_type is not None else None
-    if content_type is None or assets is None:
+    if content_type is None or assets is None or name not in assets.files:
         raise web.HTTPNotFound()
     cache = _IMMUTABLE if request.query.get("v") == assets.version else "no-cache"
     return web.Response(
@@ -300,6 +343,10 @@ class WebappContext:
     gate: UserGate
     static: StaticBundle
     limits: RateLimiter = field(default_factory=RateLimiter)
+    # Сайт (§15): адрес чата с ботом (узнаётся у Telegram один раз) и подмена ссылки входа для локальной
+    # проверки (dev-сервер ведёт не в Telegram, а на свою страницу).
+    bot_url: str | None = None
+    login_link: Callable[[str], str] | None = None
 
 
 CTX: web.AppKey[WebappContext] = web.AppKey("kpi_webapp_ctx", WebappContext)
@@ -315,14 +362,15 @@ def setup_webapp(
     static_dir: Path = STATIC_DIR,
     pages: bool = True,
 ) -> None:
-    """Смонтировать Mini App: GET /app, /app/, /app/static/{name} и sub-app /api.
+    """Смонтировать Mini App: GET /app, /app/, /app/static/{name}, sub-app /api и вход на сайт — sub-app
+    /auth (§15; страницу сайта ``/`` отдаёт ``bot.web`` через ``site.index``).
 
     Сеть и БД при сборке не нужны. Повторный вызов на том же app — RuntimeError. ``pages=False`` — только
-    /api (если страницу раздаёт кто-то другой).
+    /api и /auth (если страницу раздаёт кто-то другой).
     """
     if CTX in app:
         raise RuntimeError("Mini App уже смонтирован в это приложение")
-    from bot.webapp import api  # здесь: пакет импортируется без API (bot.web проверяет find_spec)
+    from bot.webapp import api, site  # здесь: пакет импортируется без API (bot.web проверяет find_spec)
 
     ctx = WebappContext(
         bot=bot,
@@ -339,6 +387,7 @@ def setup_webapp(
         app.router.add_get("/app/", _index)
         app.router.add_get("/app/static/{name}", _static)
     app.add_subapp("/api", api.build_api_app(ctx))
+    app.add_subapp("/auth", site.build_auth_app(ctx))
 
 
 def register_webapp(

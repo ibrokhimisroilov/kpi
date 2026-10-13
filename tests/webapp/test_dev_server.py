@@ -164,8 +164,12 @@ async def test_build_dev_app_needs_no_network_and_mounts_routes(engine: AsyncEng
         assert (await client.get("/api/me")).status == 401
         response = await client.get("/dev/", allow_redirects=False)
         assert response.status == 200 and response.content_type == "text/html"
-        response = await client.get("/", allow_redirects=False)
+        response = await client.get("/dev", allow_redirects=False)
         assert response.status == 302 and response.headers["Location"] == "/dev/"
+        # «/» — страница сайта, как в бою (вход — через имитацию Telegram на /dev/telegram).
+        response = await client.get("/", allow_redirects=False)
+        assert response.status == 200 and '"web":true' in (await response.text()).replace(" ", "")
+        assert session.requests == []  # и страница сайта — без запросов к «Telegram»
     assert echo == []
 
 

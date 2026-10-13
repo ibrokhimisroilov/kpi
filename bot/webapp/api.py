@@ -71,13 +71,14 @@ from bot.services import export as export_service
 from bot.services import kpi, periods, proposal_flow
 from bot.services import tasks as tasks_svc
 from bot.services import users as users_svc
+from bot.services import weblogin
 from bot.services.dbsafe import clip_file_name, is_db_id, non_negative, sql_limit
 from bot.services.errors import DomainError
 from bot.services.kpi import KpiResult, TaskSnapshot
 from bot.utils import dateparse
 from bot.utils.dates import to_local, to_utc, utcnow
 from bot.utils.text import esc, own, parse_number
-from bot.webapp import CTX, ApiError, WebappContext, auth, pending_tasks, register_webapp
+from bot.webapp import CTX, ApiError, WebappContext, auth, pending_tasks, register_webapp, site
 from bot.webapp import serializers as ser
 from bot.webapp.serializers import HistoryRowData, TaskRowData
 
@@ -958,6 +959,21 @@ def _request_lang(viewer: User | None, init: auth.InitData) -> str:
     return lang
 
 
+def _web_identity(viewer: User) -> auth.InitData:
+    """Данные входа для запроса сайта — в том же виде, что у Mini App: обработчикам всё равно, как человек
+    вошёл. Язык — только выбранный человеком (языка Telegram у запроса сайта нет)."""
+    return auth.InitData(
+        tg_id=viewer.tg_id,
+        first_name="",
+        last_name=None,
+        username=None,
+        language_code=None,
+        auth_date=int(time.time()),
+        query_id=None,
+        start_param=None,
+    )
+
+
 # --- Middleware (§4.4) --------------------------------------------------------------------------------------
 
 
@@ -1008,10 +1024,15 @@ def _make_middlewares(ctx: WebappContext) -> list[Any]:
 
     @web.middleware
     async def auth_session_middleware(request: web.Request, handler: Handler) -> web.StreamResponse:
-        init = auth.validate_init_data(
-            request.headers.get(auth.INIT_DATA_HEADER, ""), ctx.settings.bot_token.strip()
-        )
-        request[INIT] = init
+        raw_init = request.headers.get(auth.INIT_DATA_HEADER, "")
+        # Сайт (§15): заголовка Telegram нет — человека называет cookie сессии, а запрос обязан прийти со
+        # своей страницы (403 csrf — ещё до базы). С заголовком Telegram cookie не читается вовсе.
+        web_token = site.session_token(request, ctx) if not raw_init.strip() and ctx.settings.site_active else ""
+        init: auth.InitData | None = None
+        if web_token:
+            site.check_page_request(request, ctx, web_token)
+        else:
+            init = auth.validate_init_data(raw_init, ctx.settings.bot_token.strip())
         if request.can_read_body and request.match_info.handler not in _STREAMING_HANDLERS:
             # Тело — целиком и с ограничением по времени ДО соединения с базой: клиент, приславший
             # заголовки без тела, не держит соединение пула (§6.3). aiohttp запоминает прочитанные байты —
@@ -1023,7 +1044,17 @@ def _make_middlewares(ctx: WebappContext) -> list[Any]:
                 raise ApiError(408, "request_timeout", REQUEST_TIMEOUT) from None
         async with ctx.sessionmaker() as session:
             request[SESSION] = session
-            viewer = request[VIEWER] = await load_user(session, init.tg_id)
+            if init is None:
+                # Сессия и пользователь — одним запросом (как load_user у Mini App). Статус и роль дальше
+                # проверяются так же, как для Mini App: заблокированный получает отказ сразу.
+                viewer = await weblogin.session_user(session, web_token, utcnow())
+                if viewer is None:
+                    raise ApiError(401, "web_session", site.TXT_SESSION_ENDED)
+                init = _web_identity(viewer)
+            else:
+                viewer = await load_user(session, init.tg_id)
+            request[INIT] = init
+            request[VIEWER] = viewer
             i18n.set_current(_request_lang(viewer, init))
             try:
                 response = await handler(request)

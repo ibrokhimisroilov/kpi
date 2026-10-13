@@ -228,6 +228,9 @@ class Settings(BaseSettings):
     # Локальная проверка: страница берёт подписанный initData из ?tg_debug_init= (dev-сервер). В режиме
     # webhook игнорируется всегда (webapp_debug_active) — на Render отладку включить нельзя.
     webapp_debug: bool = False
+    # Сайт: то же приложение в обычном браузере по адресу бота, вход — через подтверждение в Telegram
+    # (docs/MINIAPP_SPEC.md §15). Работает вместе с Mini App (WEBAPP_ENABLED); 0 — выключить только сайт.
+    website_enabled: bool = True
 
     # --- Языки интерфейса (bot.i18n) ---
     # Метки вокруг слов пользователя в текстах бота: по ним перевод на узбекский отличает название задачи
@@ -346,6 +349,16 @@ class Settings(BaseSettings):
         if not self.webapp_enabled or self.run_mode != "webhook" or not base.lower().startswith("https://"):
             return ""
         return f"{base}/app"
+
+    @property
+    def site_active(self) -> bool:
+        """Сайт включён: раздаётся там же, где Mini App (WEBAPP_ENABLED и WEBSITE_ENABLED)."""
+        return self.webapp_enabled and self.website_enabled
+
+    @property
+    def cookies_secure(self) -> bool:
+        """Cookie сайта — только по https (в бою адрес бота всегда https; локальная проверка — http)."""
+        return self.base_url.lower().startswith("https://")
 
     @property
     def webapp_debug_active(self) -> bool:

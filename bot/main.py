@@ -69,6 +69,7 @@ from bot.handlers import (
     task_view,
     users_admin,
     voice,
+    weblogin,
 )
 from bot.middlewares import DbSessionMiddleware, UserMiddleware
 from bot.scheduler.jobs import setup_scheduler, tick_schedule_summary
@@ -439,6 +440,7 @@ def build_dispatcher(
     dp.message.outer_middleware(VoiceMiddleware())
     dp.include_routers(
         language.router,  # выбор языка — в любом состоянии, раньше диалогов и регистрации
+        weblogin.router,  # /start login_<код> — вход на сайт; раньше обычного /start, диалог не прерывает
         start.router,
         users_admin.router,
         voice.router,  # задача одним голосовым — раньше диалогов, у которых свои «ловушки» нетекстового ввода

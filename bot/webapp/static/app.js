@@ -4,8 +4,9 @@
  * Устройство:
  *  • h()/s() строят DOM; данные попадают в страницу только текстовыми узлами (никакой HTML-разметки
  *    из строк — так требует CSP и §11.1);
- *  • api() ходит в /api/* с заголовком X-Telegram-Init-Data, кэширует GET в памяти на 30 с и
- *    превращает ответы-ошибки в ApiError (401/403 доступа/429 обрабатываются глобально);
+ *  • api() ходит в /api/* с заголовком X-Telegram-Init-Data (на сайте — со знаком страницы X-KPI-CSRF,
+ *    раздел 17b), кэширует GET в памяти на 30 с и превращает ответы-ошибки в ApiError (401/403 доступа/429
+ *    обрабатываются глобально);
  *  • маршрутизатор по location.hash держит свой стек экранов (history.replaceState — браузерная
  *    история не растёт); экран — функция View(scr, args, query), строящая DOM внутри scr.el;
  *  • primary/back — обёртки над MainButton и BackButton Telegram; вне Telegram (локальная отладка)
@@ -22,6 +23,9 @@
   const tg = (window.Telegram && window.Telegram.WebApp) || null;
   const CONFIG = readConfig();
   const insideTelegram = Boolean(tg && tg.initData);
+  // Сайт (обычный браузер, §15): страницу «/» отдал сервер с пометкой web. Человека называет cookie сессии,
+  // вход — через подтверждение в боте; экраны, права и API — те же.
+  const WEB = Boolean(CONFIG.web) && !insideTelegram;
   const SVG_NS = 'http://www.w3.org/2000/svg';
 
   const CACHE_TTL_MS = 30 * 1000;      // GET-ответы живут в памяти 30 с (§11.5)
@@ -374,6 +378,7 @@
     bulb: 'M9 18h6M10 21.5h4M15 14.5c.2-1 .7-1.7 1.5-2.5A5.5 5.5 0 0 0 18 8 6 6 0 0 0 6 8c0 1.4.5 2.8 1.5 4 .8.8 1.3 1.5 1.5 2.5',
     empty: 'M21 19a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h4.5l2 2.5H19a2 2 0 0 1 2 2z',
     more: 'M4 12a1 1 0 1 0 2 0a1 1 0 1 0-2 0M11 12a1 1 0 1 0 2 0a1 1 0 1 0-2 0M18 12a1 1 0 1 0 2 0a1 1 0 1 0-2 0',
+    logout: 'M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17L21 12L16 7M21 12L9 12',
   };
 
   /** icon('clock') -> <svg class="ic">. cls — размер и тон: ic-sm | ic-lg | ic-xl, tone-good | tone-warn | tone-bad. */
@@ -890,14 +895,26 @@
     return promise;
   }
 
-  async function send(method, url, body, timeoutMs) {
+  /** Знак страницы сайта: сервер кладёт его в cookie при входе, страница возвращает в заголовке (до входа — «1»). */
+  function pageToken() {
+    const found = /(?:^|;\s*)(?:__Host-)?kpi_csrf=([^;]+)/.exec(document.cookie || '');
+    return found ? found[1] : '1';
+  }
+
+  /** Кто пришёл: Mini App — подпись Telegram; сайт — знак страницы (человека называет cookie сессии). */
+  function authHeaders() {
+    return WEB ? { 'X-KPI-CSRF': pageToken() } : { 'X-Telegram-Init-Data': auth.initData };
+  }
+
+  /** raw — ошибку вернуть как есть, без общих реакций routeError (запросы входа на сайт). */
+  async function send(method, url, body, timeoutMs, raw) {
     const ctrl = typeof AbortController === 'function' ? new AbortController() : null;
     let timedOut = false;
     const timer = setTimeout(() => {
       timedOut = true;
       if (ctrl) ctrl.abort();
     }, timeoutMs);
-    const headers = { 'X-Telegram-Init-Data': auth.initData, Accept: 'application/json' };
+    const headers = Object.assign({ Accept: 'application/json' }, authHeaders());
     const init = { method, headers, credentials: 'same-origin', cache: 'no-store' };
     if (ctrl) init.signal = ctrl.signal;
     if (typeof Blob === 'function' && body instanceof Blob) {
@@ -920,7 +937,8 @@
       clearTimeout(timer);
     }
     if (!resp.ok || data === null) {
-      throw routeError(new ApiError(resp.status, (data && data.code) || 'internal', (data && data.error) || T.generic, data && data.ru));
+      const err = new ApiError(resp.status, (data && data.code) || 'internal', (data && data.error) || T.generic, data && data.ru);
+      throw raw ? err : routeError(err);
     }
     return data;
   }
@@ -930,7 +948,8 @@
     return new Promise((resolve, reject) => {
       const xhr = new XMLHttpRequest();
       xhr.open(ep[0], fillPath(ep[1], params));
-      xhr.setRequestHeader('X-Telegram-Init-Data', auth.initData);
+      const who = authHeaders();
+      Object.keys(who).forEach((name) => xhr.setRequestHeader(name, who[name]));
       xhr.setRequestHeader('Accept', 'application/json');
       xhr.timeout = UPLOAD_TIMEOUT_MS;
       if (xhr.upload && onProgress) {
@@ -959,7 +978,10 @@
   function routeError(err) {
     if (err.status === 401) {
       err.handled = true;
-      showBlocking('session', err.message);
+      // Сайт: сессии нет или она закончилась — экран входа (первый приход — без пояснений). Если он уже
+      // показан, опоздавший ответ прежнего запроса его не сбрасывает (человек может как раз подтверждать вход).
+      if (!WEB) showBlocking('session', err.message);
+      else if (!loginOn) showLogin(err.code === 'web_session' ? 'ended' : null);
     } else if (err.status === 403 && ACCESS_CODES.indexOf(err.code) >= 0) {
       err.handled = true;
       showBlocking(err.code, err.message);
@@ -1376,9 +1398,12 @@
   // 10. Общие элементы интерфейса
   // ---------------------------------------------------------------------------------------------
 
+  function appName() {
+    return i18n.lang === 'uz' ? 'Samaradorlik' : 'Эффективность';
+  }
+
   function setDocTitle(title) {
-    const app = i18n.lang === 'uz' ? 'Samaradorlik' : 'Эффективность';
-    document.title = title ? tr(title) + ' · ' + app : app;
+    document.title = title ? tr(title) + ' · ' + appName() : appName();
   }
 
   /** Кнопка языка на главных экранах вкладок: одно нажатие — другой язык (и в приложении, и в чате). */
@@ -1416,7 +1441,7 @@
     const subEl = h('p', { class: 'sub', hidden: !sub }, sub || '');
     const el = h('header', { class: 'screen-head' },
       nested && !back.native ? h('button', { type: 'button', class: 'back-link', onclick: () => goBack() }, icon('back'), 'Назад') : null,
-      h('div', { class: 'head-row' }, h1, actions || null, nested ? null : langButton()),
+      h('div', { class: 'head-row' }, h1, actions || null, nested ? null : langButton(), WEB && !nested ? logoutButton() : null),
       subEl);
     return {
       el,
@@ -1788,7 +1813,9 @@
   function voiceErrorText(err) {
     const name = err && err.name;
     if (name === 'NotAllowedError' || name === 'SecurityError') {
-      return 'Нет доступа к микрофону. Разрешите микрофон для Telegram в настройках телефона и попробуйте ещё раз.';
+      return WEB
+        ? 'Нет доступа к микрофону. Разрешите микрофон для этого сайта в браузере и попробуйте ещё раз.'
+        : 'Нет доступа к микрофону. Разрешите микрофон для Telegram в настройках телефона и попробуйте ещё раз.';
     }
     if (name === 'NotFoundError' || name === 'OverconstrainedError') return 'Микрофон не найден.';
     return 'Не удалось включить микрофон. Попробуйте ещё раз или введите текст с клавиатуры.';
@@ -2870,6 +2897,10 @@
   }
 
   async function toChat() {
+    if (WEB) {  // сайт остаётся открытым: чат с ботом — в соседней вкладке (или в приложении Telegram)
+      if (CONFIG.bot) safely(() => window.open(CONFIG.bot, '_blank', 'noopener'));
+      return;
+    }
     // Черновик задачи живёт только в памяти: закрыть приложение с ним можно лишь с согласия.
     if (isAnythingDirty() && !(await confirmDialog(T.leave))) return;
     safely(() => tg.disableClosingConfirmation());
@@ -4825,11 +4856,16 @@
     const action = conf.action && insideTelegram
       ? button(conf.action, () => safely(() => tg.close()), 'btn-primary')
       : null;
+    // Сайт: регистрация и заявка — в чате с ботом; под другим человеком можно войти после выхода.
+    const webActions = WEB ? [
+      CONFIG.bot ? h('a', { class: 'btn btn-primary', href: CONFIG.bot, target: '_blank', rel: 'noopener noreferrer' }, icon('send'), 'Открыть чат с ботом') : null,
+      button('Выйти', logout, '', null, 'logout'),
+    ] : null;
     appRoot.replaceChildren(h('div', { class: 'fullscreen', role: 'alert' },
       h('div', { class: 'big' }, icon(conf.icon, 'ic-xl')),
       heading,
       h('p', null, stripLeadingEmoji(message || T.generic)),
-      action));
+      action, webActions));
     appRoot.removeAttribute('aria-busy');
     safely(() => heading.focus({ preventScroll: true }));
   }
@@ -4854,6 +4890,247 @@
       h('div', { class: 'screen-head' }, sk('sk-line w40 sk-title')),
       skelHero(),
       skelList(4));
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // 17b. Сайт: вход через подтверждение в Telegram и выход (MINIAPP_SPEC §15)
+  // ---------------------------------------------------------------------------------------------
+
+  const AUTH = { start: '/auth/start', status: '/auth/status', cancel: '/auth/cancel', logout: '/auth/logout' };
+  const LOGIN_POLL_MS = 2000;
+  const LOGIN_NOTES = {
+    out: 'Вы вышли. Чтобы продолжить работу, войдите снова.',
+    ended: 'Вход завершён. Войдите снова.',
+  };
+  let loginOn = false;   // показан экран входа (любой из них)
+  let loginWait = null;  // идущее ожидание подтверждения: {data, timer, clock, paint}
+  let loginLang = null;  // язык, выбранный на экране входа: после входа он становится языком человека
+
+  /** Язык до входа: выбранный здесь раньше, иначе язык браузера. */
+  function storedLang() {
+    const saved = safely(() => window.localStorage.getItem('kpi_lang'));
+    if (saved === 'uz' || saved === 'ru') return saved;
+    return String(navigator.language || '').toLowerCase().slice(0, 2) === 'uz' ? 'uz' : 'ru';
+  }
+
+  function stopLoginWait() {
+    if (!loginWait) return;
+    clearTimeout(loginWait.timer);
+    clearInterval(loginWait.clock);
+    loginWait = null;
+  }
+
+  /** Каркас экранов входа: язык — справа вверху, содержимое — по центру. redraw рисует тот же экран на другом языке. */
+  function loginFrame(redraw, kids) {
+    teardown();
+    loginOn = true;
+    setDocTitle('Вход');
+    const next = i18n.lang === 'uz' ? 'ru' : 'uz';
+    const lang = h('button', {
+      type: 'button', class: 'lang-btn', lang: next,
+      onclick: () => {
+        safely(() => window.localStorage.setItem('kpi_lang', next));
+        loginLang = next;
+        setLang(next);
+        redraw();
+      },
+    }, icon('globe', 'ic-sm'), own(next === 'uz' ? 'Oʻzbekcha' : 'Русский'));
+    const box = h('div', { class: 'fullscreen login-box' }, kids);
+    appRoot.replaceChildren(h('div', { class: 'login' }, h('div', { class: 'login-top' }, lang), box));
+    appRoot.removeAttribute('aria-busy');
+    const heading = box.querySelector('h1');
+    if (heading) safely(() => heading.focus({ preventScroll: true }));
+  }
+
+  function showLogin(reason) {
+    stopLoginWait();
+    loginFrame(() => showLogin(reason), [
+      h('div', { class: 'big' }, icon('lock', 'ic-xl')),
+      h('h1', { tabindex: '-1' }, own(appName())),
+      h('p', { class: 'muted' }, 'Задачи, сдача результатов и KPI — в браузере, как в Telegram.'),
+      LOGIN_NOTES[reason] ? note(LOGIN_NOTES[reason], 'info') : null,
+      button('Войти через Telegram', beginLogin, 'btn-primary', null, 'send'),
+      h('p', { class: 'small muted' }, 'Пароль не нужен: вход подтверждается в боте.'),
+    ]);
+  }
+
+  async function beginLogin(event) {
+    const btn = event && event.currentTarget;
+    if (btn) btn.disabled = true;
+    let data;
+    try {
+      data = await send('POST', AUTH.start, undefined, POST_TIMEOUT_MS, true);
+    } catch (err) {
+      if (btn) btn.disabled = false;
+      toast(err.status === 429 ? 'Слишком много попыток входа подряд. Повторите через минуту.'
+        : err.status === 503 ? 'Не удалось связаться с Telegram. Попробуйте ещё раз через минуту.'
+          : err.message, 'alert');
+      return;
+    }
+    data.opened = false;
+    enterLoginWait(data);
+  }
+
+  /** Экран ожидания: data — {code, expires_in, opened} и, если вход начат в этой вкладке, link и qr. */
+  function enterLoginWait(data) {
+    stopLoginWait();
+    data.until = Date.now() + data.expires_in * 1000;
+    loginWait = { data, timer: 0, clock: 0, paint: null };
+    drawLoginWait();
+    const wait = loginWait;
+    wait.clock = setInterval(() => wait.paint && wait.paint(), 1000);
+    pollLogin();
+  }
+
+  /** Вход подтверждён: открыть приложение. */
+  function enterApp() {
+    stopLoginWait();
+    loginOn = false;
+    appRoot.replaceChildren(bootSkeleton());
+    start();
+  }
+
+  /**
+   * Сессии нет, но вход мог быть начат в этой вкладке до перезагрузки (или в соседней): спросить сервер один
+   * раз. Подтверждённый вход не теряется; идущая попытка продолжается с тем же числом; иначе — экран входа.
+   */
+  async function resumeLogin() {
+    let res = null;
+    try {
+      res = await send('GET', AUTH.status, undefined, GET_TIMEOUT_MS, true);
+    } catch (_) {
+      res = null;
+    }
+    if (res && res.state === 'ok') enterApp();
+    else if (res && res.state === 'waiting' && res.code) enterLoginWait({ code: res.code, opened: Boolean(res.opened), expires_in: res.expires_in });
+    else showLogin();
+  }
+
+  /** «Отмена»: попытка закрывается и на сервере — её кнопки в боте больше ничего не подтверждают. */
+  function cancelLogin() {
+    send('POST', AUTH.cancel, undefined, POST_TIMEOUT_MS, true).catch(() => {});
+    showLogin();
+  }
+
+  /** QR-код ссылки: тёмные модули — одним контуром; поля в 4 модуля нужны камере. */
+  function qrImage(rows) {
+    const n = rows.length;
+    let d = '';
+    rows.forEach((row, y) => {
+      for (let x = 0; x < n; x += 1) {
+        if (row.charAt(x) !== '1') continue;
+        let len = 1;
+        while (x + len < n && row.charAt(x + len) === '1') len += 1;
+        d += 'M' + (x + 4) + ' ' + (y + 4) + 'h' + len + 'v1h-' + len + 'z';
+        x += len - 1;
+      }
+    });
+    const side = n + 8;
+    return s('svg', { class: 'qr', viewBox: '0 0 ' + side + ' ' + side, role: 'img', 'aria-label': tr('QR-код для входа через Telegram') },
+      s('rect', { width: side, height: side }), s('path', { d }));
+  }
+
+  function drawLoginWait() {
+    const wait = loginWait;
+    if (!wait) return;
+    const d = wait.data;
+    const status = h('p', { class: 'login-status', role: 'status' });
+    wait.paint = () => {
+      status.replaceChildren();
+      appendKids(status, [
+        icon(d.opened ? 'phone' : 'wait', 'ic-sm'),
+        h('span', null, d.opened ? 'Бот открыт — нажмите в нём число с этого экрана.' : 'Ждём подтверждения в Telegram.'),
+        h('span', { class: 'num' }, own(fmtClock(Math.max(0, d.until - Date.now())))),
+      ]);
+    };
+    loginFrame(drawLoginWait, [
+      h('h1', { tabindex: '-1' }, 'Подтвердите вход в Telegram'),
+      h('div', { class: 'login-steps' },
+        // Сначала число: в Telegram человек уходит, уже зная, что нажать.
+        h('section', { class: 'card login-step' },
+          h('h2', { class: 'card-title' }, 'Шаг 1. Запомните число'),
+          h('div', { class: 'login-code num' }, own(d.code)),
+          h('p', { class: 'small muted' }, 'Бот покажет три числа — нажмите это.')),
+        d.link ? h('section', { class: 'card login-step' },
+          h('h2', { class: 'card-title' }, 'Шаг 2. Откройте бота и нажмите это число'),
+          h('a', { class: 'btn btn-primary', href: d.link, target: '_blank', rel: 'noopener noreferrer' }, icon('send'), 'Открыть Telegram'),
+          h('p', { class: 'small muted' }, 'Telegram только на телефоне? Наведите камеру телефона на этот код:'),
+          qrImage(d.qr))
+          // Страницу перезагрузили: ссылку сервер второй раз не выдаёт — сообщение бота у человека уже есть.
+          : h('section', { class: 'card login-step' },
+            h('h2', { class: 'card-title' }, 'Шаг 2. Нажмите это число в чате с ботом'),
+            h('p', null, 'Сообщение от бота уже должно быть в Telegram. Если его нет — начните заново.'),
+            button('Начать заново', beginLogin, '', null, 'refresh'))),
+      status,
+      h('button', { type: 'button', class: 'link-btn', onclick: cancelLogin }, 'Отмена'),
+    ]);
+    wait.paint();
+  }
+
+  function pollLogin() {
+    const wait = loginWait;
+    if (!wait) return;
+    wait.timer = setTimeout(async () => {
+      let res = null;
+      try {
+        res = await send('GET', AUTH.status, undefined, GET_TIMEOUT_MS, true);
+      } catch (_) {
+        res = null;  // связь моргнула — спросим ещё раз
+      }
+      if (loginWait !== wait) return;  // вход отменён или начат заново
+      const st = res && res.state;
+      if (st === 'ok') {
+        enterApp();
+      } else if (st === 'denied') {
+        loginResult('denied');
+      } else if (st === 'expired' || st === 'none' || Date.now() > wait.data.until + 5000) {
+        // Знак страницы уже есть — вход завершён в соседней вкладке этого браузера.
+        if (pageToken() !== '1') enterApp();
+        else loginResult('expired');
+      } else if (st === 'waiting' && res.code && res.code !== wait.data.code) {
+        showLogin();  // вход начат заново в соседней вкладке: это число уже не действует
+      } else {
+        if (st === 'waiting' && res.opened !== wait.data.opened) {
+          wait.data.opened = res.opened;
+          wait.paint();
+        }
+        pollLogin();
+      }
+    }, LOGIN_POLL_MS);
+  }
+
+  function loginResult(kind) {
+    stopLoginWait();
+    const denied = kind === 'denied';
+    loginFrame(() => loginResult(kind), [
+      h('div', { class: 'big' }, icon(denied ? 'reject' : 'clock', 'ic-xl')),
+      h('h1', { tabindex: '-1' }, denied ? 'Вход не подтверждён' : 'Время вышло'),
+      h('p', null, denied
+        ? 'Бот не подтвердил вход: нажато другое число или «Это не я», либо доступа пока нет. Подробности — в чате с ботом.'
+        : 'Подтвердить вход нужно за 5 минут. Начните заново.'),
+      button('Начать заново', beginLogin, 'btn-primary', null, 'refresh'),
+    ]);
+  }
+
+  async function logout() {
+    if (isAnythingDirty() && !(await confirmDialog(T.leave))) return;
+    try {
+      await send('POST', AUTH.logout, undefined, POST_TIMEOUT_MS, true);
+    } catch (err) {
+      toast(err.message, 'alert');  // связи нет: сессия на сервере цела — так и остаёмся в приложении
+      return;
+    }
+    dropCache();
+    state.me = null;
+    state.role = null;
+    safely(() => history.replaceState(null, '', window.location.pathname));  // следующий вход начнёт с главного экрана
+    showLogin('out');
+  }
+
+  /** «Выйти» в шапке главных экранов сайта (на узком экране — только значок). */
+  function logoutButton() {
+    return h('button', { type: 'button', class: 'lang-btn out-btn', 'aria-label': 'Выйти', onclick: logout },
+      icon('logout', 'ic-sm'), h('span', null, 'Выйти'));
   }
 
   // ---------------------------------------------------------------------------------------------
@@ -5223,6 +5500,34 @@
     "Проверка: {u}": "Tekshirdi: {u}",
     "Проверка: {u}, {}.{} {}:{}": "Tekshirdi: {u}, {}.{} {}:{}",
     "Вошли в расчёт": "Hisobga kirganlar",
+    "Вход": "Kirish",
+    "Войти через Telegram": "Telegram orqali kirish",
+    "Задачи, сдача результатов и KPI — в браузере, как в Telegram.": "Vazifalar, natijalarni topshirish va KPI — brauzerda, xuddi Telegramdagidek.",
+    "Пароль не нужен: вход подтверждается в боте.": "Parol kerak emas: kirish botda tasdiqlanadi.",
+    "Вы вышли. Чтобы продолжить работу, войдите снова.": "Siz chiqdingiz. Ishni davom ettirish uchun qayta kiring.",
+    "Вход завершён. Войдите снова.": "Seans tugadi. Qayta kiring.",
+    "Подтвердите вход в Telegram": "Kirishni Telegramda tasdiqlang",
+    "Шаг {}. Запомните число": "{}-qadam. Sonni eslab qoling",
+    "Открыть Telegram": "Telegramni ochish",
+    "Telegram только на телефоне? Наведите камеру телефона на этот код:": "Telegram faqat telefondami? Telefon kamerasini shu kodga qarating:",
+    "Шаг {}. Откройте бота и нажмите это число": "{}-qadam. Botni oching va shu sonni bosing",
+    "Бот покажет три числа — нажмите это.": "Bot uchta son koʻrsatadi — shu sonni bosing.",
+    "Ждём подтверждения в Telegram.": "Telegramda tasdiqlash kutilmoqda.",
+    "Бот открыт — нажмите в нём число с этого экрана.": "Bot ochildi — unda shu ekrandagi sonni bosing.",
+    "Отмена": "Bekor qilish",
+    "Вход не подтверждён": "Kirish tasdiqlanmadi",
+    "Время вышло": "Vaqt tugadi",
+    "Бот не подтвердил вход: нажато другое число или «Это не я», либо доступа пока нет. Подробности — в чате с ботом.": "Bot kirishni tasdiqlamadi: boshqa son yoki «Bu men emas» bosilgan, yoki hozircha ruxsat yoʻq. Tafsilotlar — bot bilan chatda.",
+    "Подтвердить вход нужно за {} минут. Начните заново.": "Kirishni {} daqiqa ichida tasdiqlash kerak. Qaytadan boshlang.",
+    "Начать заново": "Qaytadan boshlash",
+    "Слишком много попыток входа подряд. Повторите через минуту.": "Ketma-ket juda koʻp kirish urinishi. Bir daqiqadan soʻng takrorlang.",
+    "Не удалось связаться с Telegram. Попробуйте ещё раз через минуту.": "Telegram bilan bogʻlanib boʻlmadi. Bir daqiqadan soʻng qayta urinib koʻring.",
+    "QR-код для входа через Telegram": "Telegram orqali kirish uchun QR-kod",
+    "Выйти": "Chiqish",
+    "Открыть чат с ботом": "Bot bilan chatni ochish",
+    "Нет доступа к микрофону. Разрешите микрофон для этого сайта в браузере и попробуйте ещё раз.": "Mikrofonga ruxsat yoʻq. Brauzerda shu sayt uchun mikrofonga ruxsat bering va qayta urinib koʻring.",
+    "Шаг {}. Нажмите это число в чате с ботом": "{}-qadam. Bot bilan chatda shu sonni bosing",
+    "Сообщение от бота уже должно быть в Telegram. Если его нет — начните заново.": "Botdan xabar Telegramda boʻlishi kerak. Agar u boʻlmasa — qaytadan boshlang.",
     /*UZ-END*/
   };
 
@@ -5265,6 +5570,18 @@
     } catch (err) {
       if (!err.handled) showBootError(err);
       return;
+    }
+    if (WEB && loginLang && me && me.access === 'active' && me.lang !== loginLang) {
+      // Язык выбран на экране входа — он и остаётся языком человека (как кнопка языка в приложении).
+      const picked = loginLang;
+      loginLang = null;
+      try {
+        await api(EP.setLang, { body: { lang: picked } });
+        dropCache();
+        me = await api(EP.me, { fresh: true });
+      } catch (_) {
+        // не получилось — остаётся прежний язык человека
+      }
     }
     if (me && me.lang) setLang(me.lang);
     if (!me || me.access !== 'active') {
@@ -5338,11 +5655,15 @@
 
     // До ответа сервера язык — по Telegram; дальше — выбранный человеком (Me.lang).
     const tgUser = tg && tg.initDataUnsafe ? tg.initDataUnsafe.user : null;
-    setLang(tgUser && String(tgUser.language_code || '').toLowerCase().slice(0, 2) === 'uz' ? 'uz' : 'ru');
+    setLang(WEB ? storedLang() : tgUser && String(tgUser.language_code || '').toLowerCase().slice(0, 2) === 'uz' ? 'uz' : 'ru');
     auth.initData = resolveInitData();
-    if (!auth.initData) {
+    if (!auth.initData && !WEB) {
       showBlocking('outside', T.openFromTelegram);
       if (tg) safely(() => tg.ready());
+      return;
+    }
+    if (WEB && pageToken() === '1') {
+      resumeLogin();  // знака страницы нет — нет и сессии: экран входа (или продолжение начатого входа)
       return;
     }
     appRoot.replaceChildren(bootSkeleton());

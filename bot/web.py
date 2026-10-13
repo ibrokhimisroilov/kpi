@@ -21,7 +21,8 @@ Telegram сам присылает сообщения на адрес бота. 
   в фоне и сразу ответить. Пока прошлый запуск (по /tick или по расписанию бота) не закончился,
   новый не начинается. Неверный ключ — 403.
 * ``GET|HEAD /health`` — «ok» без обращения к БД (проверка хостинга).
-* ``GET|HEAD /`` — «KPI bot is running».
+* ``GET|HEAD /`` — страница сайта (то же приложение в обычном браузере, docs/MINIAPP_SPEC.md §15), если
+  приложение подключено и WEBSITE_ENABLED; иначе — «KPI bot is running».
 * Приложение в Telegram (Mini App, docs/MINIAPP_SPEC.md) — если WEBAPP_ENABLED (по умолчанию да) и
   пакет ``bot.webapp`` есть; монтируется после маршрутов выше (mount_webapp), выключено — 404:
 
@@ -424,6 +425,17 @@ _BOT: web.AppKey[Bot] = web.AppKey("kpi_bot", Bot)
 
 
 async def _index(request: web.Request) -> web.Response:
+    """``/`` — страница сайта (docs/MINIAPP_SPEC.md §15), если приложение подключено и сайт включён;
+    иначе, как раньше, служебная строка. Сбой страницы сайта не должен ломать адрес."""
+    if request.app.get(WEBAPP_MOUNTED):
+        try:
+            site = importlib.import_module(f"{_WEBAPP_PACKAGE}.site")
+            page = await site.index(request)
+        except Exception:  # noqa: BLE001 - страница сайта не критична для работы бота
+            log.exception("Сайт: страница не отдана — отвечаю служебной строкой")
+            page = None
+        if page is not None:
+            return page
     return web.Response(text="KPI bot is running")
 
 

@@ -875,6 +875,7 @@ async def send_backup(bot, sessionmaker, now: datetime | None = None) -> int
 | `takeover_webhook` / `TAKEOVER_WEBHOOK` | `false` | `polling`: снять включённый webhook и работать здесь (§10.5); без него запуск при включённом webhook останавливается |
 | `webapp_enabled` / `WEBAPP_ENABLED` | `true` | раздавать Mini App (`/app`, `/api`) и ставить кнопки «Открыть» (только `webhook`, §11) |
 | `webapp_debug` / `WEBAPP_DEBUG` | `false` | локальная проверка Mini App в браузере (dev-сервер, `?tg_debug_init=`); в `webhook` игнорируется |
+| `website_enabled` / `WEBSITE_ENABLED` | `true` | сайт: то же приложение в обычном браузере по адресу бота, вход через подтверждение в боте (docs/MINIAPP_SPEC.md §15); работает вместе с Mini App |
 
 Свойства: `base_url` = (`public_url` или `render_external_url`) без `/` в конце; `webhook_secret_value`,
 `tick_secret_value` — заданное значение или выведенное из токена (только `[0-9a-f]`, годится и для
@@ -921,7 +922,9 @@ async def send_backup(bot, sessionmaker, now: datetime | None = None) -> int
   `{"ok": true, "status": "started"|"busy", "last_finished": ..., "last_result": {...}}` (быстро и коротко —
   годится для любых бесплатных планировщиков).
 * `GET|HEAD /health` → `200` `ok` без обращения к БД и Telegram (health check Render и самопробуждение).
-* `GET|HEAD /` → `KPI bot is running`.
+* `GET|HEAD /` → страница сайта (то же приложение в обычном браузере, docs/MINIAPP_SPEC.md §15), если Mini App
+  подключён и `WEBSITE_ENABLED`; иначе — `KPI bot is running`. Вход на сайт — sub-app `/auth/*` (его монтирует
+  `setup_webapp`), подтверждение — в боте (`/start login_<код>`, `handlers/weblogin.py`).
 * Mini App (§11) — `mount_webapp(app, bot, sessionmaker, settings)` **после** маршрутов выше, если
   `settings.webapp_enabled` и пакет `bot.webapp` есть (`importlib.util.find_spec`, как `main.default_storage`):
   `bot.webapp.setup_webapp(app, bot=…, sessionmaker=…, settings=…)` добавляет `GET|HEAD /app`, `/app/`,
@@ -1128,6 +1131,13 @@ def tick_schedule_summary(interval_sec: float | None = None) -> str   # расп
   `test_api_budget.py`), `tests/e2e/test_submission_flow.py` (общий конвейер сдачи),
   `tests/test_webapp_integration.py` (настройки, монтирование, кнопки). Скриншоты экранов —
   `docs/miniapp_screens/`.
+
+**Сайт.** То же приложение открывается в обычном браузере по адресу бота (`GET /`, настройка `WEBSITE_ENABLED`):
+тот же `app.js`, тот же `/api/*`, те же права. Вход без пароля — через подтверждение в боте: сайт показывает
+число и ссылку `t.me/<бот>?start=login_<код>` (кнопкой и QR-кодом), `handlers/weblogin.py` (роутер подключён
+перед `start`, диалог не прерывает) присылает три числа и «🚫 Это не я» (`WebLoginCB`, префикс `wl`), верное
+число выдаёт сессию браузеру, начавшему вход. Попытки и сессии — `services/weblogin.py`, таблицы `web_logins`
+и `web_sessions` (в резервную копию не попадают). Полный контракт — docs/MINIAPP_SPEC.md §15.
 
 ## 12. Админ и автоподтверждение
 

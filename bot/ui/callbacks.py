@@ -87,6 +87,18 @@ class LangCB(CallbackData, prefix="g"):
     lang: str
 
 
+class WebLoginCB(CallbackData, prefix="wl"):
+    """Подтверждение входа на сайт (handlers/weblogin.py): login_id — попытка входа (WebLogin.id),
+    pick — число с кнопки или «no» («Это не я»). Работает в любом состоянии диалога."""
+
+    login_id: DbInt
+    pick: str
+
+
+class WebOutCB(CallbackData, prefix="wo"):
+    """«Выйти с сайта на всех устройствах» под сообщением о подтверждённом входе (handlers/weblogin.py)."""
+
+
 class PickCB(CallbackData, prefix="k"):
     """Выбор варианта внутри FSM-диалога (приоритет, вес, срок, подтверждение ...).
 

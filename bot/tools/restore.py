@@ -272,6 +272,8 @@ async def restore(backup_path: Path, database_url: str | URL, *, force: bool = F
                 result.cleared_rows = await _clear(conn)
                 fit = conn.dialect.name != "sqlite"
                 for table in Base.metadata.sorted_tables:
+                    if not table.info.get("backup", True):
+                        continue  # попытки входа на сайт и сессии не восстанавливаются (их нет и в копии)
                     if table.name not in backup_tables:
                         result.missing_tables.append(table.name)
                         result.counts[table.name] = 0

@@ -10,8 +10,8 @@
   (``sqlite3.Connection.backup``): копия согласованная, даже если бот в этот момент пишет в базу (WAL),
   и останавливать бота не нужно. Снимок собирается в памяти (в отдельном потоке, чтобы не задерживать
   бота) и сразу отправляется.
-* **PostgreSQL** (Supabase) и другие СУБД — все таблицы бота (``Base.metadata.sorted_tables``)
-  переписываются во временный файл SQLite с той же схемой. Чтение — одна транзакция REPEATABLE READ
+* **PostgreSQL** (Supabase) и другие СУБД — таблицы бота (``backup_tables``: все, кроме попыток входа на
+  сайт и сессий браузеров) переписываются во временный файл SQLite с той же схемой. Чтение — одна транзакция REPEATABLE READ
   (все таблицы на один момент времени, бот при этом работает), порциями; запись в файл — в отдельном
   потоке. Такой файл бот открывает как ``data/bot.db``, а в PostgreSQL его загружает
   ``python -m bot.tools.restore`` — копия восстанавливается без доступа к облачному хостингу.
@@ -58,6 +58,7 @@ from bot.utils.text import fmt_num
 __all__ = [
     "MAX_BACKUP_BYTES",
     "BackupTooLarge",
+    "backup_tables",
     "backup_filename",
     "export_database",
     "make_backup_bytes",
@@ -150,6 +151,14 @@ def _create_schema(target: Engine) -> None:
     Base.metadata.create_all(target)
 
 
+def backup_tables() -> list[Table]:
+    """Таблицы, строки которых попадают в копию (в порядке зависимостей): все, кроме помеченных
+    ``info={"backup": False}`` — попыток входа на сайт и сессий браузеров. Файл копии уходит в чаты
+    начальников, и этим записям в нём не место; после восстановления базы люди входят на сайт заново.
+    Сами таблицы в файле создаются (пустыми) — бот открывает его как обычную базу."""
+    return [table for table in Base.metadata.sorted_tables if table.info.get("backup", True)]
+
+
 def _exported_size(sink: Connection) -> int:
     """Текущий размер базы SQLite (вместе со страницами незавершённой транзакции)."""
     page_count = sink.exec_driver_sql("PRAGMA page_count").scalar_one()
@@ -187,7 +196,7 @@ async def export_database(engine: AsyncEngine, *, max_bytes: int | None = None) 
                 if source.dialect.name == "postgresql":
                     source = await source.execution_options(isolation_level="REPEATABLE READ")
                 async with source.begin():
-                    for table in Base.metadata.sorted_tables:
+                    for table in backup_tables():
                         result = await source.stream(select(table))
                         async for rows in result.partitions(_EXPORT_CHUNK_ROWS):
                             await asyncio.to_thread(_write_rows, sink, table, rows, max_bytes)

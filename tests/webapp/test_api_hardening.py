@@ -343,3 +343,21 @@ async def test_accept_with_stale_task_writes_no_second_event(ma: MiniApp, frozen
         assert again is seen and again.accepted_at == when
         events = await tasks_svc.task_events(stale, task_id)
     assert [e.type for e in events].count(EventType.ACCEPTED) == 1
+
+
+def test_rate_limiter_forgets_stale_keys() -> None:
+    """Счётчик попыток входа на сайт ведётся по адресам посетителей — чужим и сколько угодно разным: записи, у
+    которых все попытки вышли из окна, не копятся в памяти сервера."""
+    from bot.webapp import RateLimiter
+
+    clock = [0.0]
+    limiter = RateLimiter(clock=lambda: clock[0])
+    limits = ((10, 60.0), (100, 3600.0))
+    for key in range(20_000):
+        assert limiter.hit("site_start", key, limits) is None
+        clock[0] += 1.0  # 20 000 разных адресов за 5,5 часа
+    assert len(limiter._hits) <= 8_000
+    # Свежие счётчики при этом целы: лимит по-прежнему срабатывает.
+    for _ in range(10):
+        limiter.hit("site_start", -1, limits)
+    assert limiter.hit("site_start", -1, limits) is not None

@@ -55,6 +55,8 @@ PREFIXES: dict[str, str] = {
     "📥 <b>#{}</b> {u} — ": "📥 <b>#{}</b> {u} — ",
     "🚫 <b>#{}</b> {u} — ": "🚫 <b>#{}</b> {u} — ",
     "❌ <b>#{}</b> {u} — ": "❌ <b>#{}</b> {u} — ",
+    # вход на сайт: «Устройство: Chrome, Windows» (handlers/weblogin.py)
+    "Устройство: ": "Qurilma: ",
     # журнал: что изменено («изменено — поле: было → стало; поле: …»)
     "изменено — ": "oʻzgartirildi — ",
     "название: ": "nom: ",
@@ -1298,5 +1300,19 @@ LINES: dict[str, str] = {
     'Эффективность команды: <b>{} %</b>': 'Jamoa samaradorligi: <b>{} %</b>',
     'Эффективность команды: <b>нет данных</b>': 'Jamoa samaradorligi: <b>maʼlumot yoʻq</b>',
     '✅ Язык: Русский.': '✅ Til: Oʻzbekcha.',
+    # вход на сайт через подтверждение в боте (handlers/weblogin.py)
+    '🔐 <b>Вход на сайт «Эффективность»</b>': '🔐 <b>«Samaradorlik» saytiga kirish</b>',
+    'Нажмите число, которое показано на сайте.': 'Saytda koʻrsatilgan sonni bosing.',
+    'Если сайт открывали не вы — нажмите «Это не я».': 'Agar saytni siz ochmagan boʻlsangiz — «Bu men emas» tugmasini bosing.',
+    '⏱ Ссылка для входа устарела. Вернитесь на сайт и нажмите «Войти через Telegram» ещё раз.': '⏱ Kirish havolasi eskirgan. Saytga qayting va «Telegram orqali kirish» tugmasini yana bosing.',
+    '⛔ Эта ссылка для входа уже открыта другим человеком. Начните вход на сайте заново.': '⛔ Bu kirish havolasini boshqa odam ochgan. Saytda kirishni qaytadan boshlang.',
+    '✅ Вход на сайт подтверждён. Вернитесь на сайт — он откроется сам.': '✅ Saytga kirish tasdiqlandi. Saytga qayting — u oʻzi ochiladi.',
+    '⚠️ Число не совпало — вход отменён. Начните вход на сайте заново.': '⚠️ Son mos kelmadi — kirish bekor qilindi. Saytda kirishni qaytadan boshlang.',
+    '🚫 Вход на сайт отменён. Если сайт открывали не вы, больше ничего делать не нужно.': '🚫 Saytga kirish bekor qilindi. Agar saytni siz ochmagan boʻlsangiz, boshqa hech narsa qilish shart emas.',
+    'Вход на сайт доступен после регистрации в боте. Нажмите /start.': 'Saytga kirish botda roʻyxatdan oʻtgandan soʻng mumkin. /start ni bosing.',
+    '🚫 Это не я': '🚫 Bu men emas',
+    'По чужой просьбе вход не подтверждайте: этот человек откроет сайт от вашего имени.': 'Boshqa birovning iltimosi bilan kirishni tasdiqlamang: u odam saytni sizning nomingizdan ochadi.',
+    '🚪 Выйти с сайта на всех устройствах': '🚪 Saytdan barcha qurilmalarda chiqish',
+    '🚪 Все входы на сайт завершены. Чтобы войти снова, откройте сайт и нажмите «Войти через Telegram».': '🚪 Saytga barcha kirishlar yakunlandi. Qayta kirish uchun saytni oching va «Telegram orqali kirish» tugmasini bosing.',
     'Я помогу сделать формулировку измеримой.': 'Men taʼrifni oʻlchanadigan qilishga yordam beraman.',
 }

@@ -341,6 +341,56 @@ class JobLog(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
 
+class WebLoginState(enum.StrEnum):
+    NEW = "new"            # создана сайтом, ссылку в боте ещё не открыли
+    OPENED = "opened"      # человек открыл ссылку в боте, бот ждёт нажатия числа
+    APPROVED = "approved"  # число верное: браузер, начавший вход, может один раз забрать сессию
+    DENIED = "denied"      # «Это не я», неверное число или у человека нет доступа
+    USED = "used"          # сессия выдана — попытка больше ни на что не годится
+
+
+class WebLogin(Base):
+    """Попытка входа на сайт через Telegram (bot.services.weblogin, docs/MINIAPP_SPEC.md §15).
+
+    Сами секреты в базе не хранятся — только их SHA-256: ``token_hash`` — код из ссылки на бота
+    (``/start login_<код>``), ``browser_hash`` — секрет в cookie браузера, который начал вход. Строка живёт
+    несколько минут (``expires_at``) и срабатывает один раз.
+    """
+
+    __tablename__ = "web_logins"
+    __table_args__ = {"info": {"backup": False}}  # в ежедневную копию базы не попадает (bot.scheduler.backup)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    browser_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    code: Mapped[str] = mapped_column(String(4))       # число, которое показывает сайт
+    options: Mapped[str] = mapped_column(String(32))   # числа на кнопках бота через запятую (одно из них — code)
+    state: Mapped[WebLoginState] = mapped_column(_enum(WebLoginState), default=WebLoginState.NEW)
+    tg_id: Mapped[int | None] = mapped_column(BigInteger)  # кто открыл ссылку в боте — подтвердить может только он
+    user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    device: Mapped[str | None] = mapped_column(String(64))  # «Chrome, Windows» — по заголовку браузера
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    expires_at: Mapped[datetime] = mapped_column(DateTime, index=True)
+
+
+class WebSession(Base):
+    """Сессия браузера на сайте: в cookie — случайный знак, в базе — только его SHA-256."""
+
+    __tablename__ = "web_sessions"
+    __table_args__ = {"info": {"backup": False}}
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    device: Mapped[str | None] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    expires_at: Mapped[datetime] = mapped_column(DateTime, index=True)
+
+    # Пользователь — тем же SELECT (LEFT JOIN): вход по cookie стоит один обмен с базой, как вход Mini App.
+    user: Mapped[User] = relationship(lazy="joined", innerjoin=True)
+
+
 class FsmState(Base):
     """Состояние незавершённых диалогов (FSM aiogram) — переживает перезапуск бота."""
 

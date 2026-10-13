@@ -249,3 +249,25 @@ async def test_m12_create_task(ma: MiniApp, probe: RoundTripProbe) -> None:
     assert resp.status == 201
     check("M12", m)
     assert EMP  # исполнитель — Иванов (2001)
+
+
+# --- Сайт (§15): вход по cookie сессии стоит столько же, сколько вход Mini App -------------------------------
+
+
+@pytest.mark.parametrize("path", ["/api/me", "/api/tasks?scope=all&status=open", "/api/dashboard"])
+async def test_site_session_costs_no_more_round_trips_than_mini_app(ma: MiniApp, probe: RoundTripProbe, path: str) -> None:
+    """Сессия сайта и её пользователь читаются одним запросом — как пользователь по initData у Mini App:
+    тот же экран на сайте не добавляет обменов с базой."""
+    from .test_weblogin import sign_in
+
+    await seed_bulk(ma, 2, 5)
+    browser = await sign_in(ma, MGR)
+    assert (await ma.get(path, as_=MGR)).status == 200  # разогрев обоих путей
+    assert (await browser.get(path)).status == 200
+    async with probe.measure(f"Mini App {path}") as mini:
+        await ma.get(path, as_=MGR)
+    async with probe.measure(f"сайт {path}") as web:
+        resp = await browser.get(path)
+    assert resp.status == 200
+    sql = "\n".join(statement for _, statement in web.sql)
+    assert web.round_trips == mini.round_trips, f"{path}: сайт {web.round_trips}, Mini App {mini.round_trips}\n{sql}"

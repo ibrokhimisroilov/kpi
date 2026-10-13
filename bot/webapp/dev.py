@@ -10,11 +10,14 @@
   подписывает свежий initData тем же токеном, что проверяет сервер (``auth.sign_init_data``), и
   открывает ``/app?tg_debug_init=…`` — SPA в режиме отладки (``WEBAPP_DEBUG=1``) берёт initData из адреса
   (§5.4). Сервер проверяет подпись как обычно: исключений для отладки нет.
+* Сайт (docs/MINIAPP_SPEC.md §15): ``/`` — страница сайта, как в бою. С фейковым Telegram вход проходит
+  целиком: ссылка входа ведёт на ``/dev/telegram`` — там отвечает бот с теми же хендлерами, что в бою
+  (кто открыл ссылку → сообщение бота и его кнопки).
 * ``--seed-demo`` — демо-команда (только в пустой базе): начальник, сотрудники, заявка на доступ,
   задачи всех статусов, сдачи с оценками и файлами, история оценок за несколько недель (для графика).
 * ``--fake-voice`` — «включить» голосовой ввод без AI: любая запись «распознаётся» в заранее заданный текст
   (и поля задачи для «надиктовать целиком») — чтобы проверить кнопки микрофона в браузере.
-* Никаких webhook, polling, фоновых заданий и кнопки меню: только ``/app``, ``/api`` и ``/dev``.
+* Никаких webhook, polling, фоновых заданий и кнопки меню: только ``/``, ``/app``, ``/api``, ``/auth`` и ``/dev``.
 * ``--real-telegram`` — настоящий Bot с токеном из ``.env`` (только по явному флагу; уведомления уйдут
   настоящим людям). Подпись initData с этим токеном принимает и рабочий бот, поэтому вход закрыт
   ключом запуска (ссылка ``/dev/?key=…`` печатается в консоль) и только за пользователей dev-базы.
@@ -217,6 +220,9 @@ def make_fake_session(echo: Callable[[str], None] | None = _console) -> Any:
 # --- Приложение: /app, /api и /dev ------------------------------------------------------------------------
 
 _SESSIONMAKER: web.AppKey[Any] = web.AppKey("kpi_dev_sessionmaker")
+# Чат с ботом на фейковом Telegram (вход на сайт): {"bot", "sessionmaker", "chat"}; сам бот с хендлерами
+# собирается при первом обращении к /dev/telegram.
+_CHAT: web.AppKey[dict[str, Any]] = web.AppKey("kpi_dev_chat", dict)
 _TOKEN: web.AppKey[str] = web.AppKey("kpi_dev_token", str)
 _KEY: web.AppKey[str] = web.AppKey("kpi_dev_key", str)
 _LOCAL_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
@@ -282,6 +288,128 @@ _NO_KEY_TEXT = (
 
 async def _dev_root(request: web.Request) -> web.Response:
     raise web.HTTPFound(index_url(request.query.get("key") or None))
+
+
+async def _dev_site(request: web.Request) -> web.Response:
+    """``/`` — страница сайта, как в бою (docs/MINIAPP_SPEC.md §15); сайта нет — на страницу отладки."""
+    from bot.webapp import site
+
+    page = await site.index(request)
+    if page is None:
+        raise web.HTTPFound(index_url(request.query.get("key") or None))
+    return page
+
+
+# --- Вход на сайт: чат с ботом на фейковом Telegram ---------------------------------------------------------
+
+_CHAT_CSS = (
+    "body{font:16px/1.45 -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;margin:0;"
+    "background:#8fa7bb;color:#111418}main{max-width:460px;margin:0 auto;min-height:100vh;background:#c9d8e4;"
+    "display:flex;flex-direction:column}header{background:#fff;padding:12px 16px;font-weight:600}"
+    "header small{display:block;font-weight:400;color:#5c6570}.chat{flex:1;padding:16px;display:flex;"
+    "flex-direction:column;justify-content:flex-end;gap:8px}.me{align-self:flex-end;background:#e3fdc9;"
+    "border-radius:14px 14px 4px 14px;padding:8px 12px;max-width:85%}.bot{align-self:flex-start;background:#fff;"
+    "border-radius:14px 14px 14px 4px;padding:10px 12px;max-width:85%;white-space:pre-wrap}"
+    ".keys{align-self:flex-start;display:grid;gap:6px;width:85%}.row{display:flex;gap:6px}"
+    ".row a{flex:1;text-align:center;background:rgba(40,60,80,.55);color:#fff;border-radius:8px;padding:10px 6px;"
+    "text-decoration:none;font-weight:600}ul{padding:0;margin:0}li{list-style:none;margin:8px 0}"
+    "li a{display:block;background:#fff;border-radius:12px;padding:12px 14px;color:#1f6fd1;text-decoration:none}"
+    ".hint{color:#3c4a57;font-size:14px;padding:0 16px 16px}"
+)
+
+
+def _chat_page(title: str, body: str) -> web.Response:
+    page = (
+        '<!doctype html><html lang="ru"><head><meta charset="utf-8">'
+        '<meta name="viewport" content="width=device-width, initial-scale=1">'
+        f"<title>{html.escape(title)}</title><style>{_CHAT_CSS}</style></head><body><main>"
+        "<header>Бот «Эффективность»<small>локальная имитация Telegram — в бою это чат с ботом</small></header>"
+        f"{body}</main></body></html>"
+    )
+    return web.Response(text=page, content_type="text/html", headers={"Cache-Control": "no-store"})
+
+
+def _chat_view(chat: Any, tg_id: int, said: str) -> str:
+    """Последнее сообщение бота в чате и его кнопки (нажатие — ссылка на /dev/telegram/press)."""
+    message = chat.last_message(tg_id)
+    text = html.escape(chat.last_text(tg_id) or "—")
+    rows = ""
+    markup = getattr(message, "reply_markup", None) if message is not None else None
+    for line in getattr(markup, "inline_keyboard", None) or []:
+        cells = "".join(
+            f'<a href="/dev/telegram/press?as={tg_id}&amp;data={quote(button.callback_data or "", safe="")}">'
+            f"{html.escape(button.text)}</a>"
+            for button in line
+        )
+        rows += f'<div class="row">{cells}</div>'
+    keys = f'<div class="keys">{rows}</div>' if rows else ""
+    return f'<div class="chat"><div class="me">{html.escape(said)}</div><div class="bot">{text}</div>{keys}</div>'
+
+
+def _dev_tg_id(request: web.Request) -> int | None:
+    raw = (request.query.get("as") or "").strip()
+    return int(raw) if raw.isdigit() and 0 < int(raw) < 2**63 else None
+
+
+async def _dev_telegram(request: web.Request) -> web.Response:
+    """Ссылка входа сайта ведёт сюда вместо Telegram: выбрать, кто её открыл, — и бот ответит как в чате."""
+    from sqlalchemy import select
+
+    from bot.db.models import User
+
+    chat = _chat(request)
+    payload = (request.query.get("start") or "").strip()
+    if chat is None or not _ROUTE_RE.fullmatch("/" + payload):
+        return web.Response(status=404, text="Имитация Telegram доступна только с тестовым токеном.")
+    tg_id = _dev_tg_id(request)
+    if tg_id is None:
+        async with request.app[_SESSIONMAKER]() as session:
+            users = list(await session.scalars(select(User)))
+        users.sort(key=lambda u: (u.role != "manager", u.status != "active", u.full_name, u.id))
+        items = "".join(
+            f'<li><a href="/dev/telegram?start={quote(payload, safe="")}&amp;as={user.tg_id}">'
+            f"{html.escape(user.full_name or '—')} · {_ROLE_TEXT.get(str(user.role), str(user.role))} · "
+            f"{_STATUS_TEXT.get(str(user.status), str(user.status))}</a></li>"
+            for user in users
+        )
+        guest = f'<li><a href="/dev/telegram?start={quote(payload, safe="")}&amp;as={GUEST_TG_ID}">человек, которого нет в боте</a></li>'
+        body = f'<div class="chat"><ul>{items}{guest}</ul></div><p class="hint">Кто открыл ссылку в своём Telegram?</p>'
+        return _chat_page("Кто открывает ссылку", body)
+    await chat.send_command(tg_id, "start", payload)
+    return _chat_page("Чат с ботом", _chat_view(chat, tg_id, f"/start {payload[:12]}…"))
+
+
+async def _dev_telegram_press(request: web.Request) -> web.Response:
+    chat = _chat(request)
+    tg_id = _dev_tg_id(request)
+    data = request.query.get("data") or ""
+    if chat is None or tg_id is None or not data or len(data) > 64:
+        return web.Response(status=404, text="Нет такой кнопки.")
+    label = next((b.text for b in (chat.last_message(tg_id).buttons if chat.last_message(tg_id) else []) if b.callback_data == data), "…")
+    try:
+        await chat.press(tg_id, data)
+    except LookupError:
+        return web.Response(status=404, text="Нет такой кнопки.")
+    return _chat_page("Чат с ботом", _chat_view(chat, tg_id, f"нажато: {label}"))
+
+
+def _chat(request: web.Request) -> Any:
+    """Бот целиком (те же хендлеры, что в бою) на фейковом Telegram — чтобы вход на сайт проходил
+    по-настоящему. None — имитации нет (настоящий токен)."""
+    holder = request.app.get(_CHAT)
+    if holder is None:
+        return None
+    if "chat" not in holder:
+        from aiogram.fsm.storage.memory import MemoryStorage
+        from e2e.fakebot import BotHarness
+
+        from bot.i18n.telegram import install as install_i18n
+        from bot.main import build_dispatcher
+
+        install_i18n(holder["bot"])
+        dispatcher = build_dispatcher(holder["sessionmaker"], MemoryStorage())
+        holder["chat"] = BotHarness(dispatcher, holder["bot"], holder["sessionmaker"])
+    return holder["chat"]
 
 
 async def _dev_index(request: web.Request) -> web.Response:
@@ -373,9 +501,13 @@ def build_dev_app(
     sessionmaker: async_sessionmaker[AsyncSession],
     settings: Settings,
     key: str | None = None,
+    base_url: str = "",
 ) -> web.Application:
-    """web.Application + setup_webapp (/app, /api) + маршруты отладки /dev (только здесь, не в setup_webapp).
-    Сеть и база при сборке не нужны.
+    """web.Application + setup_webapp (/app, /api, /auth) + страница сайта «/» + маршруты отладки /dev (только
+    здесь, не в setup_webapp). Сеть и база при сборке не нужны.
+
+    С тестовым токеном (фейковый Telegram) вход на сайт проходит целиком: ссылка входа ведёт на
+    ``/dev/telegram`` (``base_url`` — адрес этого сервера для ссылки и QR-кода), где бот отвечает как в чате.
 
     Защита входа: запросы с чужим именем в Host — 403 (DNS rebinding). С настоящим токеном бота
     (не ``DEV_TOKEN``; ``--real-telegram``) подписанный initData годится и для рабочего бота, поэтому
@@ -393,7 +525,14 @@ def build_dev_app(
     app[_TOKEN] = token
     if token != DEV_TOKEN:
         app[_KEY] = key or secrets.token_urlsafe(18)
-    app.router.add_get("/", _dev_root)
+    elif type(bot.session).__name__ != "AiohttpSession":
+        from bot.webapp import CTX
+
+        app[_CHAT] = {"bot": bot, "sessionmaker": sessionmaker}
+        app[CTX].login_link = lambda payload: f"{base_url}/dev/telegram?start={quote(payload, safe='')}"
+        app.router.add_get("/dev/telegram", _dev_telegram)
+        app.router.add_get("/dev/telegram/press", _dev_telegram_press)
+    app.router.add_get("/", _dev_site)
     app.router.add_get("/dev", _dev_root)
     app.router.add_get("/dev/", _dev_index)
     app.router.add_get("/dev/login", _dev_login)
@@ -962,12 +1101,13 @@ async def serve(args: argparse.Namespace, db_path: Path) -> None:
             print("Голосовой ввод: подставной распознаватель (--fake-voice).", flush=True)
         session = None if args.real_telegram else make_fake_session()
         bot = Bot(settings.bot_token, session=session, default=DefaultBotProperties(parse_mode="HTML"))
-        app = build_dev_app(bot=bot, sessionmaker=sessionmaker, settings=settings)
+        app = build_dev_app(bot=bot, sessionmaker=sessionmaker, settings=settings, base_url=f"http://{HOST}:{args.port}")
         runner = web.AppRunner(app, access_log=None)
         await runner.setup()
         await web.TCPSite(runner, HOST, args.port).start()
         print(f"База: {db_path}", flush=True)
         print(f"Mini App (отладка): http://{HOST}:{args.port}{index_url(access_key(app))}", flush=True)
+        print(f"Сайт (вход через «Telegram»): http://{HOST}:{args.port}/", flush=True)
         await asyncio.Event().wait()
     finally:
         if runner is not None:

@@ -181,10 +181,17 @@ async def test_health_and_index_without_database() -> None:
         assert response.status == 200 and await response.text() == "ok"
         response = await client.head("/health")
         assert response.status == 200
+        # «/» — страница сайта (tests/webapp/test_site_pages.py); сайт выключен — служебная строка.
         response = await client.get("/")
-        assert response.status == 200 and "KPI bot is running" in await response.text()
+        assert response.status == 200 and "kpi-config" in await response.text()
         response = await client.head("/")
         assert response.status == 200
+    await bot.session.close()
+    bot = make_bot()
+    app = bot_web.build_web_app(bot, ping_dispatcher([]), no_db, make_settings(website_enabled=False))  # type: ignore[arg-type]
+    async with serve(app) as client:
+        response = await client.get("/")
+        assert response.status == 200 and "KPI bot is running" in await response.text()
     await bot.session.close()
 
 
