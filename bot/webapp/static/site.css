@@ -60,7 +60,8 @@
 /* --- 3. Большой экран --- */
 
 @media (min-width: 1024px) {
-  #app { max-width: none; margin: 0 0 0 var(--side-w); }
+  /* Отступ под боковое меню — только когда оно есть (.has-shell): экран входа и экраны отказа стоят по центру. */
+  body.has-shell #app { max-width: none; margin: 0 0 0 var(--side-w); }
 
   /* Боковое меню: та же панель разделов, что внизу на телефоне, — слева во всю высоту. */
   .dock {
@@ -102,7 +103,8 @@
   /* Основная кнопка экрана: в колонке содержимого, а не во всю ширину окна. */
   .primary-fallback { left: var(--side-w); bottom: 0; padding: var(--gap) 32px var(--pad); }
   .primary-fallback .btn { max-width: 420px; }
-  #toast { left: calc(var(--side-w) + var(--pad)); }
+  body.has-shell #toast { left: calc(var(--side-w) + var(--pad)); }
+  body.kb-open .dock { display: flex; } /* планшет в ширину: при вводе текста боковое меню остаётся на месте */
 
   /* Лист — окно по центру; его основная кнопка стоит в нём самом. */
   .sheet-backdrop { align-items: center; padding: 24px; }
@@ -134,7 +136,8 @@
   .v-team { display: grid; grid-template-columns: minmax(0, 1fr) auto; column-gap: var(--gap); align-items: start; }
   .v-team > * { grid-column: 1 / -1; }
   .v-team > .period-nav { grid-column: 1; }
-  .v-team > .btn-block { grid-column: 2; grid-row: 3; width: auto; align-self: start; }
+  /* Excel — в строке выбора периода: вторая строка, а когда сверху стоит полоса заявок на доступ — третья. */
+  .v-team > .btn-block { grid-column: 2; grid-row: 2; width: auto; align-self: start; }
   .v-team > .pending-banner ~ .btn-block { grid-row: 3; }
   .dash > .more { width: auto; justify-self: start; }
 
@@ -216,7 +219,8 @@
   body.has-detail .main > .screen { padding-left: 24px; padding-right: 24px; }
   /* Рядом с панелью таблица оставляет главное: второстепенные столбцы скрыты. */
   body.has-detail .c-opt { display: none; }
-  body.has-detail .primary-fallback { left: auto; right: 0; width: var(--detail-w); padding-left: 20px; padding-right: 20px; }
+  /* Только кнопка экрана (она лежит в body); кнопка окна стоит в самом окне и его размеров не ломает. */
+  body.has-detail > .primary-fallback { left: auto; right: 0; width: var(--detail-w); padding-left: 20px; padding-right: 20px; }
   body.has-detail .v-tasks { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
   body.has-detail .v-tasks > .screen-head { grid-column: 1 / -1; }
   body.has-detail .v-tasks > .filter-row { grid-column: 1; grid-row: 2; }
@@ -228,6 +232,7 @@
 }
 @media (min-width: 1280px) and (max-width: 1599px) {
   body.has-detail .c-who { display: none; }
+  body.has-detail .c-act { display: none; } /* «Принять» — в самой панели: рядом с ней кнопка в строке не помещается */
   body.has-detail .c-due { white-space: normal; } /* дата и время — в две строки: название получает место */
 }
 /* Окно сузили, пока панель открыта, а экран не перерисован (в форме есть ввод): подробности — во всю ширину. */

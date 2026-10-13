@@ -429,3 +429,27 @@ def test_debug_init_data_only_in_debug_mode() -> None:
     body = js[js.index("function resolveInitData"):]
     body = body[: body.index("\n  }\n")]
     assert body.index("if (!CONFIG.debug) return ''") < body.index("tg_debug_init")
+
+
+# --- Экраны решения: отказ по ответу из кэша перепроверяется у сервера (§11.6) --------------------------------
+
+DECISION_SCREENS = {"ReviewView": "review", "ProposalView": "approve", "EditTaskView": "edit", "SubmitFormView": "submit"}
+
+
+@pytest.mark.parametrize(("view", "action"), list(DECISION_SCREENS.items()))
+def test_decision_screen_rechecks_a_cached_refusal(view: str, action: str) -> None:
+    """Пока карточка лежала в кэше (до 30 с), другой человек мог сдать результат или вернуть задачу: экран
+    решения не пишет «нельзя» по такой карточке, а сначала спрашивает сервер."""
+    js = _read(APP_JS)
+    start = js.index(f"  function {view}(scr")
+    body = js[start : js.index("\n  }\n", start)]
+    assert f"recheck: cant('{action}')" in body, view
+
+
+def test_loader_asks_the_server_before_showing_a_cached_refusal() -> None:
+    js = _read(APP_JS)
+    start = js.index("    async function run(fresh) {")
+    run = js[start : js.index("\n    }\n", start)]
+    assert "spec.recheck(hit.data)" in run
+    assert "if (hit && !doubt)" in run  # сомнительный ответ из кэша не рисуется…
+    assert "fresh: Boolean(fresh) || doubt" in run  # …а запрос за свежим идёт мимо кэша

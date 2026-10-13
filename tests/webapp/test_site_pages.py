@@ -296,3 +296,42 @@ def test_task_table_columns_match_the_server_sort_keys() -> None:
     block = js.split("const TASK_COLS = {", 1)[1].split("};", 1)[0]
     keys = set(re.findall(r"sort: '(\w+)'", block))
     assert keys and keys <= set(api._SORT_COLUMNS), keys - set(api._SORT_COLUMNS)
+
+
+def test_side_menu_offset_applies_only_while_the_menu_exists() -> None:
+    """Экран входа и экраны отказа — без бокового меню: место под него не оставляется, они стоят по центру.
+    Каркас сайта отмечает себя на body (has-shell), и только под этой отметкой содержимое сдвигается."""
+    css = SITE_CSS.read_text(encoding="utf-8")
+    assert "body.has-shell #app {" in css and "body.has-shell #toast {" in css
+    assert not re.search(r"(?m)^\s*#(app|toast)\s*\{", css), "отступ под меню действует и без меню"
+    js = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    shell = js.split("function buildShell() {", 1)[1].split("\n  }\n", 1)[0]
+    assert "if (WEB) document.body.classList.add('has-shell');" in shell  # в Mini App отметки нет
+    teardown = js.split("function teardown() {", 1)[1].split("\n  }\n", 1)[0]
+    assert "'has-shell'" in teardown
+
+
+def test_dialog_button_is_not_resized_by_the_detail_panel() -> None:
+    """Кнопка окна (листа) стоит в самом окне: правило панели подробностей касается только кнопки экрана,
+    которая лежит прямо в body."""
+    css = SITE_CSS.read_text(encoding="utf-8")
+    assert "body.has-detail > .primary-fallback {" in css
+    assert "body.has-detail .primary-fallback" not in css
+
+
+def test_big_screen_keeps_working_in_edge_cases() -> None:
+    js = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    # Esc, уже обработанный окном, панель подробностей не закрывает.
+    assert "event.key === 'Escape' && !event.defaultPrevented && under" in js
+    # Язык из бокового меню не выбрасывает незаконченную форму без вопроса.
+    lang = js.split("function langButton() {", 1)[1].split("\n  }\n", 1)[0]
+    assert "if (btn.disabled || !(await canLeave())) return;" in lang
+    # Смену раскладки не блокирует черновик на другой вкладке — только форма на экране или в окне.
+    assert "if (!shell || !nav.current || (current && current.guard && current.guard()) || sheet.dirty()) return;" in js
+    # Очередь проверки таблицей — не «пустая»: счётчики её не перезагружают.
+    assert "!box.querySelector('.list, .tbl')" in js
+    css = SITE_CSS.read_text(encoding="utf-8")
+    assert "body.kb-open .dock { display: flex; }" in css  # планшет в ширину: меню не пропадает при вводе
+    # «Команда»: Excel стоит в строке выбора периода и без полосы заявок (вторая строка), и с ней (третья).
+    assert ".v-team > .btn-block { grid-column: 2; grid-row: 2;" in css
+    assert ".v-team > .pending-banner ~ .btn-block { grid-row: 3; }" in css

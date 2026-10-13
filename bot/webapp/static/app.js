@@ -1394,6 +1394,8 @@
     setDetail(false);
     nav.current = list.target;
     setHash(nav.current.hash);
+    const listTitle = list.el.querySelector('h1');
+    if (listTitle) document.title = listTitle.textContent + ' · ' + appName();
     renderTabbar();
     updateBack();
     markOpenRows();
@@ -1493,6 +1495,7 @@
     const user = (state.me && state.me.user) || {};
     if (dock) dock.remove();
     dropScreens();
+    if (WEB) document.body.classList.add('has-shell');
     dock = h('nav', { class: 'dock', 'aria-label': 'Разделы' },
       WEB ? h('div', { class: 'side-brand' }, icon('chart', 'ic-lg'), h('span', null, own(appName()))) : null,
       tabbar,
@@ -1560,7 +1563,7 @@
     const btn = h('button', { type: 'button', class: 'lang-btn', lang: next, 'aria-label': next === 'uz' ? 'Oʻzbek tiliga oʻtish' : 'Перейти на русский язык' },
       icon('globe', 'ic-sm'), own(next === 'uz' ? 'Oʻzbekcha' : 'Русский'));
     btn.addEventListener('click', async () => {
-      if (btn.disabled) return;
+      if (btn.disabled || !(await canLeave())) return;
       btn.disabled = true;
       haptic.sel();
       try {
@@ -1871,7 +1874,10 @@
       const gen = cacheGen;
       const req = spec.request();
       const hit = fresh ? null : (spec.keep ? stale : peek)(req.ep, req.opts);
-      if (hit) {
+      // Отказ («уже обработано», «сдать нельзя») по ответу из кэша не показывают: пока он там лежал, другой
+      // человек мог сдать результат или вернуть задачу — сначала спросить сервер (spec.recheck).
+      const doubt = Boolean(hit && spec.recheck && spec.recheck(hit.data));
+      if (hit && !doubt) {
         scr.loadedAt = hit.at;
         box.removeAttribute('aria-busy');  // запрос, который ещё в пути, устарел и флаг сам не снимет
         paint(hit.data);
@@ -1885,7 +1891,7 @@
         paint(old.data);
       } else if (box.dataset.state !== 'ok') box.replaceChildren.apply(box, nodes(spec.skeleton()));
       try {
-        const data = await api(req.ep, Object.assign({}, req.opts, { fresh: Boolean(fresh) }));
+        const data = await api(req.ep, Object.assign({}, req.opts, { fresh: Boolean(fresh) || doubt }));
         while (posting) await settled();
         if (!scr.alive || my !== seq) return;
         if (gen !== cacheGen) {  // пока ждали, что-то изменили: этот ответ мог быть прочитан до изменения
@@ -1908,6 +1914,11 @@
     }
 
     return run;
+  }
+
+  /** Для spec.recheck экранов решения: карточка из кэша говорит, что действие action сейчас недоступно. */
+  function cant(action) {
+    return (card) => !(card && card.task && card.task.actions && card.task.actions[action]);
   }
 
   /** Ключи раскрытых блоков <details data-key> внутри контейнера. */
@@ -2874,6 +2885,7 @@
       haptic.ok();
       toast('Задача #' + t.id + ' принята в работу', 'done');
       afterMutation();
+      if (under && current && current !== under && current.refresh) current.refresh();
     } catch (err) {
       done.replaceWith(btn);
       mark(false);
@@ -4006,7 +4018,7 @@
       seg.setLabel('results', segLabel('Результаты', fresh.review));
       seg.setLabel('proposals', segLabel('Поручения', fresh.proposals));
       // Пустое состояние: его кнопка в соседнюю очередь считается по этим же счётчикам.
-      if (box.dataset.state === 'ok' && !box.querySelector('.list')) load();
+      if (box.dataset.state === 'ok' && !box.querySelector('.list, .tbl')) load();
     };
     scr.refresh = () => load(true);
     load();
@@ -4095,6 +4107,7 @@
       request: () => ({ ep: EP.task, opts: { params: { task_id: taskId } } }),
       skeleton: skelCard,
       render: renderReview,
+      recheck: cant('review'),
       anchor: true,
     });
 
@@ -4148,7 +4161,7 @@
         haptic.ok();
         toast(withNotice('Подтверждено: ' + sb.ai.score_text, r.notice), 'done');
         afterMutation();
-        backToQueue('results');
+        if (scr.alive) backToQueue('results');
       } catch (err) {
         if (!scr.alive) return;
         primary.update({ progress: false });
@@ -4365,6 +4378,7 @@
       request: () => ({ ep: EP.task, opts: { params: { task_id: taskId } } }),
       skeleton: skelCard,
       render: renderProposal,
+      recheck: cant('approve'),
     });
 
     function renderProposal(card) {
@@ -4404,7 +4418,7 @@
           haptic.ok();
           toast(withNotice('Поручение #' + t.id + ' подтверждено — задача в работе', r.notice), 'done');
           afterMutation();
-          backToQueue('proposals');
+          if (scr.alive) backToQueue('proposals');
         } catch (err) {
           if (!scr.alive) return;
           primary.update({ progress: false });
@@ -4775,6 +4789,7 @@
     loadInto(scr, box, {
       request: () => ({ ep: EP.task, opts: { params: { task_id: taskId } } }),
       skeleton: skelForm,
+      recheck: cant('edit'),
       render: (card) => {
         const t = card.task;
         if (!t.actions || !t.actions.edit) {
@@ -4897,7 +4912,7 @@
         toast(withNotice(r.changed && r.changed.length ? 'Сохранено' : 'Изменений нет', r.notice), r.changed && r.changed.length ? 'done' : 'info');
         afterMutation();
         syncClosing();
-        await goBack();
+        if (scr.alive) await goBack();
         // Остались на экране (переход отменён) — форма снова рабочая, а не «сохраняется» навсегда.
         if (scr.alive) primary.update({ progress: false });
       } catch (err) {
@@ -5027,6 +5042,7 @@
     loadInto(scr, box, {
       request: () => ({ ep: EP.task, opts: { params: { task_id: taskId } } }),
       skeleton: skelForm,
+      recheck: cant('submit'),
       render: (card) => {
         const t = card.task;
         if (!t.actions || !t.actions.submit) {
@@ -5146,7 +5162,9 @@
           r.files ? line('', 'Файлы сохранены в чате с ботом', 'center', 'clip') : null,
           button('К моим задачам', () => go('#/my', { reset: true }), 'btn-primary btn-block mt12', null, 'tasks')));
         safely(() => doneHead.focus({ preventScroll: true }));
-        window.scrollTo(0, 0);
+        const pane = scr.el.closest('.detail');
+        if (pane) pane.scrollTop = 0;
+        else window.scrollTo(0, 0);
       } catch (err) {
         uploading = false;
         if (!scr.alive) return;
@@ -5206,7 +5224,7 @@
   function teardown() {
     dropScreens();
     current = null;
-    document.body.classList.remove('has-detail');
+    document.body.classList.remove('has-detail', 'has-shell');
     sheet.close(true);
     primary.hide('sheet');
     primary.hide('screen');
@@ -5985,6 +6003,7 @@
     lastResume = Date.now();
     if (Date.now() - state.meAt > STALE_MS) scheduleMeRefresh();
     if (current && current.refresh && Date.now() - current.loadedAt > STALE_MS) current.refresh();
+    if (under && under !== current && under.refresh && Date.now() - under.loadedAt > STALE_MS) under.refresh();
   }
 
   function isTypingTarget(el) {
@@ -6041,14 +6060,16 @@
     // Незаконченная форма при этом не трогается: её раскладку подправят стили, а ввод не пропадёт.
     [wideQuery, paneQuery].forEach((query) => {
       if (query && query.addEventListener) query.addEventListener('change', () => {
-        if (!shell || !nav.current || isAnythingDirty()) return;
+        if (!shell || !nav.current || (current && current.guard && current.guard()) || sheet.dirty()) return;
         buildShell();
         render(nav.current);
       });
     });
     if (WEB) {
       document.addEventListener('keydown', (event) => {  // Esc закрывает панель подробностей
-        if (event.key === 'Escape' && under && !sheet.isOpen() && !isTypingTarget(event.target)) goBack();
+        // Не закрывает: Esc, уже обработанный окном; Esc в поле ввода и в раскрытом списке выбора.
+        const busy = isTypingTarget(event.target) || (event.target && event.target.tagName === 'SELECT');
+        if (event.key === 'Escape' && !event.defaultPrevented && under && !sheet.isOpen() && !busy) goBack();
       });
     }
 
