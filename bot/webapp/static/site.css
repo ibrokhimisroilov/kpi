@@ -1,13 +1,20 @@
 /* Сайт «Эффективность» — добавка к app.css для обычного браузера (MINIAPP_SPEC §15).
    Подключается только страницей сайта; Mini App этот файл не загружает. Цвета, шрифт, радиусы и отступы —
-   токены app.css; свои токены — только то, чего в приложении нет (QR-код, крупное число для сверки). */
+   токены app.css; свои токены — только то, чего в приложении нет (QR-код, крупное число для сверки, размеры
+   раскладки большого экрана).
+   1. Вход. 2. Узкий экран: то же, что Mini App, плюс «Выйти». 3. Большой экран (от 1024 px): боковое меню,
+   таблицы, формы, окна. 4. Панель подробностей рядом со списком (от 1280 px). */
 
 :root {
   --qr-dark: #000000; --qr-light: #ffffff; /* QR-код всегда чёрный на белом: иначе камера его не читает */
   --fs-code: 72px; /* число, которое сверяют с ботом */
+  --side-w: 248px; /* боковое меню */
+  --detail-w: clamp(400px, 34vw, 560px); /* панель подробностей */
+  --read-w: 760px; /* колонка чтения: карточка, форма */
+  --page-w: 1240px; /* таблицы и сводки */
 }
 
-/* --- Вход --- */
+/* --- 1. Вход --- */
 
 .login { position: relative; }
 .login-top { position: absolute; top: var(--pad); right: var(--pad); z-index: 1; }
@@ -41,10 +48,189 @@
   .login-steps { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 
-/* --- «Выйти» в шапке: на узком экране — только значок --- */
+/* --- 2. Узкий экран: «Выйти» в шапке — только значок; частей бокового меню нет --- */
 
 .out-btn { margin-left: -4px; color: var(--muted); }
+.side-brand, .side-foot { display: none; }
 @media (max-width: 479px) {
   .out-btn { padding: 0 10px; }
   .out-btn > span { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+}
+
+/* --- 3. Большой экран --- */
+
+@media (min-width: 1024px) {
+  #app { max-width: none; margin: 0 0 0 var(--side-w); }
+
+  /* Боковое меню: та же панель разделов, что внизу на телефоне, — слева во всю высоту. */
+  .dock {
+    top: 0; right: auto; width: var(--side-w);
+    display: flex; flex-direction: column; gap: var(--gap);
+    padding: var(--pad) var(--gap); border-top: 0; border-right: 1px solid var(--separator);
+  }
+  .side-brand {
+    display: flex; align-items: center; gap: 10px; padding: 8px var(--gap) var(--gap);
+    font-size: var(--fs-head); font-weight: 700; letter-spacing: -.01em; color: var(--text);
+  }
+  .side-brand .ic { color: var(--accent); }
+  .tabbar { display: flex; flex-direction: column; gap: 4px; max-width: none; margin: 0; }
+  .tab {
+    flex-direction: row; justify-content: flex-start; gap: var(--gap);
+    min-height: var(--tap); padding: 0 var(--gap); border-radius: var(--radius-sm);
+    font-size: var(--fs-body); text-align: left;
+  }
+  .tab .t-ico { width: 24px; height: 24px; }
+  .tab[aria-current="page"] { background: var(--info-bg); }
+  .tab[aria-current="page"] .t-ico { background: none; }
+  .tab .badge { position: static; margin-left: auto; box-shadow: none; }
+  .side-foot {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
+    margin-top: auto; padding: var(--gap) 4px 0; border-top: 1px solid var(--separator);
+  }
+  .side-user { flex: 1 0 100%; display: flex; flex-direction: column; min-width: 0; padding: 0 8px 4px; }
+  .side-user b, .side-user span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .side-user span { color: var(--muted); font-size: var(--fs-meta); }
+  .side-foot .lang-btn { background: var(--fill); box-shadow: none; }
+  .side-foot .out-btn { margin-left: 0; }
+  .screen-head .lang-btn { display: none; } /* язык и выход — в боковом меню */
+
+  /* Экран: колонка чтения; таблицы и сводки (.v-wide) — шире. */
+  .screen { max-width: var(--read-w); margin: 0 auto; padding: 24px 32px calc(48px + var(--primary-h)); }
+  .screen.v-wide { max-width: var(--page-w); }
+  .screen-head { padding: 0; margin-bottom: var(--pad); }
+
+  /* Основная кнопка экрана: в колонке содержимого, а не во всю ширину окна. */
+  .primary-fallback { left: var(--side-w); bottom: 0; padding: var(--gap) 32px var(--pad); }
+  .primary-fallback .btn { max-width: 420px; }
+  #toast { left: calc(var(--side-w) + var(--pad)); }
+
+  /* Лист — окно по центру; его основная кнопка стоит в нём самом. */
+  .sheet-backdrop { align-items: center; padding: 24px; }
+  .sheet { max-width: 560px; max-height: calc(100vh - 48px); border-radius: var(--radius); padding-bottom: 20px; animation-name: fade-in; }
+  .sheet::before { display: none; }
+  .sheet .primary-fallback {
+    position: sticky; left: auto; right: auto; bottom: -20px; z-index: 1;
+    margin: var(--pad) 0 -20px; padding: var(--gap) 0 20px; background: var(--section);
+  }
+  .sheet .primary-fallback .btn { max-width: none; }
+
+  /* Панель фильтров «Задач»: сотрудник и поиск — в строке заголовка, статусы — под ней во всю ширину. */
+  .v-tasks { display: grid; grid-template-columns: minmax(0, 1fr) 240px 300px; column-gap: var(--gap); align-items: center; }
+  .v-tasks > * { grid-column: 1 / -1; }
+  .v-tasks > .screen-head { grid-column: 1; grid-row: 1; }
+  .v-tasks > .filter-row { grid-column: 2; grid-row: 1; margin: 0 0 var(--pad); }
+  .v-tasks > .search { grid-column: 3; grid-row: 1; margin: 0 0 var(--pad); }
+  .v-wide > .chips { flex-wrap: wrap; overflow: visible; margin: 0 0 var(--gap); padding: 4px 0; -webkit-mask-image: none; mask-image: none; }
+  .v-review > .seg { max-width: 420px; }
+
+  /* Сводки («Команда», KPI): главное число и график — рядом, таблицы и списки — под ними во всю ширину. */
+  .dash { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: var(--gap); align-items: start; }
+  .dash > * { grid-column: 1 / -1; }
+  .dash > .hero, .dash > .stats { grid-column: 1; }
+  .dash > .chart-card { grid-column: 2; grid-row: 1; align-self: stretch; }
+  .v-kpi .dash > .chart-card { grid-row: 1 / span 2; }
+  .dash > .state, .dash > [aria-hidden="true"] { grid-column: 1 / -1; grid-row: auto; }
+  .v-team > .period-nav, .v-kpi > .period-nav { max-width: 520px; }
+  .v-team { display: grid; grid-template-columns: minmax(0, 1fr) auto; column-gap: var(--gap); align-items: start; }
+  .v-team > * { grid-column: 1 / -1; }
+  .v-team > .period-nav { grid-column: 1; }
+  .v-team > .btn-block { grid-column: 2; grid-row: 3; width: auto; align-self: start; }
+  .v-team > .pending-banner ~ .btn-block { grid-row: 3; }
+  .dash > .more { width: auto; justify-self: start; }
+
+  /* Формы «Новая задача» и «Поручение»: слева — что сделать, справа — срок, приоритет и вес. */
+  .screen.v-form2 { max-width: 1080px; }
+  .v-form2 form.form { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr); column-gap: var(--gap); align-items: start; }
+  .v-form2 form.form > * { grid-column: 1 / -1; }
+  .v-form2 form.form > .card { grid-column: 2; }
+  .v-form2 form.form > .card:first-of-type { grid-column: 1; grid-row: span 4; }
+
+  /* Таблицы. */
+  /* Таблица, которая всё же шире своего места (очень длинные слова), прокручивается, а не обрезается. */
+  .tbl-wrap { background: var(--section); border-radius: var(--radius); box-shadow: var(--shadow); margin: 0 0 var(--gap); overflow-x: auto; }
+  .tbl { width: 100%; border-collapse: collapse; font-size: var(--fs-meta); }
+  .tbl th, .tbl td { padding: 10px var(--gap); text-align: left; vertical-align: middle; }
+  .tbl th:first-child, .tbl td:first-child { padding-left: var(--pad); }
+  .tbl th:last-child, .tbl td:last-child { padding-right: var(--pad); }
+  .tbl thead th {
+    font-size: var(--fs-label); font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--muted);
+    white-space: nowrap; border-bottom: 1px solid var(--separator);
+  }
+  .tbl tbody tr { cursor: pointer; }
+  .tbl tbody tr + tr td { border-top: 1px solid var(--separator); }
+  .tbl tbody tr:hover, .tbl tbody tr.is-open { background: var(--fill); }
+  .tbl tbody tr.is-open td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
+  .th-sort {
+    display: inline-flex; align-items: center; gap: 4px; margin: -6px -8px; padding: 6px 8px;
+    border: 0; border-radius: var(--radius-xs); background: none; color: inherit;
+    font: inherit; letter-spacing: inherit; text-transform: inherit;
+  }
+  .th-sort .ic { opacity: .45; }
+  .th-sort.is-on { color: var(--info); }
+  .th-sort.is-on .ic { opacity: 1; }
+  .cell-link {
+    display: block; width: 100%; padding: 0; border: 0; background: none; text-align: left;
+    color: var(--text); font-size: var(--fs-body); font-weight: 600; line-height: 1.3; overflow-wrap: break-word;
+  }
+  .c-title { width: 99%; min-width: 180px; } /* название забирает всё свободное место, остальные столбцы — по содержимому */
+  .tbl .id { color: var(--muted); white-space: nowrap; }
+  /* Метки статуса не рвутся внутри, но вторая метка может уйти на следующую строку — столбец остаётся узким. */
+  .tbl .pill { white-space: nowrap; margin: 2px 6px 2px 0; }
+  .c-id { width: 1%; }
+  .c-num { text-align: right !important; white-space: nowrap; }
+  .c-due, .c-who { white-space: nowrap; }
+  .c-status { min-width: 150px; }
+  .c-act { width: 1%; white-space: nowrap; }
+  .c-bar { width: 22%; min-width: 120px; }
+  .tbl .row-action { margin: 0; }
+
+  .list > li.is-open { background: var(--fill); }
+}
+
+/* Небольшой экран (1024–1279 px): в таблицах остаётся главное — второстепенные столбцы видны в карточке. */
+@media (min-width: 1024px) and (max-width: 1279px) {
+  .c-opt { display: none; }
+  .tbl th, .tbl td { padding-left: 8px; padding-right: 8px; }
+  .screen { padding-left: 24px; padding-right: 24px; }
+  .c-title { min-width: 140px; }
+}
+
+/* Ноутбук (1280–1439 px): таблица со всеми столбцами помещается, если ужать поля ячеек. */
+@media (min-width: 1280px) and (max-width: 1439px) {
+  .tbl th, .tbl td { padding-left: 8px; padding-right: 8px; }
+  .c-bar { display: none; }
+  .c-title { min-width: 150px; }
+  body.has-detail .c-sent { display: none; } /* «Сдано» в очереди проверки: рядом с панелью остаётся метка срока */
+}
+
+/* --- 4. Панель подробностей рядом со списком --- */
+
+@media (min-width: 1280px) {
+  body.has-detail #app { display: grid; grid-template-columns: minmax(0, 1fr) var(--detail-w); align-items: start; }
+  body.has-detail .banner-slot { grid-column: 1 / -1; }
+  .detail {
+    position: sticky; top: 0; height: 100vh; overflow-y: auto; overscroll-behavior: contain;
+    border-left: 1px solid var(--separator); background: var(--bg2);
+  }
+  .detail > .screen { max-width: none; padding: 20px 20px calc(32px + var(--primary-h)); animation: screen-in .18s ease-out; }
+  body.has-detail .main > .screen { padding-left: 24px; padding-right: 24px; }
+  /* Рядом с панелью таблица оставляет главное: второстепенные столбцы скрыты. */
+  body.has-detail .c-opt { display: none; }
+  body.has-detail .primary-fallback { left: auto; right: 0; width: var(--detail-w); padding-left: 20px; padding-right: 20px; }
+  body.has-detail .v-tasks { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+  body.has-detail .v-tasks > .screen-head { grid-column: 1 / -1; }
+  body.has-detail .v-tasks > .filter-row { grid-column: 1; grid-row: 2; }
+  body.has-detail .v-tasks > .search { grid-column: 2; grid-row: 2; }
+  body.has-detail .c-title { min-width: 140px; }
+  body.has-detail .tbl th, body.has-detail .tbl td { padding-left: 8px; padding-right: 8px; }
+  body.has-detail .tbl th:first-child, body.has-detail .tbl td:first-child { padding-left: var(--gap); }
+  body.has-detail .tbl th:last-child, body.has-detail .tbl td:last-child { padding-right: var(--gap); }
+}
+@media (min-width: 1280px) and (max-width: 1599px) {
+  body.has-detail .c-who { display: none; }
+  body.has-detail .c-due { white-space: normal; } /* дата и время — в две строки: название получает место */
+}
+/* Окно сузили, пока панель открыта, а экран не перерисован (в форме есть ввод): подробности — во всю ширину. */
+@media (max-width: 1279px) {
+  body.has-detail .main { display: none; }
 }

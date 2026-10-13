@@ -26,6 +26,23 @@
   // Сайт (обычный браузер, §15): страницу «/» отдал сервер с пометкой web. Человека называет cookie сессии,
   // вход — через подтверждение в боте; экраны, права и API — те же.
   const WEB = Boolean(CONFIG.web) && !insideTelegram;
+  // Большой экран сайта (§15.6): от 1024 px — боковое меню и таблицы, от 1280 px — панель подробностей рядом
+  // со списком. В Mini App оба условия ложны всегда: его раскладка не меняется.
+  const wideQuery = WEB && window.matchMedia ? window.matchMedia('(min-width: 1024px)') : null;
+  const paneQuery = WEB && window.matchMedia ? window.matchMedia('(min-width: 1280px)') : null;
+
+  function isWide() {
+    return Boolean(wideQuery && wideQuery.matches);
+  }
+
+  function hasPane() {
+    return Boolean(paneQuery && paneQuery.matches);
+  }
+
+  /** Строк на страницу списка: таблица большого экрана вмещает больше. */
+  function pageSize() {
+    return isWide() ? 50 : 20;
+  }
   const SVG_NS = 'http://www.w3.org/2000/svg';
 
   const CACHE_TTL_MS = 30 * 1000;      // GET-ответы живут в памяти 30 с (§11.5)
@@ -379,6 +396,9 @@
     empty: 'M21 19a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h4.5l2 2.5H19a2 2 0 0 1 2 2z',
     more: 'M4 12a1 1 0 1 0 2 0a1 1 0 1 0-2 0M11 12a1 1 0 1 0 2 0a1 1 0 1 0-2 0M18 12a1 1 0 1 0 2 0a1 1 0 1 0-2 0',
     logout: 'M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17L21 12L16 7M21 12L9 12',
+    sort: 'M8 10L12 6L16 10M8 14L12 18L16 14',
+    sortup: 'M7 14L12 9L17 14',
+    sortdown: 'M7 10L12 15L17 10',
   };
 
   /** icon('clock') -> <svg class="ic">. cls — размер и тон: ic-sm | ic-lg | ic-xl, tone-good | tone-warn | tone-bad. */
@@ -530,6 +550,7 @@
   let appRoot = null;
   let shell = null;      // каркас с вкладками (только у активного пользователя)
   let current = null;    // активный экран
+  let under = null;      // сайт, большой экран: экран списка слева, пока справа открыта панель подробностей
   const nav = { stack: [], current: null };
   const scrollMemo = new Map();
 
@@ -677,6 +698,10 @@
         return;
       }
       if (!box) return;
+      // Большой экран сайта: лист — окно по центру, и его кнопка стоит в нём, а не внизу страницы.
+      const panel = layers.sheet && isWide() ? document.querySelector('.sheet') : null;
+      const host = panel || document.body;
+      if (box.parentNode !== host) host.appendChild(box);
       if (!c) {
         box.hidden = true;
         setCssPx('--primary-h', 0);
@@ -1011,6 +1036,7 @@
     // '/api/tasks' покрывает и списки, и карточки задач; список сотрудников (/api/employees) не меняется.
     invalidate([EP.tasks[1], EP.review[1], EP.proposals[1], EP.dashboard[1], routePrefix(EP.userKpi), routePrefix(EP.weightLoad)]);
     scheduleMeRefresh();
+    if (under && under.refresh) under.refresh();  // список слева от панели подробностей — сразу в новом виде
   }
 
   function reportError(err) {
@@ -1039,6 +1065,7 @@
         }
         renderTabbar();
         if (current && current.onCounts) current.onCounts();
+        if (under && under.onCounts) under.onCounts();
       } catch (_) {
         // бейджи обновятся при следующем действии
       }
@@ -1148,18 +1175,20 @@
     ],
   };
 
+  // pane — сайт, большой экран: вложенные экраны этой вкладки (карточка, проверка, сдача) открываются панелью
+  // справа от списка, а не вместо него.
   const ROUTES = [
     { pat: /^\/team$/, role: 'manager', tab: 'team', root: true, view: TeamView },
     { pat: /^\/team\/user\/(\d+)$/, role: 'manager', tab: 'team', view: UserCardView },
-    { pat: /^\/tasks$/, role: 'manager', tab: 'tasks', root: true, view: TasksView },
+    { pat: /^\/tasks$/, role: 'manager', tab: 'tasks', root: true, pane: true, view: TasksView },
     { pat: /^\/task\/(\d+)$/, role: '*', view: TaskView },
     { pat: /^\/task\/(\d+)\/edit$/, role: 'manager', view: EditTaskView },
-    { pat: /^\/review$/, role: 'manager', tab: 'review', root: true, view: ReviewQueueView },
+    { pat: /^\/review$/, role: 'manager', tab: 'review', root: true, pane: true, view: ReviewQueueView },
     { pat: /^\/review\/(\d+)$/, role: 'manager', tab: 'review', view: ReviewView },
     { pat: /^\/proposal\/(\d+)$/, role: 'manager', tab: 'review', view: ProposalView },
     { pat: /^\/new$/, role: 'manager', tab: 'new', root: true, view: NewTaskView },
-    { pat: /^\/my$/, role: 'employee', tab: 'my', root: true, view: MyTasksView },
-    { pat: /^\/submit$/, role: 'employee', tab: 'submit', root: true, view: SubmitListView },
+    { pat: /^\/my$/, role: 'employee', tab: 'my', root: true, pane: true, view: MyTasksView },
+    { pat: /^\/submit$/, role: 'employee', tab: 'submit', root: true, pane: true, view: SubmitListView },
     { pat: /^\/submit\/(\d+)$/, role: 'employee', tab: 'submit', view: SubmitFormView },
     { pat: /^\/kpi$/, role: 'employee', tab: 'kpi', root: true, view: MyKpiView },
     { pat: /^\/propose$/, role: 'employee', tab: 'propose', root: true, view: ProposeView },
@@ -1213,7 +1242,15 @@
     if (!shell) return false;
     if (target.route.root || o.reset) nav.stack = [target.hash];
     else if (o.replace && nav.stack.length) nav.stack[nav.stack.length - 1] = target.hash;
-    else nav.stack.push(target.hash);
+    else {
+      if (o.fromList && under) nav.stack.length = 1;  // другая строка списка меняет подробности, а не копит их
+      nav.stack.push(target.hash);
+    }
+    if (o.reset && !target.route.root && hasPane()) {
+      // Прямая ссылка на карточку: слева — список её вкладки, карточка — в панели.
+      const root = resolve(tabRoot(target.route.tab || defaultTab()));
+      if (root && root.route.pane) nav.stack = [root.hash, target.hash];
+    }
     render(target, o);
     return true;
   }
@@ -1245,6 +1282,15 @@
   /** Обновить параметры адреса текущего экрана без перерисовки (период карточки и т. п.). */
   function replaceQuery(query) {
     if (!nav.current) return;
+    if (under) {
+      // Фильтр меняют в списке слева, пока справа открыты подробности: адрес списка — первая запись стека.
+      const list = resolve(withQuery(under.target.hash.split('?')[0], query));
+      if (!list) return;
+      list.tab = under.target.tab;
+      under.target = list;
+      nav.stack[0] = list.hash;
+      return;
+    }
     const base = nav.current.hash.split('?')[0];
     const target = resolve(withQuery(base, query));
     if (!target) return;
@@ -1258,28 +1304,116 @@
   function render(target, opts) {
     const o = opts || {};
     if (!shell || !target) return;
-    if (nav.current) scrollMemo.set(nav.current.hash, window.scrollY);
-    if (current) current.destroy();
+    // Сайт, большой экран: вложенный экран вкладки со списком открывается панелью справа от списка.
+    const root = !target.route.root && hasPane() && nav.stack.length > 1 ? resolve(nav.stack[0]) : null;
+    const paned = Boolean(root && root.route.pane);
+    if (!paned && under && under.target.hash === target.hash) {
+      closeDetail();  // «Назад» из панели: список слева остаётся как был
+      return;
+    }
+    if (nav.current && !under) scrollMemo.set(nav.current.hash, window.scrollY);
+    // Список слева уже на экране (он под панелью или только что был текущим) — остаётся как есть.
+    const list = paned ? under || (current && current.alive && current.target.route.root ? current : null) : null;
+    const keep = Boolean(list && list.target.hash === root.hash);
+    if (keep) {
+      if (current && current !== list) current.destroy();
+      under = list;
+    } else dropScreens();
     sheet.close(true);
     primary.hide('screen');
-    target.tab = target.route.tab || (nav.current && nav.current.tab) || defaultTab();
+    if (paned && !keep) {
+      root.tab = root.route.tab || defaultTab();
+      under = mountScreen(root, shell.main);
+      window.scrollTo(0, 0);
+    }
+    target.tab = paned ? under.target.tab : target.route.tab || (nav.current && nav.current.tab) || defaultTab();
+    setDetail(paned);
     nav.current = target;
     if (window.location.hash !== target.hash) setHash(target.hash);
+    mountScreen(target, paned ? shell.detail : shell.main);
+    if (paned) shell.detail.scrollTop = 0;
+    else window.scrollTo(0, o.back ? scrollMemo.get(target.hash) || 0 : 0);
+    const heading = current.el.querySelector('h1');
+    if (heading) safely(() => heading.focus({ preventScroll: true }));
+    markOpenRows();
+    syncClosing();
+  }
+
+  /** Создать экран target в контейнере host и сделать его текущим. */
+  function mountScreen(target, host) {
     const scr = createScreen(target);
     current = scr;
-    shell.main.replaceChildren(scr.el);
+    host.replaceChildren(scr.el);
     renderTabbar();
     updateBack();
+    mounting = target;
     try {
       target.route.view(scr, target.args, target.query);
     } catch (err) {
       if (window.console) console.error(err);
       scr.el.append(errorState(new ApiError(0, 'internal', T.generic), () => render(target)));
+    } finally {
+      mounting = null;
     }
-    window.scrollTo(0, o.back ? scrollMemo.get(target.hash) || 0 : 0);
-    const heading = scr.el.querySelector('h1');
-    if (heading) safely(() => heading.focus({ preventScroll: true }));
+    return scr;
+  }
+
+  let mounting = null;  // экран, который строится прямо сейчас (его шапка спрашивает, вложенный ли он)
+
+  /** У экрана есть «Назад»? Список слева от панели подробностей — главный экран вкладки, у него «Назад» нет. */
+  function isNested() {
+    const t = mounting || nav.current;
+    if (!t) return false;
+    if (!t.route.root) return true;
+    return nav.stack.length > 1 && !(hasPane() && t.route.pane && t.hash === nav.stack[0]);
+  }
+
+  function dropScreens() {
+    if (current) current.destroy();
+    if (under && under !== current) under.destroy();
+    under = null;
+    current = null;  // экран уничтожается один раз: следующий вызов (buildShell, затем render) его уже не тронет
+  }
+
+  /** Показать или убрать панель подробностей (она есть только на сайте). */
+  function setDetail(on) {
+    if (!shell.detail) return;
+    shell.detail.hidden = !on;
+    document.body.classList.toggle('has-detail', on);
+    if (!on) shell.detail.replaceChildren();
+  }
+
+  /** Панель подробностей закрыта: слева тот же список — с той же прокруткой и фильтрами. */
+  function closeDetail() {
+    const list = under;
+    if (current && current !== list) current.destroy();
+    under = null;
+    current = list;
+    sheet.close(true);
+    primary.hide('screen');
+    setDetail(false);
+    nav.current = list.target;
+    setHash(nav.current.hash);
+    renderTabbar();
+    updateBack();
+    markOpenRows();
     syncClosing();
+    if (list.refresh && Date.now() - list.loadedAt > STALE_MS) list.refresh();
+  }
+
+  /** Строка списка, чьи подробности открыты в панели, — выделена. */
+  function markOpenRows() {
+    if (!shell || !shell.detail) return;
+    const open = under && nav.current ? nav.current.hash : '';
+    shell.main.querySelectorAll('[data-to]').forEach((el) => {
+      el.closest('li, tr').classList.toggle('is-open', Boolean(open) && el.getAttribute('data-to') === open);
+    });
+  }
+
+  /** Переход из строки списка или таблицы. Строка слева от открытой панели меняет подробности в ней. */
+  function openRow(event, to) {
+    const el = event.currentTarget;
+    go(to, { fromList: Boolean(under && shell && shell.detail && !shell.detail.contains(el)) });
   }
 
   function updateBack() {
@@ -1345,19 +1479,33 @@
   let dockObserver = null;
 
   function measureDock() {
-    setCssPx('--dock-h', dock && dock.isConnected ? dock.offsetHeight : 0);
+    // На большом экране сайта панель разделов стоит сбоку и места снизу не занимает.
+    setCssPx('--dock-h', dock && dock.isConnected && !isWide() ? dock.offsetHeight : 0);
   }
 
   function buildShell() {
     const bannerSlot = h('div', { class: 'banner-slot' });
     const main = h('main', { id: 'main', class: 'main' });
+    // Сайт: панель подробностей (большой экран) и боковое меню — название, разделы, человек, язык, выход.
+    // На узком экране название и подвал меню скрыты стилями: остаётся нижняя панель вкладок, как в Mini App.
+    const detail = WEB ? h('aside', { class: 'detail', hidden: true, 'aria-label': 'Подробности' }) : null;
     const tabbar = h('div', { class: 'tabbar' });
+    const user = (state.me && state.me.user) || {};
     if (dock) dock.remove();
-    dock = h('nav', { class: 'dock', 'aria-label': 'Разделы' }, tabbar);
-    appRoot.replaceChildren(bannerSlot, main);
+    dropScreens();
+    dock = h('nav', { class: 'dock', 'aria-label': 'Разделы' },
+      WEB ? h('div', { class: 'side-brand' }, icon('chart', 'ic-lg'), h('span', null, own(appName()))) : null,
+      tabbar,
+      WEB ? h('div', { class: 'side-foot' },
+        h('div', { class: 'side-user' },
+          h('b', null, own(user.short_name || user.full_name)),
+          h('span', null, user.position ? own(user.position) : isManager() ? 'Начальник' : 'Сотрудник')),
+        langButton(), logoutButton()) : null);
+    appRoot.replaceChildren.apply(appRoot, nodes([bannerSlot, main, detail]));
     appRoot.removeAttribute('aria-busy');
+    document.body.classList.remove('has-detail');
     document.body.appendChild(dock);
-    shell = { bannerSlot, main, tabbar };
+    shell = { bannerSlot, main, tabbar, detail };
     if (typeof ResizeObserver === 'function') {
       if (!dockObserver) dockObserver = new ResizeObserver(measureDock);
       dockObserver.disconnect();
@@ -1436,11 +1584,12 @@
   /** Шапка экрана: заголовок h1 (на него переходит фокус), подзаголовок, «Назад» вне Telegram; actions — кнопки справа от заголовка. */
   function screenHead(title, sub, actions) {
     setDocTitle(title);
-    const nested = Boolean(nav.current && (!nav.current.route.root || nav.stack.length > 1));
+    const nested = isNested();
     const h1 = h('h1', { tabindex: '-1' }, title);
     const subEl = h('p', { class: 'sub', hidden: !sub }, sub || '');
     const el = h('header', { class: 'screen-head' },
-      nested && !back.native ? h('button', { type: 'button', class: 'back-link', onclick: () => goBack() }, icon('back'), 'Назад') : null,
+      nested && !back.native ? h('button', { type: 'button', class: 'back-link', onclick: () => goBack() },
+        under && nav.stack.length === 2 ? [icon('x'), 'Закрыть'] : [icon('back'), 'Назад']) : null,
       h('div', { class: 'head-row' }, h1, actions || null, nested ? null : langButton(), WEB && !nested ? logoutButton() : null),
       subEl);
     return {
@@ -1696,7 +1845,9 @@
       // сворачивать открытые блоки и сбрасывать прокрутку: раскрытые <details data-key> и позиция — как были.
       const again = box.dataset.state === 'ok';
       const opened = again ? openFolds(box) : null;
-      const y = window.scrollY;
+      const pane = box.closest('.detail');  // сайт: панель подробностей прокручивается сама, не вместе с окном
+      const scrollY = () => (pane ? pane.scrollTop : window.scrollY);
+      const y = scrollY();
       // spec.anchor: блок выше места чтения может вырасти (пришла оценка) — на месте остаётся не число
       // прокрутки, а первый видимый блок: текст под глазами и кнопка под пальцем не уезжают.
       const kids = again && spec.anchor ? Array.from(box.children) : [];
@@ -1709,8 +1860,10 @@
         if (opened.has(d.dataset.key)) d.open = true;
       });
       const to = at > 0 && box.children.length === kids.length
-        ? Math.max(0, Math.round(window.scrollY + box.children[at].getBoundingClientRect().top - was)) : y;
-      if (window.scrollY !== to) window.scrollTo(0, to);
+        ? Math.max(0, Math.round(scrollY() + box.children[at].getBoundingClientRect().top - was)) : y;
+      if (scrollY() === to) return;
+      if (pane) pane.scrollTop = to;
+      else window.scrollTo(0, to);
     }
 
     async function run(fresh) {
@@ -2530,11 +2683,16 @@
    * ниже — подробности. o: {to, id, title, state, meta}.
    */
   function listRow(o) {
-    return h('li', null, h('button', { type: 'button', class: 'row-main', onclick: () => go(o.to) },
+    return h('li', { class: rowOpen(o.to) }, h('button', { type: 'button', class: 'row-main', 'data-to': o.to, onclick: (event) => openRow(event, o.to) },
       h('span', { class: 'row-body' },
         h('span', { class: 'row-title' }, h('span', { class: 'id' }, '#' + o.id), own(o.title)),
         o.state ? h('span', { class: 'row-state' }, o.state) : null,
         o.meta ? h('span', { class: 'row-sub' }, o.meta) : null)));
+  }
+
+  /** Класс строки, чьи подробности сейчас открыты в панели (сайт, большой экран). */
+  function rowOpen(to) {
+    return under && nav.current && nav.current.hash === to ? 'is-open' : null;
   }
 
   /** Оценка у правого края строки состояния. */
@@ -2586,6 +2744,123 @@
       li.appendChild(accept);
     }
     return li;
+  }
+
+  /**
+   * Таблица большого экрана сайта. cols: [{label, cls, sort}] — sort: ключ сортировки (заголовок становится кнопкой);
+   * state: {key, desc} — как отсортировано сейчас; onSort(key) — нажат заголовок. Строки добавляет tableRow.
+   */
+  function dataTable(cols, state, onSort) {
+    const body = h('tbody');
+    const head = h('tr', null, cols.map((c) => {
+      const on = Boolean(c.sort && state && state.key === c.sort);
+      const mark = on ? (state.desc ? 'sortdown' : 'sortup') : 'sort';
+      return h('th', { scope: 'col', class: c.cls || null, 'aria-sort': on ? (state.desc ? 'descending' : 'ascending') : null },
+        c.sort ? h('button', { type: 'button', class: 'th-sort' + (on ? ' is-on' : ''), onclick: () => onSort(c.sort) }, c.label, icon(mark, 'ic-sm')) : c.label);
+    }));
+    return { el: h('div', { class: 'tbl-wrap' }, h('table', { class: 'tbl' }, h('thead', null, head), body)), body, cols };
+  }
+
+  /** Строка таблицы: вся строка открывает to (кнопка-название — для клавиатуры); cells — по одному на столбец. */
+  function tableRow(table, to, cells) {
+    const tr = h('tr', { class: rowOpen(to) }, cells.map((cell, i) => h('td', { class: table.cols[i].cls || null }, cell)));
+    tr.addEventListener('click', (event) => {
+      if (event.target.closest('button, a, input, select')) return;  // у кнопок в строке своё действие
+      const link = tr.querySelector('[data-to]');
+      if (link) link.click();
+    });
+    return tr;
+  }
+
+  /** Название в таблице — кнопка, которая открывает строку. */
+  function cellLink(to, text) {
+    return h('button', { type: 'button', class: 'cell-link', 'data-to': to, onclick: (event) => openRow(event, to) }, own(text));
+  }
+
+  /** Следующее состояние сортировки по нажатию на заголовок: по возрастанию -> по убыванию -> как было. */
+  function nextSort(now, key) {
+    return now === key ? '-' + key : now === '-' + key ? '' : key;
+  }
+
+  function sortState(value) {
+    return value ? { key: value.replace(/^-/, ''), desc: value.charAt(0) === '-' } : null;
+  }
+
+  /**
+   * Таблица из уже загруженных строк: сортируется на месте. cols: [{label, cls, sort, val(row), cell(row)}];
+   * mem.sort — выбранная сортировка (помнится, пока открыт сайт); to(row) — куда ведёт строка.
+   */
+  function listTable(cols, rows, mem, to) {
+    const wrap = h('div');
+    function paint() {
+      const state = sortState(mem.sort);
+      const table = dataTable(cols, state, (key) => {
+        mem.sort = nextSort(mem.sort, key);
+        paint();
+      });
+      const col = state ? cols.find((c) => c.sort === state.key) : null;
+      const empty = (v) => v === null || v === undefined || v === '';
+      const sorted = !col ? rows : rows.slice().sort((a, b) => {
+        const x = col.val(a);
+        const y = col.val(b);
+        if (empty(x) || empty(y)) return empty(x) === empty(y) ? 0 : empty(x) ? 1 : -1;  // без значения — в конце
+        const order = typeof x === 'number' && typeof y === 'number' ? x - y : String(x).localeCompare(String(y), 'ru');
+        return state.desc ? -order : order;
+      });
+      sorted.forEach((row) => table.body.appendChild(tableRow(table, to(row), cols.map((c) => c.cell(row)))));
+      wrap.replaceChildren(table.el);
+      markOpenRows();
+    }
+    paint();
+    return wrap;
+  }
+
+  const TASK_COLS = {
+    id: { label: '№', sort: 'id', cls: 'c-id' },
+    title: { label: 'Задача', sort: 'title', cls: 'c-title' },
+    assignee: { label: 'Исполнитель', sort: 'assignee', cls: 'c-who' },
+    status: { label: 'Статус', cls: 'c-status' },
+    due: { label: 'Срок', sort: 'deadline', cls: 'c-due' },
+    priority: { label: 'Приоритет', sort: 'priority', cls: 'c-opt' },
+    weight: { label: 'Вес', sort: 'weight', cls: 'c-num c-opt' },
+    score: { label: 'Оценка', sort: 'score', cls: 'c-num c-opt' },
+    returns: { label: 'Возвратов', cls: 'c-num c-opt' },
+    act: { label: '', cls: 'c-act' },
+  };
+
+  /** Строка таблицы задач: те же метки и те же действия, что у строки списка (taskRow). */
+  function taskTableRow(table, keys, t, o) {
+    const opts = o || {};
+    const to = opts.to || '#/task/' + t.id;
+    const unaccepted = t.status === 'active' && !t.accepted;
+    const open = t.status === 'active' || t.status === 'rework' || t.status === 'proposed';
+    const wait = unaccepted ? pill('Не принята', 'warn', 'wait') : null;
+    const status = t.overdue && t.status === 'rework' ? pill('на доработке', 'warn', 'undo') : t.overdue ? null : statusPill(t);
+    if (status && unaccepted) status.hidden = true;
+    const past = t.overdue || (open && Date.parse(t.deadline) <= serverNow());
+    let act = null;
+    if (opts.onAccept && unaccepted) {
+      act = h('button', {
+        type: 'button', class: 'row-action', 'aria-label': 'Принять задачу #' + t.id + ' в работу',
+        onclick: () => opts.onAccept(t, act, (accepted) => {
+          wait.hidden = accepted;
+          if (status) status.hidden = !accepted;
+        }),
+      }, icon('check', 'ic-sm'), 'Принять');
+    }
+    const cell = {
+      id: h('span', { class: 'id' }, '#' + t.id),
+      title: cellLink(to, t.title),
+      assignee: t.assignee ? own(t.assignee.short_name) : null,
+      status: [t.overdue ? pill(t.tail, 'bad', 'clock') : null, wait, status],
+      due: h('span', { class: past ? 'tone-bad' : null }, own(t.deadline_local)),
+      priority: t.status === 'proposed' ? null : priorityMark(t),
+      weight: t.status === 'proposed' ? null : t.weight + ' %',
+      score: t.status === 'done' ? own(t.final_score_text) : null,
+      returns: t.rework_count ? String(t.rework_count) : null,
+      act,
+    };
+    return tableRow(table, to, keys.map((key) => cell[key]));
   }
 
   /** «Принять» прямо в строке списка — оптимистично: кнопка сразу сменяется отметкой, метка — на «В работе». */
@@ -2665,6 +2940,7 @@
     let seq = 0;
     let page = 0;
     let list = null;
+    let table = null;  // сайт, большой экран: список — таблицей (spec.table — её столбцы)
 
     function paint(data, append) {
       if (data.counts && spec.onCounts) spec.onCounts(data.counts);
@@ -2684,14 +2960,17 @@
             notes]));
           return;
         }
-        list = h('ul', { class: 'list' });
-        box.replaceChildren.apply(box, nodes([notes, list]));
+        table = spec.table && isWide()
+          ? dataTable(spec.table.map((key) => TASK_COLS[key]), sortState(spec.sort()), spec.onSort) : null;
+        list = table ? table.body : h('ul', { class: 'list' });
+        box.replaceChildren.apply(box, nodes([notes, table ? table.el : list]));
       }
-      data.items.forEach((t) => list.appendChild(taskRow(t, spec.row)));
+      data.items.forEach((t) => list.appendChild(table ? taskTableRow(table, spec.table, t, spec.row) : taskRow(t, spec.row)));
       if (data.page + 1 < data.pages) {
         const more = button('Показать ещё', () => loadMore(more), 'more');
         box.appendChild(more);
       }
+      markOpenRows();
     }
 
     async function reload(fresh) {
@@ -2842,12 +3121,15 @@
   // ---------------------------------------------------------------------------------------------
 
   const teamPeriod = { kind: 'week', offset: 0 };
+  const teamSort = { sort: '' };
 
   function TeamView(scr) {
     const head = screenHead('Команда');
     const box = h('div');
     const pc = periodControl(teamPeriod, () => load(), box);
     const exportBtn = button('Excel-отчёт в чат', () => exportReport(), 'btn-block', null, 'table');
+    scr.el.classList.add('v-wide', 'v-team');
+    box.classList.add('dash');
     // nodes(): заявок нет — pendingBanner() даёт null, а append(null) вставил бы текст «null».
     scr.el.append.apply(scr.el, nodes([head.el, pendingBanner(), pc.el, box, exportBtn]));
 
@@ -2934,10 +3216,31 @@
       heroCard('Эффективность команды', d.team, max, plural(t.employees || rows.length, 'сотрудник', 'сотрудника', 'сотрудников'), t),
       sec('Сотрудники', rows.length ? String(rows.length) : null),
       rows.length
-        ? h('ul', { class: 'list' }, rows.map((r) => teamRow(r, max)))
+        ? isWide() ? teamTable(rows, max) : h('ul', { class: 'list' }, rows.map((r) => teamRow(r, max)))
         : emptyState('Активных сотрудников пока нет. Подтвердите заявки в чате с ботом: «Сотрудники».', 'users'),
-      h('section', { class: 'card' }, h('h2', { class: 'card-title' }, trendTitle()), trendChart(d.trend)),
+      h('section', { class: 'card chart-card' }, h('h2', { class: 'card-title' }, trendTitle()), trendChart(d.trend)),
     ];
+  }
+
+  /** «Команда» на большом экране: сотрудники — таблицей с сортировкой. */
+  function teamTable(rows, max) {
+    const stat = (key) => ({
+      sort: key, cls: 'c-num',
+      val: (r) => (r.stats || {})[key],
+      cell: (r) => h('span', { class: key === 'overdue_total' && (r.stats || {})[key] ? 'tone-bad' : null }, String((r.stats || {})[key] || 0)),
+    });
+    return listTable([
+      { label: 'Сотрудник', sort: 'name', cls: 'c-title', val: (r) => r.user.short_name,
+        cell: (r) => cellLink('#/team/user/' + r.user.id + '?kind=' + teamPeriod.kind + '&offset=' + teamPeriod.offset, r.user.short_name) },
+      { label: 'Должность', cls: 'c-who c-opt', cell: (r) => own(r.user.position) },
+      { label: 'KPI', sort: 'kpi', cls: 'c-num', val: (r) => r.kpi,
+        cell: (r) => h('b', { class: isNum(r.kpi) ? null : 'muted' }, r.kpi_text) },
+      { label: '', cls: 'c-bar c-opt', cell: (r) => kpiBar(r.kpi, max, r.kpi_text, true) },
+      Object.assign({ label: 'Выполнено' }, stat('done')),
+      Object.assign({ label: 'Просрочено' }, stat('overdue_total')),
+      Object.assign({ label: 'В работе' }, stat('in_progress')),
+      Object.assign({ label: 'На проверке' }, stat('on_review')),
+    ], rows, teamSort, (r) => '#/team/user/' + r.user.id + '?kind=' + teamPeriod.kind + '&offset=' + teamPeriod.offset);
   }
 
   /** Окно тренда фиксировано (последние недели до сегодня, §8.8) — заголовок говорит об этом прямо,
@@ -3006,11 +3309,12 @@
   /** Общий вид KPI (§11.6.1): карточка сотрудника у начальника и «Мой KPI» у сотрудника. */
   function kpiView(scr, userId, ps, self) {
     const head = screenHead(self ? 'Мой KPI' : 'Сотрудник', self ? own(state.me.user.full_name) : null);
-    const box = h('div');
+    const box = h('div', { class: 'dash' });
     const pc = periodControl(ps, () => {
       if (!self) replaceQuery({ kind: ps.kind, offset: ps.offset });
       load();
     }, box);
+    scr.el.classList.add('v-wide', 'v-kpi');
     scr.el.append(head.el, pc.el, box);
     const load = loadInto(scr, box, {
       request: () => ({ ep: EP.userKpi, opts: { params: { user_id: userId }, query: { kind: ps.kind, offset: ps.offset } } }),
@@ -3062,7 +3366,7 @@
     }
 
     // График последних недель не зависит от выбранного периода — он ниже того, что от периода зависит.
-    out.push(h('section', { class: 'card' }, h('h2', { class: 'card-title' }, trendTitle()), trendChart(d.trend)));
+    out.push(h('section', { class: 'card chart-card' }, h('h2', { class: 'card-title' }, trendTitle()), trendChart(d.trend)));
     out.push(historySection(scr, d, ps, userId, self));
     return out;
   }
@@ -3131,7 +3435,7 @@
   // 12. Списки задач: начальник (#/tasks) и сотрудник (#/my, #/submit)
   // ---------------------------------------------------------------------------------------------
 
-  const tasksFilter = { status: 'open', q: '', userId: '' };
+  const tasksFilter = { status: 'open', q: '', userId: '', sort: '' };
 
   function TasksView(scr, args, query) {
     // ?user=ID&status=… — переход из карточки сотрудника. Адрес потом следует за выбором фильтров
@@ -3146,9 +3450,10 @@
       list.reload();
     });
     // Поиск свёрнут в значок у заголовка: строка поиска открыта, пока ею пользуются или в ней есть запрос.
-    search.el.hidden = !tasksFilter.q;
+    // На большом экране сайта она открыта всегда — в панели фильтров, рядом с сотрудником и статусами.
+    search.el.hidden = !tasksFilter.q && !isWide();
     const toggle = h('button', {
-      type: 'button', class: 'icon-btn', 'aria-label': 'Поиск задач', 'aria-expanded': String(!search.el.hidden),
+      type: 'button', class: 'icon-btn', hidden: isWide(), 'aria-label': 'Поиск задач', 'aria-expanded': String(!search.el.hidden),
       onclick: () => {
         const show = search.el.hidden;
         search.el.hidden = !show;
@@ -3178,6 +3483,7 @@
       if (query.has('user') || query.has('status')) replaceQuery({ user: tasksFilter.userId || null, status: tasksFilter.status });
     }
     const box = h('div');
+    scr.el.classList.add('v-wide', 'v-tasks');
     scr.el.append(head.el, search.el, h('div', { class: 'filter-row' }, select), chips.el, box);
 
     api(EP.employees).then((data) => {
@@ -3191,9 +3497,16 @@
     const list = taskList(scr, box, {
       query: (page) => ({
         scope: tasksFilter.userId ? 'emp' : 'all', user_id: tasksFilter.userId || null,
-        status: tasksFilter.status, q: tasksFilter.q.trim() || null, page, limit: 20, counts: page === 0 ? 1 : null,
+        status: tasksFilter.status, q: tasksFilter.q.trim() || null, page, limit: pageSize(), counts: page === 0 ? 1 : null,
+        sort: isWide() ? tasksFilter.sort || null : null,
       }),
       row: { assignee: true },
+      table: ['id', 'title', 'assignee', 'status', 'due', 'priority', 'weight', 'score'],
+      sort: () => tasksFilter.sort,
+      onSort(key) {
+        tasksFilter.sort = nextSort(tasksFilter.sort, key);
+        list.reload();
+      },
       onCounts: chips.setCounts,
       searchText: () => tasksFilter.q.trim(),
       clearSearch: () => search.reset(),
@@ -3215,7 +3528,7 @@
     ]);
   }
 
-  const myFilter = { status: 'open' };
+  const myFilter = { status: 'open', sort: '' };
 
   function MyTasksView(scr) {
     const head = screenHead('Мои задачи');
@@ -3224,10 +3537,20 @@
       list.reload();
     });
     const box = h('div');
+    scr.el.classList.add('v-wide');
     scr.el.append(head.el, chips.el, box);
     const list = taskList(scr, box, {
-      query: (page) => ({ scope: 'my', status: myFilter.status, page, limit: 20, counts: page === 0 ? 1 : null }),
+      query: (page) => ({
+        scope: 'my', status: myFilter.status, page, limit: pageSize(), counts: page === 0 ? 1 : null,
+        sort: isWide() ? myFilter.sort || null : null,
+      }),
       row: { onAccept: acceptInline },
+      table: ['id', 'title', 'status', 'due', 'priority', 'weight', 'score', 'act'],
+      sort: () => myFilter.sort,
+      onSort(key) {
+        myFilter.sort = nextSort(myFilter.sort, key);
+        list.reload();
+      },
       onCounts: chips.setCounts,
       showAll: chips.showAll,
     });
@@ -3238,13 +3561,14 @@
   function SubmitListView(scr) {
     const head = screenHead('Сдать результат', 'Выберите задачу, по которой сдаёте результат');
     const box = h('div');
+    scr.el.classList.add('v-wide');
     scr.el.append(head.el, box);
     const load = loadInto(scr, box, {
       request: () => ({ ep: EP.tasks, opts: { query: { scope: 'my', status: 'open', limit: 50 } } }),
       skeleton: () => skelList(4),
       stale: true,
       render: (d) => (d.items.length
-        ? h('ul', { class: 'list' }, d.items.map(submitRow))
+        ? isWide() ? submitTable(d.items) : h('ul', { class: 'list' }, d.items.map(submitRow))
         // Сдавать нечего, но задачи есть (на проверке, на подтверждении) — кнопка покажет их все.
         : emptyState('Нет задач для сдачи. Здесь появятся задачи в работе и на доработке.', 'inbox',
           counts().review || counts().proposed ? button('Мои задачи', () => {
@@ -3254,6 +3578,14 @@
     });
     scr.refresh = () => load(true);
     load();
+  }
+
+  /** «Сдать» на большом экране: те же задачи таблицей, строка ведёт на форму сдачи. */
+  function submitTable(items) {
+    const keys = ['id', 'title', 'status', 'due', 'priority', 'weight', 'returns'];
+    const table = dataTable(keys.map((key) => Object.assign({}, TASK_COLS[key], { sort: null })), null, null);
+    items.forEach((t) => table.body.appendChild(taskTableRow(table, keys, t, { to: '#/submit/' + t.id })));
+    return table.el;
   }
 
   /** Строка списка «Сдать»: та же строка задачи, ведёт на форму сдачи. */
@@ -3626,7 +3958,7 @@
   // 14. Проверка: очередь, сдача, поручение
   // ---------------------------------------------------------------------------------------------
 
-  const reviewState = { seg: 'results' };
+  const reviewState = { seg: 'results', sort: '', proposalsSort: '' };
 
   function segLabel(text, n) {
     return isNum(n) ? text + ' (' + n + ')' : text;
@@ -3647,6 +3979,7 @@
       { value: 'proposals', label: segLabel('Поручения', c.proposals) },
     ], reviewState.seg, pick, 'Что проверять');
     const box = h('div', { role: 'tabpanel' });
+    scr.el.classList.add('v-wide', 'v-review');
     scr.el.append(head.el, seg.el, box);
     const load = loadInto(scr, box, {
       request: () => ({ ep: reviewState.seg === 'proposals' ? EP.proposals : EP.review }),
@@ -3656,6 +3989,7 @@
         const items = d.items || [];
         const mine = reviewState.seg === 'proposals';
         seg.setLabel(reviewState.seg, mine ? segLabel('Поручения', items.length) : segLabel('Результаты', items.length));
+        if (items.length && isWide()) return mine ? proposalsTable(items) : reviewTable(items);
         if (items.length) return h('ul', { class: 'list' }, mine ? items.map((it) => proposalRow(it.task)) : items.map(reviewRow));
         // Пусто здесь, а в соседней очереди что-то ждёт (бейдж вкладки считает обе) — кнопка ведёт туда.
         const to = mine ? 'results' : 'proposals';
@@ -3700,6 +4034,42 @@
         sb && sb.attempt > 1 ? 'попытка ' + sb.attempt : null,
       ]),
     });
+  }
+
+  /** Очередь проверки на большом экране: таблица с сортировкой (вся очередь уже загружена). */
+  function reviewTable(items) {
+    const who = (it) => (it.task.assignee ? it.task.assignee.short_name : '');
+    return listTable([
+      { label: '№', sort: 'id', cls: 'c-id', val: (it) => it.task.id, cell: (it) => h('span', { class: 'id' }, '#' + it.task.id) },
+      { label: 'Задача', sort: 'title', cls: 'c-title', val: (it) => it.task.title, cell: (it) => cellLink('#/review/' + it.task.id, it.task.title) },
+      { label: 'Сотрудник', sort: 'who', cls: 'c-who', val: who, cell: (it) => own(who(it)) },
+      { label: 'Сдано', sort: 'sent', cls: 'c-due c-sent', val: (it) => (it.submission ? it.submission.created_at : ''),
+        cell: (it) => (it.submission ? own(it.submission.created_local) : null) },
+      { label: 'Срок', cls: 'c-status', cell: (it) => {
+        const sb = it.submission;
+        return sb ? pill(sb.late_text, sb.is_late ? 'bad' : 'good', sb.is_late ? 'clock' : 'check') : null;
+      } },
+      { label: 'Попытка', sort: 'attempt', cls: 'c-num c-opt', val: (it) => (it.submission ? it.submission.attempt : null),
+        cell: (it) => (it.submission ? String(it.submission.attempt) : null) },
+      { label: 'Оценка', sort: 'score', cls: 'c-num', val: (it) => (it.submission && it.submission.ai ? it.submission.ai.score : null),
+        cell: (it) => {
+          const ai = it.submission && it.submission.ai;
+          return h('span', { class: 'row-score' },
+            h('span', { 'aria-hidden': 'true' }, icon(ai ? (ai.source === 'ai' ? 'ai' : 'calc') : 'wait', 'ic-sm'), ai ? ' ' + ai.score_text : null),
+            h('span', { class: 'sr-only' }, ai ? 'Предварительная оценка ' + ai.score_text : 'Оценка рассчитывается'));
+        } },
+    ], items, reviewState, (it) => '#/review/' + it.task.id);
+  }
+
+  function proposalsTable(items) {
+    const mem = { get sort() { return reviewState.proposalsSort; }, set sort(v) { reviewState.proposalsSort = v; } };
+    const who = (it) => (it.task.assignee ? it.task.assignee.short_name : '');
+    return listTable([
+      { label: '№', sort: 'id', cls: 'c-id', val: (it) => it.task.id, cell: (it) => h('span', { class: 'id' }, '#' + it.task.id) },
+      { label: 'Поручение', sort: 'title', cls: 'c-title', val: (it) => it.task.title, cell: (it) => cellLink('#/proposal/' + it.task.id, it.task.title) },
+      { label: 'Сотрудник', sort: 'who', cls: 'c-who', val: who, cell: (it) => own(who(it)) },
+      { label: 'Срок', sort: 'due', cls: 'c-due', val: (it) => it.task.deadline, cell: (it) => own(it.task.deadline_local) },
+    ], items, mem, (it) => '#/proposal/' + it.task.id);
   }
 
   /** Строка очереди поручений: та же строка задачи, ведёт на подтверждение. */
@@ -4105,6 +4475,7 @@
     const d = drafts.newTask;
     const head = screenHead('Новая задача', 'Сотрудник получит её в чате с ботом');
     const box = h('div');
+    scr.el.classList.add('v-form2');
     scr.el.append(head.el, box);
     scr.dirty = () => draftDirty(d);
     const load = loadInto(scr, box, {
@@ -4297,6 +4668,7 @@
     const d = drafts.propose;
     const head = screenHead('Поручение', 'Внесите поручение, полученное устно: начальник подтвердит его.');
     const holder = h('div');
+    scr.el.classList.add('v-form2');
     scr.el.append(head.el, holder);
     scr.dirty = () => draftDirty(d);
     const build = () => holder.replaceChildren(proposeForm(scr, d, build));
@@ -4832,8 +5204,9 @@
   };
 
   function teardown() {
-    if (current) current.destroy();
+    dropScreens();
     current = null;
+    document.body.classList.remove('has-detail');
     sheet.close(true);
     primary.hide('sheet');
     primary.hide('screen');
@@ -5528,6 +5901,18 @@
     "Нет доступа к микрофону. Разрешите микрофон для этого сайта в браузере и попробуйте ещё раз.": "Mikrofonga ruxsat yoʻq. Brauzerda shu sayt uchun mikrofonga ruxsat bering va qayta urinib koʻring.",
     "Шаг {}. Нажмите это число в чате с ботом": "{}-qadam. Bot bilan chatda shu sonni bosing",
     "Сообщение от бота уже должно быть в Telegram. Если его нет — начните заново.": "Botdan xabar Telegramda boʻlishi kerak. Agar u boʻlmasa — qaytadan boshlang.",
+    "Вес": "Vazn",
+    "Возвратов": "Qaytarishlar",
+    "Выполнено": "Bajarildi",
+    "Должность": "Lavozim",
+    "Исполнитель": "Ijrochi",
+    "Начальник": "Boshliq",
+    "Оценка": "Baho",
+    "Подробности": "Tafsilotlar",
+    "Попытка": "Urinish",
+    "Просрочено": "Muddati oʻtgan",
+    "Сдано": "Topshirildi",
+    "Статус": "Holat",
     /*UZ-END*/
   };
 
@@ -5652,6 +6037,20 @@
       }
     });
     watchKeyboard();
+    // Сайт: окно расширили или сузили через границу раскладки — экран рисуется заново в новом виде.
+    // Незаконченная форма при этом не трогается: её раскладку подправят стили, а ввод не пропадёт.
+    [wideQuery, paneQuery].forEach((query) => {
+      if (query && query.addEventListener) query.addEventListener('change', () => {
+        if (!shell || !nav.current || isAnythingDirty()) return;
+        buildShell();
+        render(nav.current);
+      });
+    });
+    if (WEB) {
+      document.addEventListener('keydown', (event) => {  // Esc закрывает панель подробностей
+        if (event.key === 'Escape' && under && !sheet.isOpen() && !isTypingTarget(event.target)) goBack();
+      });
+    }
 
     // До ответа сервера язык — по Telegram; дальше — выбранный человеком (Me.lang).
     const tgUser = tg && tg.initDataUnsafe ? tg.initDataUnsafe.user : null;

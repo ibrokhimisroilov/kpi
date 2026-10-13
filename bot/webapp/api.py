@@ -570,6 +570,32 @@ def _list_order() -> list[Any]:
     ]
 
 
+# Сортировка таблиц сайта (§15.6): ключ параметра ``sort`` -> выражения ORDER BY по возрастанию; «-ключ» —
+# по убыванию. За основным столбцом идёт прежний порядок списка: равные строки не «прыгают» между страницами.
+_PRIORITY_RANK = case((Task.priority == Priority.HIGH, 0), (Task.priority == Priority.MEDIUM, 1), else_=2)
+_SORT_COLUMNS: dict[str, Any] = {
+    "deadline": Task.deadline,
+    "title": Task.title,
+    "assignee": User.full_name,
+    "priority": _PRIORITY_RANK,
+    "weight": Task.weight,
+    "score": Task.final_score,
+    "id": Task.id,
+}
+SORT_HINT = "Параметр «sort»: " + ", ".join(_SORT_COLUMNS) + " (с «-» — по убыванию)"
+
+
+def _sort_order(sort: str | None) -> list[Any]:
+    """ORDER BY для ``sort``; None — прежний порядок списка (приложение в Telegram параметр не передаёт)."""
+    if not sort:
+        return _list_order()
+    descending = sort.startswith("-")
+    column = _SORT_COLUMNS[sort.lstrip("-")]
+    # Задачи без оценки — всегда в конце, в какую бы сторону ни сортировали.
+    first = (column.desc() if descending else column.asc()).nulls_last()
+    return [first, *_list_order()]
+
+
 def _last_sub(column: Any) -> Any:
     """Значение столбца последней сдачи задачи (как Task.last_submission) — коррелированный подзапрос."""
     return (
@@ -659,6 +685,7 @@ async def _task_page(
     limit: int,
     offset: int,
     with_total: bool = True,
+    sort: str | None = None,
 ) -> tuple[list[TaskRowData], int | None]:
     """Страница и (with_total) общее число строк — одним запросом: ``count(*) OVER ()`` считается до
     LIMIT/OFFSET. Страница за пределами — строк нет, итог неизвестен (None)."""
@@ -669,7 +696,7 @@ async def _task_page(
         select(*columns)
         .join(User, User.id == Task.assignee_id)
         .where(*_row_filters(assignee_id, statuses, overdue_only, now))
-        .order_by(*_list_order())
+        .order_by(*_sort_order(sort))
         .offset(non_negative(offset))
         .limit(sql_limit(limit))
     )
@@ -706,6 +733,7 @@ async def search_task_rows(
     overdue_only: bool,
     now: datetime,
     scan_limit: int = SEARCH_SCAN_LIMIT,
+    sort: str | None = None,
 ) -> tuple[list[TaskRowData], bool]:
     """Поиск: до scan_limit строк выборки одним запросом (те же фильтры и порядок), совпадения — в Python:
     название, ожидаемый результат, ФИО исполнителя; «#12» / «12» — ещё и номер задачи.
@@ -714,7 +742,7 @@ async def search_task_rows(
         select(*_row_columns(with_text=True))
         .join(User, User.id == Task.assignee_id)
         .where(*_row_filters(assignee_id, statuses, overdue_only, now))
-        .order_by(*_list_order())
+        .order_by(*_sort_order(sort))
         .limit(max(scan_limit, 0) + 1)
     )
     rows = [_task_row(row, with_text=True) for row in await session.execute(stmt)]
@@ -1174,17 +1202,21 @@ async def list_tasks(request: web.Request) -> web.Response:
     if want_counts not in ("0", "1"):
         raise _bad("Параметр «counts»: 0 или 1")
     text = _search_text(query.get("q"))
+    # Сортировка — для таблиц сайта (§15.6); параметра нет — порядок прежний.
+    sort = (query.get("sort") or "").strip() or None
+    if sort is not None and sort.removeprefix("-") not in _SORT_COLUMNS:
+        raise _bad(SORT_HINT)
     statuses, overdue_only = status_filter(status, viewer.is_manager)
     now = utcnow()
     filters = {"assignee_id": assignee_id, "statuses": statuses, "overdue_only": overdue_only, "now": now}
 
     truncated = False
     if text:
-        found, truncated = await search_task_rows(session, text, scan_limit=SEARCH_SCAN_LIMIT, **filters)
+        found, truncated = await search_task_rows(session, text, scan_limit=SEARCH_SCAN_LIMIT, sort=sort, **filters)
         total = len(found)
         items = found[page * limit : (page + 1) * limit]
     else:
-        items, counted = await _task_page(session, limit=limit, offset=page * limit, **filters)
+        items, counted = await _task_page(session, limit=limit, offset=page * limit, sort=sort, **filters)
         total = counted if counted is not None else await count_task_rows(session, **filters)
     data: dict[str, Any] = {
         "items": [ser.task_row(row, now) for row in items],

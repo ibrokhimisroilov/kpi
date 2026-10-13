@@ -257,3 +257,42 @@ async def test_cookies_are_host_bound_and_secure_over_https(ma: MiniApp) -> None
     lowered = line.lower()
     assert line.startswith("__Host-kpi_login=") and "secure" in lowered and "httponly" in lowered
     assert "samesite=strict" in lowered and "path=/" in lowered and "domain=" not in lowered
+
+
+# --- Большой экран (§15.6) ---------------------------------------------------------------------------------
+
+
+def test_big_screen_layout_exists_only_on_the_site() -> None:
+    """Раскладка большого экрана включается только на сайте: оба условия в app.js начинаются с WEB, а её
+    стили лежат в site.css, который страница Mini App не подключает."""
+    js = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    assert "const wideQuery = WEB && window.matchMedia ? window.matchMedia('(min-width: 1024px)') : null;" in js
+    assert "const paneQuery = WEB && window.matchMedia ? window.matchMedia('(min-width: 1280px)') : null;" in js
+    for name in ("isWide", "hasPane"):
+        body = js.split(f"function {name}() {{", 1)[1].split("}", 1)[0]
+        assert "Query" in body and "matches" in body, name
+    app_css = (STATIC_DIR / "app.css").read_text(encoding="utf-8")
+    for selector in (".tbl", ".side-brand", ".side-foot", ".detail", ".has-detail", ".v-wide", ".th-sort"):
+        assert selector not in app_css, f"{selector}: стили большого экрана — только в site.css"
+    assert "site.css" not in (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+
+
+def test_big_screen_styles_are_behind_width_rules() -> None:
+    """Всё, что меняет раскладку, стоит под условием ширины: на узком экране сайт выглядит как Mini App."""
+    css = SITE_CSS.read_text(encoding="utf-8")
+    wide = css.index("@media (min-width: 1024px)")
+    narrow_part = css[:wide]
+    for selector in (".dock", ".tabbar", ".tab ", ".screen ", "#app", ".sheet", ".primary-fallback", ".tbl"):
+        assert selector not in narrow_part, f"{selector} меняется и на узком экране"
+    assert "@media (min-width: 1280px)" in css[wide:]
+    assert ".side-brand, .side-foot { display: none; }" in narrow_part  # части бокового меню на телефоне скрыты
+
+
+def test_task_table_columns_match_the_server_sort_keys() -> None:
+    """Ключи сортировки в заголовках таблицы задач — те, что понимает сервер."""
+    from bot.webapp import api
+
+    js = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    block = js.split("const TASK_COLS = {", 1)[1].split("};", 1)[0]
+    keys = set(re.findall(r"sort: '(\w+)'", block))
+    assert keys and keys <= set(api._SORT_COLUMNS), keys - set(api._SORT_COLUMNS)
