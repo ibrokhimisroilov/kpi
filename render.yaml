@@ -47,3 +47,12 @@ services:
       # Запасной бесплатный AI (GROQ_API_KEY, CLOUDFLARE_*, MISTRAL_API_KEY, OPENROUTER_API_KEY)
       # не входит в Blueprint, чтобы при создании было только 5 полей. Добавляется потом:
       # Render → kpi-bot → Environment (docs/DEPLOY_RENDER.md, «Запасной бесплатный AI»).
+
+  # Красивая ссылка для людей: https://samaradorlik.onrender.com — страница-указатель (deploy/link), которая
+  # сразу переводит на адрес бота. Бесплатный статический сайт Render: тарифа, секретов и сервера у него нет.
+  # Бот, Mini App и сайт от неё не зависят.
+  - type: web
+    name: samaradorlik
+    runtime: static
+    buildCommand: echo "nothing to build"
+    staticPublishPath: ./deploy/link

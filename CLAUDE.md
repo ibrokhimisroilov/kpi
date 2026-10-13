@@ -41,6 +41,8 @@ AI сравнивает план и факт, начальник подтвер�
 ## Продакшен
 
 - **Render Free**, сервис `kpi-bot`, https://kpi-bot-ui7q.onrender.com, регион Frankfurt, режим webhook.
+  Красивая ссылка для людей — https://samaradorlik.onrender.com: отдельный статический сайт Render `samaradorlik`
+  (`deploy/link/index.html`, блок в `render.yaml`), который сразу переводит на адрес бота; бот от него не зависит.
   Бот сам себя будит (каждые 10 мин) и сам запускает задания (каждые 5 мин).
 - **GitHub** `ibrokhimisroilov/kpi`, ветка `main`. **Деплой = `git push origin main`** — Render
   пересобирает сам за 2–3 мин. Коммит только с документацией: добавить `[skip render]` в сообщение.
