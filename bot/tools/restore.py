@@ -65,6 +65,7 @@ TABLE_LABELS: dict[str, str] = {
     "digest_log": "еженедельные сводки",
     "job_log": "задания по расписанию",
     "fsm_state": "незавершённые диалоги",
+    "task_templates": "личные шаблоны",
 }
 
 

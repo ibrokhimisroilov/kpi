@@ -14,6 +14,7 @@ from typing import Any
 
 from sqlalchemy import text
 
+from bot.db.models import TaskTemplate
 from bot.webapp import api
 
 from .conftest import EMP, EMP2, MGR, MiniApp, Resp
@@ -29,6 +30,8 @@ OPEN_TO_EMPLOYEE = {
     ("POST", "/api/voice"),
     ("POST", "/api/proposals"),
     ("GET", "/api/dashboard"),
+    ("GET", "/api/templates"),   # свои шаблоны поручений (§16)
+    ("POST", "/api/templates"),
 }
 
 
@@ -48,13 +51,14 @@ async def snapshot(ma: MiniApp) -> dict[str, list[tuple[Any, ...]]]:
         "submissions": "SELECT id, task_id, decision, final_score, review_comment FROM submissions ORDER BY id",
         "events": "SELECT count(*) FROM task_events",
         "users": "SELECT id, role, status, lang FROM users ORDER BY id",
+        "templates": "SELECT id, owner_id, title, expected_result, weight, assignee_id FROM task_templates ORDER BY id",
     }
     async with ma.db() as session:
         return {name: [tuple(row) for row in await session.execute(text(sql))] for name, sql in queries.items()}
 
 
 def test_every_route_placeholder_is_known() -> None:
-    known = {"task_id": 1, "sub_id": 1, "user_id": 1}
+    known = {"task_id": 1, "sub_id": 1, "user_id": 1, "template_id": 1}
     for _method, path in api.ROUTES:
         assert "{" not in fill(path, known), path
     assert {route for route in OPEN_TO_EMPLOYEE if route not in api.ROUTES} == set()
@@ -70,6 +74,11 @@ async def test_employee_with_foreign_numbers_is_refused_exactly_as_in_telegram(m
     sub_ids = {
         kind: (await ma.task(foreign[kind])).submissions[0].id for kind in ("rework", "submitted", "done")
     }
+    async with ma.db() as session:  # чужие шаблоны: сотрудника и начальника
+        rows = [TaskTemplate(owner_id=owner.id, title="Чужой шаблон", expected_result="Не для Иванова") for owner in (emp2, mgr)]
+        session.add_all(rows)
+        await session.commit()
+        foreign_templates = [row.id for row in rows]
     browser = await sign_in(ma, EMP)
     before = await snapshot(ma)
     sent = len(ma.api.calls)
@@ -83,7 +92,8 @@ async def test_employee_with_foreign_numbers_is_refused_exactly_as_in_telegram(m
         for kind, task_id in foreign.items():
             if "sub_id" in names and kind not in sub_ids:
                 continue
-            url = fill(path, {"task_id": task_id, "sub_id": sub_ids.get(kind, 0), "user_id": emp2.id})
+            template_id = foreign_templates[len(kind) % 2]
+            url = fill(path, {"task_id": task_id, "sub_id": sub_ids.get(kind, 0), "user_id": emp2.id, "template_id": template_id})
             body = None if method == "GET" else {}
             in_telegram = await ma.request(method, url, as_=EMP, json=body)
             on_site = await browser.request(method, url, json=body)
@@ -93,7 +103,7 @@ async def test_employee_with_foreign_numbers_is_refused_exactly_as_in_telegram(m
             if names == {"user_id"}:
                 break  # вид задачи для адреса с человеком не важен
 
-    assert checked > 60  # 7 адресов задач × 8 видов, 5 адресов сдач × 3, 2 адреса людей
+    assert checked > 75  # 7 адресов задач × 8 видов, 5 адресов сдач × 3, 2 адреса людей, 2 адреса шаблонов × 8
     assert await snapshot(ma) == before
     assert len(ma.api.calls) == sent  # и ни одного сообщения в Telegram
 

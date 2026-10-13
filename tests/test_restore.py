@@ -39,6 +39,7 @@ from bot.db.models import (
     Task,
     TaskEvent,
     TaskStatus,
+    TaskTemplate,
     User,
     UserStatus,
 )
@@ -85,6 +86,8 @@ async def seed_source(sessionmaker: async_sessionmaker[AsyncSession]) -> None:
                       data={"weight": 30, "changes": {"title": ["Старое", "Анализ договоров"]}}),
             TaskEvent(id=42, task_id=active.id, actor_id=None, type=EventType.REMINDER, data={"kind": "before_1d"}),
             ReminderLog(id=51, task_id=active.id, kind="before_1d"),
+            TaskTemplate(id=81, owner_id=manager.id, title="Сверка с поставщиками", expected_result="Сверить 60 актов",
+                         plan_value=60.0, plan_unit="актов", weight=25, assignee_id=employee.id),
             DigestLog(id=61, period_start=datetime(2026, 9, 28, 19, 0)),
             JobLog(id=71, job="backup", key="2026-10-01"),
             FsmState(key="fsm:42:2001:2001:default", state="SubmitSG:fact", data={"task_id": 15, "files": []}),
@@ -149,9 +152,9 @@ async def test_round_trip_sqlite(source: Path, backup_file: Path, target: Path) 
     assert rows_by_table(target) == rows_by_table(source)
     assert result.counts == {
         "users": 3, "tasks": 2, "submissions": 1, "attachments": 1, "task_events": 2,
-        "reminder_log": 1, "digest_log": 1, "job_log": 1, "fsm_state": 1,
+        "reminder_log": 1, "digest_log": 1, "job_log": 1, "fsm_state": 1, "task_templates": 1,
     }
-    assert result.total == 13 and result.missing_tables == [] and result.cleared_rows == 0
+    assert result.total == 14 and result.missing_tables == [] and result.cleared_rows == 0
     assert result.fixed_values == 0 and result.sequences_reset is False
 
     # Бот открывает восстановленную базу: связи на месте, новые записи получают свободные id.
@@ -360,12 +363,12 @@ async def test_round_trip_postgres(source: Path, backup_file: Path, tmp_path: Pa
     await engine.dispose()
 
     result = await restore_tool.restore(backup_file, PG_URL)
-    assert result.sequences_reset is True and result.total == 13
+    assert result.sequences_reset is True and result.total == 14
 
     with pytest.raises(RestoreError, match="--force"):
         await restore_tool.restore(backup_file, PG_URL)
     result = await restore_tool.restore(backup_file, PG_URL, force=True)
-    assert result.cleared_rows == 13
+    assert result.cleared_rows == 14
 
     engine = make_engine(PG_URL)
     try:
@@ -413,7 +416,7 @@ async def test_cli_postgres_with_separate_password(
 
     assert await run_cli([str(backup_file)]) == 0
     captured = capsys.readouterr()
-    assert "Всего: 13." in captured.out and "Счётчики номеров (id) PostgreSQL сдвинуты" in captured.out
+    assert "Всего: 14." in captured.out and "Счётчики номеров (id) PostgreSQL сдвинуты" in captured.out
     if real.password not in describe_url(PG_URL):  # короткий пароль вроде «postgres» совпал бы с именем
         assert real.password not in captured.out + captured.err
 
@@ -447,14 +450,14 @@ async def test_cli_restores_and_prints_summary(
     out = capsys.readouterr().out
     assert "Готово: копия kpi_backup_2026-10-02.db загружена" in out
     assert "задачи (tasks): 2" in out and "сотрудники и начальники (users): 3" in out
-    assert "Всего: 13." in out
+    assert "Всего: 14." in out
 
     assert await run_cli([str(backup_file)]) == 1  # второй раз — база уже не пустая
     err = capsys.readouterr().err
     assert "Ошибка:" in err and "--force" in err
 
     assert await run_cli([str(backup_file), "--force"]) == 0
-    assert "Перед загрузкой из базы удалено строк: 13." in capsys.readouterr().out
+    assert "Перед загрузкой из базы удалено строк: 14." in capsys.readouterr().out
 
 
 async def test_cli_connection_error_hides_password(

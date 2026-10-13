@@ -62,6 +62,7 @@ from bot.db.models import (
     Submission,
     Task,
     TaskStatus,
+    TaskTemplate,
     User,
     UserStatus,
 )
@@ -70,6 +71,7 @@ from bot.middlewares import load_user
 from bot.services import export as export_service
 from bot.services import kpi, periods, proposal_flow
 from bot.services import tasks as tasks_svc
+from bot.services import templates as templates_svc
 from bot.services import users as users_svc
 from bot.services import weblogin
 from bot.services.dbsafe import clip_file_name, is_db_id, non_negative, sql_limit
@@ -189,6 +191,8 @@ NOT_REGISTERED = "Вы ещё не зарегистрированы. Откро�
 MANAGER_ONLY = "Действие доступно только начальнику"
 EMPLOYEE_ONLY = "Действие доступно только сотруднику"
 TASK_NOT_FOUND = "Задача не найдена."
+TEMPLATE_NOT_FOUND = "Шаблон не найден."
+TEMPLATE_TASK_ONLY = "Номер задачи передаётся без других полей"
 SUB_NOT_FOUND = "Результат не найден."
 USER_NOT_FOUND = "Сотрудник не найден."
 NOT_FOUND = "Не найдено."
@@ -2246,6 +2250,95 @@ async def weight_load(request: web.Request) -> web.Response:
     )
 
 
+# --- Личные шаблоны (§16) -----------------------------------------------------------------------------------
+
+_TEMPLATE_FIELDS = ("title", "expected_result", "plan_value", "plan_unit")
+_TEMPLATE_MANAGER_FIELDS = ("priority", "weight", "assignee_id")
+
+
+def _template_allowed(viewer: User) -> tuple[str, ...]:
+    """Поля шаблона, которые вправе прислать этот человек: сотрудник — название, результат и план; начальник —
+    ещё приоритет, вес и исполнителя. Всё остальное (срок, статус, оценки…) — «неизвестное поле», 400."""
+    return (*_TEMPLATE_FIELDS, *(_TEMPLATE_MANAGER_FIELDS if viewer.is_manager else ()))
+
+
+def _template_fields(data: dict[str, Any], viewer: User, *, partial: bool) -> dict[str, Any]:
+    """Поля шаблона из тела — те же проверки, что у полей задачи. partial — правка: только присланное."""
+    fields: dict[str, Any] = {}
+    if not partial or "title" in data:
+        fields["title"] = _text(data, "title", "Название", max_len=TITLE_MAX, required=True)
+    if not partial or "expected_result" in data:
+        fields["expected_result"] = _text(
+            data, "expected_result", "Ожидаемый результат", max_len=RESULT_MAX, required=True
+        )
+    if not partial or "plan_value" in data:
+        fields["plan_value"] = _plan_value(data.get("plan_value"))
+    if not partial or "plan_unit" in data:
+        fields["plan_unit"] = _text(data, "plan_unit", "Единица плана", max_len=UNIT_MAX)
+    if viewer.is_manager:
+        if "priority" in data:
+            fields["priority"] = _priority(data["priority"])
+        if "weight" in data:
+            fields["weight"] = None if data["weight"] is None else _weight(data["weight"])
+        if "assignee_id" in data:
+            fields["assignee_id"] = None if data["assignee_id"] is None else _object_id(data["assignee_id"], "Сотрудник")
+    return fields
+
+
+async def _own_template(request: web.Request, viewer: User) -> TaskTemplate:
+    """Шаблон из пути — только свой: чужой и несуществующий неотличимы (404)."""
+    template_id = _path_id(request, "template_id", TEMPLATE_NOT_FOUND)
+    template = await templates_svc.get_own(_session(request), viewer, template_id)
+    if template is None:
+        raise ApiError(404, "not_found", TEMPLATE_NOT_FOUND)
+    return template
+
+
+async def list_templates(request: web.Request) -> web.Response:
+    viewer = active_viewer(request)
+    items = await templates_svc.list_templates(_session(request), viewer)
+    return _ok({"items": [ser.template(item, viewer) for item in items], "limit": templates_svc.LIMIT})
+
+
+async def create_template(request: web.Request) -> web.Response:
+    """Новый шаблон: из полей формы или из задачи (``{"task_id": N}`` — сервер сам берёт разрешённые поля)."""
+    viewer = active_viewer(request)
+    session = _session(request)
+    data = await _body(request, ("task_id", *_template_allowed(viewer)))
+    if "task_id" in data:
+        if len(data) != 1:
+            raise _bad(TEMPLATE_TASK_ONLY)
+        task = await _load_task(session, _object_id(data["task_id"], "Задача"))
+        if not _can_view(task, viewer):
+            raise ApiError(403, "forbidden", NO_RIGHTS)
+        template = await templates_svc.from_task(session, viewer, task)
+    else:
+        template = await templates_svc.create_template(session, viewer, **_template_fields(data, viewer, partial=False))
+    await session.commit()
+    return _ok({"template": ser.template(template, viewer)}, status=201)
+
+
+async def update_template(request: web.Request) -> web.Response:
+    viewer = active_viewer(request)
+    session = _session(request)
+    template = await _own_template(request, viewer)
+    data = await _body(request, _template_allowed(viewer))
+    if not data:
+        raise _bad(NO_CHANGES)
+    template = await templates_svc.update_template(session, viewer, template, **_template_fields(data, viewer, partial=True))
+    await session.commit()
+    return _ok({"template": ser.template(template, viewer)})
+
+
+async def delete_template(request: web.Request) -> web.Response:
+    viewer = active_viewer(request)
+    session = _session(request)
+    template = await _own_template(request, viewer)
+    await templates_svc.delete_template(session, template)
+    await session.commit()
+    return _ok({"deleted": True})
+
+
 # --- Маршруты (§8.2) -----------------------------------------------------------------------------------------
 
 _TABLE: list[tuple[str, str, Handler]] = [
@@ -2275,6 +2368,10 @@ _TABLE: list[tuple[str, str, Handler]] = [
     ("GET", "/employees", list_employees),
     ("GET", "/employees/{user_id}/weight-load", weight_load),
     ("POST", "/export", export_report),
+    ("GET", "/templates", list_templates),
+    ("POST", "/templates", create_template),
+    ("PATCH", "/templates/{template_id}", update_template),
+    ("POST", "/templates/{template_id}/delete", delete_template),
 ]
 
 # Все маршруты API: (метод, шаблон полного пути). Тест SPA сверяет с ними пути в app.js.

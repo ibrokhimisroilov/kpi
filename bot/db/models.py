@@ -297,6 +297,31 @@ class TaskEvent(Base):
     actor: Mapped[User | None] = relationship(lazy="joined")
 
 
+class TaskTemplate(Base):
+    """Личный шаблон задачи (начальник) или поручения (сотрудник): заготовка формы.
+
+    Хранит только то, что человек вводит в форму: название, ожидаемый результат, план; у начальника — ещё
+    приоритет, вес и исполнителя (всё необязательно). Срока, статуса, номера исходной задачи, результатов,
+    оценок и файлов здесь нет и быть не может — для них нет столбцов. Видит и меняет только владелец.
+    """
+
+    __tablename__ = "task_templates"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    owner_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    title: Mapped[str] = mapped_column(String(255))
+    expected_result: Mapped[str] = mapped_column(Text)
+    plan_value: Mapped[float | None] = mapped_column(Float)
+    plan_unit: Mapped[str | None] = mapped_column(String(64))
+    priority: Mapped[Priority | None] = mapped_column(_enum(Priority))   # только у шаблона начальника
+    weight: Mapped[int | None] = mapped_column(Integer)                  # только у шаблона начальника
+    assignee_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"))  # только у шаблона начальника
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+    assignee: Mapped[User | None] = relationship(foreign_keys=[assignee_id], lazy="joined")
+
+
 class ReminderLog(Base):
     """Отправленные напоминания — чтобы не слать одно и то же дважды."""
 

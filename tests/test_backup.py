@@ -38,11 +38,13 @@ from bot.db.models import (
     DigestLog,
     FsmState,
     JobLog,
+    Priority,
     ReminderLog,
     ReviewDecision,
     Role,
     Submission,
     Task,
+    TaskTemplate,
     User,
     UserStatus,
 )
@@ -170,6 +172,8 @@ async def seed_everything(db: FileDb) -> None:
         session.add_all([
             submission,
             ReminderLog(task_id=task.id, kind="before_3d"),
+            TaskTemplate(owner_id=manager.id, title="Сверка с поставщиками", expected_result="Сверить 60 актов",
+                         plan_value=60.0, plan_unit="актов", priority=Priority.HIGH, weight=25, assignee_id=task.assignee_id),
             DigestLog(period_start=datetime(2026, 9, 28, 19, 0)),
             JobLog(job="backup", key="2026-10-01"),
             FsmState(key="fsm:42:2001:2001:default", state="SubmitSG:fact", data={"task_id": task.id, "files": []}),

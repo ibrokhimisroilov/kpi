@@ -29,6 +29,7 @@ from bot.db.models import (
     TaskEvent,
     TaskSource,
     TaskStatus,
+    TaskTemplate,
     User,
     UserStatus,
 )
@@ -456,6 +457,32 @@ def task_card(task: Task, events: Sequence[TaskEvent], viewer: User, now: dateti
 
 
 # --- KPI --------------------------------------------------------------------------------------------------
+
+
+def template(tpl: TaskTemplate, viewer: User) -> dict[str, Any]:
+    """Личный шаблон (§16). Поля начальника (приоритет, вес, исполнитель) получает только начальник;
+    исполнитель, который больше не активный сотрудник, не предлагается (null)."""
+    plan_text = f"{fmt_num(tpl.plan_value)} {tpl.plan_unit or ''}".strip() if tpl.plan_value is not None else None
+    data: dict[str, Any] = {
+        "id": tpl.id,
+        "title": tpl.title,
+        "expected_result": tpl.expected_result,
+        "plan_value": tpl.plan_value,
+        "plan_unit": tpl.plan_unit,
+        "plan_text": plan_text,
+        "updated_at": iso(tpl.updated_at),
+    }
+    if viewer.is_manager:
+        priority = Priority(tpl.priority) if tpl.priority else Priority.MEDIUM
+        assignee = tpl.assignee
+        offered = assignee is not None and assignee.is_active and assignee.role == Role.EMPLOYEE
+        data.update(
+            priority=priority.value,
+            priority_label=_t(render.PRIORITY_LABELS[priority]),
+            weight=tpl.weight,
+            assignee=user_ref(assignee) if offered and assignee is not None else None,
+        )
+    return data
 
 
 def period(p: Period, max_back: int) -> dict[str, Any]:
