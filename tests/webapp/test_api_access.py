@@ -40,6 +40,10 @@ ROLES: dict[tuple[str, str], str] = {
     ("GET", "/api/employees"): "M",
     ("GET", "/api/employees/{user_id}/weight-load"): "M",
     ("POST", "/api/export"): "M",
+    ("GET", "/api/templates"): "ME",  # личные шаблоны (§16): у каждого свои
+    ("POST", "/api/templates"): "ME",
+    ("PATCH", "/api/templates/{template_id}"): "ME",
+    ("POST", "/api/templates/{template_id}/delete"): "ME",
 }
 PENDING_TG = 3001
 BLOCKED_TG = 3002
@@ -75,11 +79,15 @@ async def build_world(ma: MiniApp) -> World:
     return World(mgr, emp, emp2, task_id, sub_id, proposal_id)
 
 
-def fill(path: str, w: World, *, task_id: int | None = None, sub_id: int | None = None, user_id: int | None = None) -> str:
+def fill(
+    path: str, w: World, *, task_id: int | None = None, sub_id: int | None = None, user_id: int | None = None,
+    template_id: int | None = None,
+) -> str:
     return (
         path.replace("{task_id}", str(task_id if task_id is not None else w.task_id))
         .replace("{sub_id}", str(sub_id if sub_id is not None else w.sub_id))
         .replace("{user_id}", str(user_id if user_id is not None else w.emp.id))
+        .replace("{template_id}", str(template_id if template_id is not None else 1))  # шаблонов в этом мире нет
     )
 
 
@@ -180,7 +188,7 @@ async def test_unknown_ids_are_404(ma: MiniApp, bad_id: str) -> None:
     for method, template in api.ROUTES:
         if "{" not in template:
             continue
-        path = fill(template, w, task_id=bad_id, sub_id=bad_id, user_id=bad_id)  # type: ignore[arg-type]
+        path = fill(template, w, task_id=bad_id, sub_id=bad_id, user_id=bad_id, template_id=bad_id)  # type: ignore[arg-type]
         resp = await call(ma, method, path, as_=MGR if ROLES[(method, template)] != "A" else EMP)
         assert resp.status == 404, (method, template, resp.status, resp.data)
         assert resp.code == "not_found"

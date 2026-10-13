@@ -47,6 +47,8 @@ body {
   padding-block: 20px 48px;
 }
 .page { max-width: 1060px; margin-inline: auto; display: grid; gap: 12px; }
+/* Сторона другого языка скрыта по-настоящему: у .sheet свой display, и одного атрибута hidden ему мало. */
+main[hidden] { display: none; }
 .sheet {
   background: var(--paper);
   border: 1px solid var(--line);
@@ -178,6 +180,7 @@ tfoot td.result { color: var(--accent); font-size: 16px; }
 
 /* --- Ряды коротких справок --- */
 .trio { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 18px; }
+.trio.two { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .trio .panel { padding: 18px; }
 .trio ul, .trio ol { margin: 0; padding-left: 18px; display: grid; gap: 6px; font-size: 13.5px; }
 .cmds { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 6px 12px; font-size: 13.5px; }
@@ -198,7 +201,7 @@ footer { border-top: 1px solid var(--line); padding-top: 16px; font-size: 12.5px
   .step.final { order: 2; }
   .loop { order: 1; }
   .loop span { position: static; transform: none; padding: 0; white-space: normal; background: none; }
-  .roles, .duo, .trio { grid-template-columns: minmax(0, 1fr); }
+  .roles, .duo, .trio, .trio.two { grid-template-columns: minmax(0, 1fr); }
 }
 @media screen and (max-width: 520px) {
   body { font-size: 14.5px; }
@@ -404,6 +407,25 @@ footer { border-top: 1px solid var(--line); padding-top: 16px; font-size: 12.5px
     </article>
   </section>
 
+  <section class="trio two">
+    <article class="panel" aria-labelledby="site-h-ru">
+      <h3 id="site-h-ru">Сайт — то же приложение в браузере</h3>
+      <ul>
+        <li>Адрес: <code>kpi-bot-ui7q.onrender.com</code> — на компьютере и на телефоне. Те же задачи, проверка и KPI; на большом экране — таблицы и боковое меню.</li>
+        <li>Вход без пароля: «Войти через Telegram» → бот присылает три числа → нажмите то, что показано на сайте. Telegram только на телефоне — наведите камеру на QR-код.</li>
+        <li>По чужой просьбе вход не подтверждайте. Выйти сразу везде — кнопка под сообщением бота о входе.</li>
+      </ul>
+    </article>
+    <article class="panel" aria-labelledby="tpl-h-ru">
+      <h3 id="tpl-h-ru">Шаблоны для повторяющихся задач</h3>
+      <ul>
+        <li>В приложении и на сайте: в форме «Новая задача» или «Поручение» — кнопка «Шаблоны». Выбрали шаблон — поля заполнены, остаётся выбрать срок.</li>
+        <li>Сохранить: «Сохранить как шаблон» в форме или в меню «⋯» карточки любой задачи, в том числе выполненной.</li>
+        <li>Шаблоны личные — их видит только владелец. Срок, результаты и оценки в шаблон не попадают.</li>
+      </ul>
+    </article>
+  </section>
+
   <section class="trio">
     <article class="panel" aria-labelledby="join-h-ru">
       <h3 id="join-h-ru">Как подключить сотрудника</h3>
@@ -583,6 +605,25 @@ footer { border-top: 1px solid var(--line); padding-top: 16px; font-size: 12.5px
         <li>Har kim oʻzi tanlaydi: Oʻzbekcha yoki Русский. Menyudagi «🌐 Til / Язык» tugmasi yoki <code>/lang</code> buyrugʻi; ilovada — sarlavha yonidagi tugma.</li>
         <li>Boshliq va xodim turli tillarda ishlashi mumkin: bot har kimga oʻz tilida yozadi.</li>
         <li>Vazifa matnlari va izohlar tarjima qilinmaydi — qanday yozilgan boʻlsa, shunday qoladi.</li>
+      </ul>
+    </article>
+  </section>
+
+  <section class="trio two">
+    <article class="panel" aria-labelledby="site-h-uz">
+      <h3 id="site-h-uz">Sayt — brauzerdagi oʻsha ilova</h3>
+      <ul>
+        <li>Manzil: <code>kpi-bot-ui7q.onrender.com</code> — kompyuterda ham, telefonda ham. Oʻsha vazifalar, tekshiruv va KPI; katta ekranda — jadvallar va yon menyu.</li>
+        <li>Parolsiz kirish: «Telegram orqali kirish» → bot uchta son yuboradi → saytda koʻrsatilganini bosing. Telegram faqat telefonda boʻlsa — kamerani QR-kodga qarating.</li>
+        <li>Birovning iltimosi bilan kirishni tasdiqlamang. Hamma qurilmada birdan chiqish — botning kirish haqidagi xabari ostidagi tugma.</li>
+      </ul>
+    </article>
+    <article class="panel" aria-labelledby="tpl-h-uz">
+      <h3 id="tpl-h-uz">Takrorlanadigan vazifalar uchun shablonlar</h3>
+      <ul>
+        <li>Ilovada va saytda: «Yangi vazifa» yoki «Topshiriq» shaklida — «Shablonlar» tugmasi. Shablonni tanladingiz — maydonlar toʻldirilgan, faqat muddatni tanlash qoladi.</li>
+        <li>Saqlash: shakldagi yoki istalgan (bajarilgan ham) vazifa kartochkasining «⋯» menyusidagi «Shablon sifatida saqlash».</li>
+        <li>Shablonlar shaxsiy — ularni faqat egasi koʻradi. Muddat, natijalar va baholar shablonga tushmaydi.</li>
       </ul>
     </article>
   </section>

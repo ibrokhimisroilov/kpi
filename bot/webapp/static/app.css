@@ -231,6 +231,8 @@ h2.sec, .sec { margin: 24px 4px 8px; display: flex; align-items: baseline; justi
 }
 .row-done { flex: 0 0 auto; align-self: center; display: inline-flex; align-items: center; gap: 6px; margin-right: var(--pad); font-size: var(--fs-meta); color: var(--good); font-weight: 600; }
 /* Строка с действием («Принять»): кнопка под текстом — название не сжимается. */
+/* Кнопка «⋯» в строке списка (шаблоны): по центру строки, без тени — не спорит с карточкой. */
+.list > li > .icon-btn { align-self: center; margin-right: 8px; background: var(--fill); box-shadow: none; }
 .list > li.has-action { flex-wrap: wrap; }
 .list > li.has-action > .row-main { flex-basis: 100%; padding-bottom: 8px; }
 .list > li.has-action > .row-action, .list > li.has-action > .row-done { margin: 0 var(--pad) 14px; align-self: flex-start; }

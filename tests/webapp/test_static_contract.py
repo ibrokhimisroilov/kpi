@@ -318,9 +318,9 @@ def test_every_api_literal_is_a_known_route() -> None:
 
 
 def test_js_endpoint_placeholders_use_route_param_names() -> None:
-    """Имена параметров — как в ROUTES (§8.2): task_id, sub_id, user_id."""
+    """Имена параметров — как в ROUTES (§8.2): task_id, sub_id, user_id, template_id."""
     names = {name for _m, path in _js_endpoints() for name in re.findall(r"\{([^}]*)\}", path)}
-    assert names <= {"task_id", "sub_id", "user_id"}, names
+    assert names <= {"task_id", "sub_id", "user_id", "template_id"}, names
 
 
 def test_js_endpoints_exist_in_api_routes() -> None:

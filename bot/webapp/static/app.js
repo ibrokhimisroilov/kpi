@@ -86,6 +86,10 @@
     employees: ['GET', '/api/employees'],
     weightLoad: ['GET', '/api/employees/{user_id}/weight-load'],
     exportReport: ['POST', '/api/export'],
+    templates: ['GET', '/api/templates'],
+    createTemplate: ['POST', '/api/templates'],
+    updateTemplate: ['PATCH', '/api/templates/{template_id}'],
+    deleteTemplate: ['POST', '/api/templates/{template_id}/delete'],
   });
   /** Запросы, которые не меняют ни списков, ни карточек (и бывают долгими): загрузчики их не ждут (см. settled). */
   const QUIET = new Set([EP.formulate, EP.voice, EP.sendFiles, EP.exportReport]);
@@ -1192,6 +1196,10 @@
     { pat: /^\/submit\/(\d+)$/, role: 'employee', tab: 'submit', view: SubmitFormView },
     { pat: /^\/kpi$/, role: 'employee', tab: 'kpi', root: true, view: MyKpiView },
     { pat: /^\/propose$/, role: 'employee', tab: 'propose', root: true, view: ProposeView },
+    { pat: /^\/templates$/, role: 'manager', tab: 'new', view: TemplatesView },
+    { pat: /^\/templates$/, role: 'employee', tab: 'propose', view: TemplatesView },
+    { pat: /^\/templates\/(new|\d+)$/, role: 'manager', tab: 'new', view: TemplateFormView },
+    { pat: /^\/templates\/(new|\d+)$/, role: 'employee', tab: 'propose', view: TemplateFormView },
   ];
 
   function roleKey() {
@@ -2357,7 +2365,7 @@
         [w + ' %', over[w] ? icon('alert', 'ic-sm tone-warn') : null],
         model.weight === w,
         () => {
-          model.weight = w;
+          model.weight = opts.optional && model.weight === w ? null : w;
           custom.value = '';
           setError('');
           paint();
@@ -2380,7 +2388,7 @@
 
     return {
       el: h('div', { class: 'field' },
-        h('div', { class: 'label' }, h('span', null, 'Вес задачи', h('span', { class: 'req', 'aria-hidden': 'true' }, '*'))),
+        h('div', { class: 'label' }, h('span', null, 'Вес задачи', opts.optional ? null : h('span', { class: 'req', 'aria-hidden': 'true' }, '*'))),
         chipsBox,
         h('div', { class: 'inline-input' }, h('label', { for: id, class: 'muted small' }, 'Своё значение, %'), custom),
         hint, err),
@@ -3689,7 +3697,7 @@
         }
       }
       if (a.edit) extra.push(button('Изменить', () => go('#/task/' + t.id + '/edit'), '', null, 'edit'));
-      menu = [];
+      menu = [{ icon: 'file', text: 'Сохранить как шаблон', run: () => saveTemplate({ task_id: t.id }) }];
       if (a.reject) {
         menu.push({ icon: 'reject', text: 'Отклонить поручение', danger: true,
           run: () => rejectSheet(scr, t, () => go('#/review?tab=proposals', { force: true, reset: true })) });
@@ -4667,13 +4675,16 @@
       toast('Готово — проверьте поля. Вес и приоритет выберите сами.', 'mic');
       if (rerender) rerender();
     });
+    const tpl = templateBar(d, true);
     return h('form', { class: 'form', novalidate: true, onsubmit: (e) => e.preventDefault() },
+      tpl.open,
       dictate,
       formErr,
       // Три блока: что и кому поручаем · к какому сроку · насколько это важно.
       h('section', { class: 'card' }, who.el, title.el, result.el, plan.el),
       h('section', { class: 'card' }, deadline.el),
       h('section', { class: 'card' }, h('div', { class: 'field' }, h('div', { class: 'label' }, 'Приоритет'), priority.el), weight.el),
+      tpl.save,
       guide.el);
   }
 
@@ -4771,11 +4782,294 @@
       toast('Готово — проверьте поля перед отправкой.', 'mic');
       rerender();
     });
+    const tpl = templateBar(d, false);
     return h('form', { class: 'form', novalidate: true, onsubmit: (e) => e.preventDefault() },
-      dictate, formErr,
+      tpl.open, dictate, formErr,
       h('section', { class: 'card' }, title.el, result.el, plan.el),
       h('section', { class: 'card' }, deadline.el),
+      tpl.save,
       guide.el);
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // 16b. Личные шаблоны (§16): заготовки формы «Новая задача» (начальник) и «Поручение» (сотрудник)
+  // ---------------------------------------------------------------------------------------------
+
+  const tplState = { sort: '' };
+
+  function templatesChanged() {
+    invalidate([EP.templates[1]]);
+  }
+
+  function shortText(text) {
+    const s = String(text || '');
+    return s.length > 140 ? s.slice(0, 137).trim() + '…' : s;
+  }
+
+  /** Поля формы -> тело шаблона. boss — с приоритетом, весом и исполнителем (их сервер примет только от начальника). */
+  function templateBody(d, boss) {
+    const pv = String(d.plan_value || '').trim();
+    const body = {
+      title: d.title.trim(), expected_result: d.expected_result.trim(),
+      plan_value: pv || null, plan_unit: pv && String(d.plan_unit || '').trim() ? d.plan_unit.trim() : null,
+    };
+    if (boss) {
+      const w = d.weight;
+      body.priority = d.priority || 'medium';
+      body.weight = Number.isInteger(w) && w >= 1 && w <= 100 ? w : null;
+      body.assignee_id = d.assignee_id ? Number(d.assignee_id) : null;
+    }
+    return body;
+  }
+
+  /** «Сохранить как шаблон»: body — поля формы или {task_id} (из карточки задачи). */
+  async function saveTemplate(body, btn) {
+    if (btn) btn.disabled = true;
+    try {
+      await api(EP.createTemplate, { body });
+      templatesChanged();
+      haptic.ok();
+      toast('Шаблон сохранён', 'done');
+    } catch (err) {
+      reportError(err);
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+  }
+
+  /** В формах «Новая задача» и «Поручение»: кнопка к своим шаблонам и «Сохранить как шаблон» для введённого. */
+  function templateBar(d, boss) {
+    const save = h('button', { type: 'button', class: 'link-btn' }, icon('file', 'ic-sm'), 'Сохранить как шаблон');
+    save.addEventListener('click', () => {
+      if (!d.title.trim() || !d.expected_result.trim()) {
+        toast('Чтобы сохранить шаблон, заполните задачу и ожидаемый результат', 'info');
+        return;
+      }
+      saveTemplate(templateBody(d, boss), save);
+    });
+    return {
+      open: h('div', { class: 'dictate-bar tpl-open' }, button('Шаблоны', () => go('#/templates'), 'btn-block', null, 'file')),
+      save: h('div', { class: 'center tpl-save' }, save),
+    };
+  }
+
+  /** Шаблон -> черновик формы: срок пустой (его выбирают заново), остальное можно править. */
+  async function useTemplate(tpl) {
+    const boss = isManager();
+    const key = boss ? 'newTask' : 'propose';
+    if (draftDirty(drafts[key]) && !(await confirmDialog('В форме уже есть введённое. Заменить его данными шаблона?'))) return;
+    const d = newDraft();
+    d.title = tpl.title;
+    d.expected_result = tpl.expected_result;
+    d.plan_value = isNum(tpl.plan_value) ? fmtNum(tpl.plan_value) : '';
+    d.plan_unit = isNum(tpl.plan_value) && tpl.plan_unit ? tpl.plan_unit : '';
+    if (boss) {
+      d.priority = tpl.priority || 'medium';
+      d.weight = isNum(tpl.weight) ? tpl.weight : null;
+      d.assignee_id = tpl.assignee ? String(tpl.assignee.id) : '';
+    }
+    drafts[key] = d;
+    haptic.sel();
+    go(boss ? '#/new' : '#/propose', { reset: true, force: true });
+  }
+
+  async function removeTemplate(tpl, reload) {
+    if (!(await confirmDialog('Удалить этот шаблон? Задачи, созданные по нему, останутся.'))) return;
+    try {
+      await api(EP.deleteTemplate, { params: { template_id: tpl.id } });
+      haptic.ok();
+      toast('Шаблон удалён', 'done');
+    } catch (err) {
+      reportError(err);
+    }
+    templatesChanged();
+    reload();
+  }
+
+  function templateMeta(tpl) {
+    return dotted([
+      tpl.plan_text ? own(tpl.plan_text) : null,
+      tpl.assignee ? own(tpl.assignee.short_name) : null,
+      isNum(tpl.weight) ? tr('вес ' + tpl.weight + ' %') : null,
+    ]);
+  }
+
+  /** Строка списка: нажатие заполняет форму; «⋯» — использовать, изменить, удалить. */
+  function templateRow(tpl, reload) {
+    const meta = templateMeta(tpl);
+    return h('li', null,
+      h('button', { type: 'button', class: 'row-main', onclick: () => useTemplate(tpl) },
+        h('span', { class: 'row-body' },
+          h('span', { class: 'row-title' }, own(tpl.title)),
+          h('span', { class: 'row-sub' }, own(shortText(tpl.expected_result))),
+          meta.length ? h('span', { class: 'row-sub' }, meta) : null)),
+      h('button', {
+        type: 'button', class: 'icon-btn', 'aria-label': 'Действия с шаблоном', 'aria-haspopup': 'dialog',
+        onclick: () => menuSheet(own(tpl.title), [
+          { icon: 'send', text: 'Использовать', run: () => useTemplate(tpl) },
+          { icon: 'edit', text: 'Изменить', run: () => go('#/templates/' + tpl.id) },
+          { icon: 'reject', text: 'Удалить', danger: true, run: () => removeTemplate(tpl, reload) },
+        ]),
+      }, icon('more')));
+  }
+
+  /** Большой экран сайта: шаблоны таблицей; строка заполняет форму, справа — изменить и удалить. */
+  function templatesTable(items, reload) {
+    const who = (tpl) => (tpl.assignee ? tpl.assignee.short_name : '');
+    const cols = [
+      { label: 'Шаблон', sort: 'title', cls: 'c-title', val: (tpl) => tpl.title,
+        cell: (tpl) => h('button', { type: 'button', class: 'cell-link', 'data-to': '', onclick: () => useTemplate(tpl) }, own(tpl.title)) },
+      { label: 'Ожидаемый результат', cls: 'c-opt c-text', cell: (tpl) => own(shortText(tpl.expected_result)) },
+      { label: 'План', cls: 'c-due', cell: (tpl) => own(tpl.plan_text || '—') },
+    ];
+    if (isManager()) {
+      cols.push(
+        { label: 'Сотрудник', sort: 'who', cls: 'c-who', val: who, cell: (tpl) => own(who(tpl) || '—') },
+        { label: 'Вес', sort: 'weight', cls: 'c-num', val: (tpl) => (isNum(tpl.weight) ? tpl.weight : -1),
+          cell: (tpl) => (isNum(tpl.weight) ? tpl.weight + ' %' : '—') });
+    }
+    cols.push({ label: '', cls: 'c-act', cell: (tpl) => [
+      h('button', { type: 'button', class: 'icon-btn', 'aria-label': 'Изменить шаблон', onclick: () => go('#/templates/' + tpl.id) }, icon('edit')),
+      h('button', { type: 'button', class: 'icon-btn', 'aria-label': 'Удалить шаблон', onclick: () => removeTemplate(tpl, reload) }, icon('reject')),
+    ] });
+    return listTable(cols, items, tplState, () => '');
+  }
+
+  function TemplatesView(scr) {
+    const head = screenHead('Мои шаблоны', 'Нажмите на шаблон — форма заполнится, срок выберете заново');
+    const box = h('div');
+    scr.el.classList.add('v-wide');
+    scr.el.append(head.el, box);
+    const reload = () => load(true);
+    const load = loadInto(scr, box, {
+      request: () => ({ ep: EP.templates }),
+      skeleton: () => skelList(3),
+      stale: true,
+      render: (data) => {
+        const items = data.items || [];
+        primary.set({ text: 'Новый шаблон', onClick: () => go('#/templates/new') });
+        if (!items.length) {
+          return emptyState('Шаблонов пока нет. Сохраните задачу как шаблон — в следующий раз форма заполнится сама.', 'file');
+        }
+        return isWide() ? templatesTable(items, reload) : h('ul', { class: 'list' }, items.map((tpl) => templateRow(tpl, reload)));
+      },
+    });
+    scr.refresh = reload;
+    load();
+  }
+
+  /** Форма шаблона (#/templates/new, #/templates/{id}): те же поля, что в форме задачи, но без срока. */
+  function TemplateFormView(scr, args) {
+    const boss = isManager();
+    const id = args[0] === 'new' ? null : Number(args[0]);
+    const head = screenHead(id ? 'Шаблон' : 'Новый шаблон', 'Срок в шаблоне не хранится — его выбирают заново');
+    const box = h('div');
+    scr.el.append(head.el, box);
+    let form = null;
+    scr.guard = () => Boolean(form && form.changed());
+    scr.dirty = scr.guard;
+
+    async function start() {
+      box.replaceChildren.apply(box, nodes(skelForm()));
+      try {
+        const got = await Promise.all([id ? api(EP.templates) : null, boss ? api(EP.employees) : null]);
+        if (!scr.alive) return;
+        const tpl = id ? (got[0].items || []).find((item) => item.id === id) : null;
+        if (id && !tpl) {
+          primary.hide();
+          box.replaceChildren(emptyState('Шаблон не найден — возможно, он удалён.', 'file',
+            button('К шаблонам', () => go('#/templates', { replace: true }), '', null, 'file')));
+          return;
+        }
+        form = templateForm(scr, tpl, got[1] ? got[1].items || [] : []);
+        box.replaceChildren(form.el);
+      } catch (err) {
+        if (!scr.alive || (err.handled && err.status !== 429)) return;
+        box.replaceChildren(errorState(err, start));
+      }
+    }
+
+    start();
+  }
+
+  function templateForm(scr, tpl, employees) {
+    const boss = isManager();
+    const init = {
+      assignee_id: tpl && tpl.assignee ? String(tpl.assignee.id) : '', title: tpl ? tpl.title : '',
+      expected_result: tpl ? tpl.expected_result : '', plan_value: tpl && isNum(tpl.plan_value) ? fmtNum(tpl.plan_value) : '',
+      plan_unit: (tpl && tpl.plan_unit) || '', priority: (tpl && tpl.priority) || 'medium', weight: tpl && isNum(tpl.weight) ? tpl.weight : null,
+    };
+    const d = Object.assign({}, init);
+    const formErr = h('div', { class: 'form-error', role: 'alert' });
+    const title = field({
+      label: 'Задача', required: true, max: 255, value: d.title, requiredText: 'Напишите, что нужно сделать',
+      placeholder: 'Например: Анализ договоров поставщиков', enterkeyhint: 'next',
+      onInput: (v) => {
+        d.title = v;
+        syncClosingSoon();
+      },
+    });
+    const result = field({
+      label: 'Ожидаемый результат', required: true, multiline: true, rows: 4, max: 2000, value: d.expected_result,
+      requiredText: 'Опишите ожидаемый результат',
+      onInput: (v) => {
+        d.expected_result = v;
+        syncClosingSoon();
+      },
+    });
+    const plan = planFields(d, { onChange: syncClosingSoon });
+    const who = boss ? selectField({
+      label: 'Сотрудник', value: d.assignee_id, placeholder: 'Не задан — выбрать при постановке',
+      options: employees.map((u) => ({ value: String(u.id), label: own(u.short_name + (u.position ? ' — ' + u.position : '')) })),
+      onChange: (v) => {
+        d.assignee_id = v;
+        syncClosingSoon();
+      },
+    }) : null;
+    const priority = boss ? segmented(PRIORITIES, d.priority, (v) => {
+      d.priority = v;
+      syncClosingSoon();
+    }, 'Приоритет', 'radio') : null;
+    const weight = boss ? weightPicker(d, { optional: true, onChange: syncClosingSoon }) : null;
+
+    async function save() {
+      formErr.replaceChildren();
+      if (!firstInvalid([title, result, plan])) return;
+      const w = d.weight;
+      if (boss && w !== null && w !== undefined && !(Number.isInteger(w) && w >= 1 && w <= 100)) {
+        weight.setError('Вес — целое число от 1 до 100');
+        weight.focus();
+        return;
+      }
+      primary.update({ progress: true });
+      try {
+        const body = templateBody(d, boss);
+        if (tpl) await api(EP.updateTemplate, { params: { template_id: tpl.id }, body });
+        else await api(EP.createTemplate, { body });
+        Object.assign(init, d);
+        templatesChanged();
+        haptic.ok();
+        toast('Шаблон сохранён', 'done');
+        syncClosing();
+        if (scr.alive) await goBack();
+        if (scr.alive) primary.update({ progress: false });
+      } catch (err) {
+        if (!scr.alive) return;
+        primary.update({ progress: false });
+        if (err.handled) return;
+        haptic.err();
+        if (!errorToField(err, [[/назван/i, title], [/план|единиц/i, plan], [/результат/i, result]])) showFormError(formErr, err);
+      }
+    }
+
+    primary.set({ text: 'Сохранить шаблон', onClick: save });
+    return {
+      el: h('form', { class: 'form', novalidate: true, onsubmit: (e) => e.preventDefault() },
+        formErr,
+        h('section', { class: 'card' }, who ? who.el : null, title.el, result.el, plan.el),
+        boss ? h('section', { class: 'card' }, h('div', { class: 'field' }, h('div', { class: 'label' }, 'Приоритет'), priority.el), weight.el) : null),
+      changed: () => JSON.stringify(d) !== JSON.stringify(init),
+    };
   }
 
   function EditTaskView(scr, args) {
@@ -5931,6 +6225,28 @@
     "Просрочено": "Muddati oʻtgan",
     "Сдано": "Topshirildi",
     "Статус": "Holat",
+    "Шаблоны": "Shablonlar",
+    "Сохранить как шаблон": "Shablon sifatida saqlash",
+    "Шаблон сохранён": "Shablon saqlandi",
+    "Чтобы сохранить шаблон, заполните задачу и ожидаемый результат": "Shablonni saqlash uchun vazifa va kutilayotgan natijani toʻldiring",
+    "В форме уже есть введённое. Заменить его данными шаблона?": "Shaklda kiritilgan maʼlumot bor. Uni shablon maʼlumotlari bilan almashtiraymi?",
+    "Удалить этот шаблон? Задачи, созданные по нему, останутся.": "Bu shablon oʻchirilsinmi? U boʻyicha yaratilgan vazifalar qoladi.",
+    "Шаблон удалён": "Shablon oʻchirildi",
+    "Действия с шаблоном": "Shablon bilan amallar",
+    "Использовать": "Qoʻllash",
+    "Удалить": "Oʻchirish",
+    "Шаблон": "Shablon",
+    "Изменить шаблон": "Shablonni oʻzgartirish",
+    "Удалить шаблон": "Shablonni oʻchirish",
+    "Мои шаблоны": "Mening shablonlarim",
+    "Нажмите на шаблон — форма заполнится, срок выберете заново": "Shablonni bosing — shakl toʻldiriladi, muddatni qaytadan tanlaysiz",
+    "Новый шаблон": "Yangi shablon",
+    "Шаблонов пока нет. Сохраните задачу как шаблон — в следующий раз форма заполнится сама.": "Hozircha shablon yoʻq. Vazifani shablon sifatida saqlang — keyingi safar shakl oʻzi toʻldiriladi.",
+    "Срок в шаблоне не хранится — его выбирают заново": "Muddat shablonda saqlanmaydi — u har safar qaytadan tanlanadi",
+    "Шаблон не найден — возможно, он удалён.": "Shablon topilmadi — ehtimol, oʻchirilgan.",
+    "К шаблонам": "Shablonlarga",
+    "Не задан — выбрать при постановке": "Belgilanmagan — vazifa qoʻyishda tanlanadi",
+    "Сохранить шаблон": "Shablonni saqlash",
     /*UZ-END*/
   };
 

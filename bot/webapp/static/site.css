@@ -147,6 +147,10 @@
   .v-form2 form.form > * { grid-column: 1 / -1; }
   .v-form2 form.form > .card { grid-column: 2; }
   .v-form2 form.form > .card:first-of-type { grid-column: 1; grid-row: span 4; }
+  /* Кнопка «Шаблоны» и «Сохранить как шаблон» в форме: по размеру подписи, у левого края. */
+  .v-form2 form.form > .tpl-open { width: auto; justify-self: start; }
+  .v-form2 form.form > .tpl-save { text-align: left; }
+  .tbl .c-text { width: 36%; } /* длинный текст в таблице шаблонов: шире, чтобы не дробился на много строк */
 
   /* Таблицы. */
   /* Таблица, которая всё же шире своего места (очень длинные слова), прокручивается, а не обрезается. */
