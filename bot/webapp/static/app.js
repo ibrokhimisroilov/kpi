@@ -2219,7 +2219,11 @@
     };
   }
 
-  /** План: число + единица (необязательно) и «Убрать план»; model.plan_value / model.plan_unit — строки. */
+  /**
+   * План: число + единица (необязательно) и «Убрать план»; model.plan_value / model.plan_unit — строки.
+   * Пустой план свёрнут в одну кнопку «Добавить план (число)»: поля раскрываются по нажатию, а также когда план
+   * приходит сам (подсказка AI, диктовка, черновик, правка задачи с планом) или у поля появляется ошибка.
+   */
   function planFields(model, o) {
     const opts = o || {};
     const id = uid('plan');
@@ -2259,23 +2263,37 @@
 
     function setError(message) {
       setText(err, message || '');
-      if (message) value.setAttribute('aria-invalid', 'true');
-      else value.removeAttribute('aria-invalid');
+      if (message) {
+        expand();
+        value.setAttribute('aria-invalid', 'true');
+      } else value.removeAttribute('aria-invalid');
     }
     clear.hidden = !String(model.plan_value || '').trim() && !String(model.plan_unit || '').trim();
 
+    const body = h('div', { class: 'plan-body', hidden: clear.hidden },
+      h('label', { for: id }, h('span', null, 'План (число)'), h('span', { class: 'counter' }, 'необязательно')),
+      h('div', { class: 'pair' }, value, unit),
+      h('p', { class: 'field-hint' }, 'Например: 100 договоров. Оставьте пустым, если числового плана нет.'),
+      clear, err);
+    const more = h('button', { type: 'button', class: 'link-btn', hidden: !clear.hidden, onclick: () => {
+      expand();
+      value.focus();
+    } }, icon('plus', 'ic-sm'), 'Добавить план (число)');
+
+    function expand() {
+      body.hidden = false;
+      more.hidden = true;
+    }
+
     return {
-      el: h('div', { class: 'field' },
-        h('label', { for: id }, h('span', null, 'План (число)'), h('span', { class: 'counter' }, 'необязательно')),
-        h('div', { class: 'pair' }, value, unit),
-        h('p', { class: 'field-hint' }, 'Например: 100 договоров. Оставьте пустым, если числового плана нет.'),
-        clear, err),
+      el: h('div', { class: 'field' }, more, body),
       set(v, u) {
         model.plan_value = v;
         model.plan_unit = u;
         value.value = v;
         unit.value = u;
         clear.hidden = !v && !u;
+        if (v || u) expand();
       },
       setError,
       validate() {
@@ -2352,7 +2370,7 @@
         title: sg.source === 'ai' ? 'Измеримая формулировка' : 'Подсказка без AI',
         body: h('div', null,
           sg.notice ? note(sg.notice, 'warn') : null,
-          h('p', { class: 'muted small' }, 'Вы написали: ', h('i', null, raw0)),
+          h('p', { class: 'muted small' }, 'Вы написали: ', h('i', null, own(raw0))),
           h('p', { class: 'suggest' }, own(sg.expected_result)),
           hasPlan ? line('План:', h('b', { class: 'num' }, own(fmtNum(sg.plan_value) + (sg.plan_unit ? ' ' + sg.plan_unit : ''))), '', 'target') : null,
           sg.note ? line('', h('i', null, own(sg.note)), '', 'bulb') : null,
@@ -2566,7 +2584,7 @@
     sheet.show({
       title,
       body: h('div', { class: 'menu' }, items.map((item) => h('button', {
-        type: 'button', class: 'menu-item' + (item.danger ? ' is-danger' : ''), 'aria-current': item.on ? 'true' : null,
+        type: 'button', class: 'menu-item' + (item.danger ? ' is-danger' : ''),
         onclick: () => {
           sheet.close(false);  // фокус — обратно на «⋯»: туда же он вернётся из следующего листа
           item.run();
@@ -2756,45 +2774,35 @@
   }
 
   /**
-   * Период — одна строка: стрелки листают, кнопка между ними (вид периода и его даты) открывает лист
-   * «Неделя · Месяц · Квартал · Год». Строка стоит вне блока с данными box: работает и при загрузке, и при ошибке;
-   * пока грузится выбранный период, прежние числа в box бледнеют (класс is-switch — до update с новыми данными).
+   * Период — один блок: виды «Неделя · Месяц · Квартал · Год» (одно нажатие) и под ними строка «назад — даты —
+   * вперёд». Блок стоит вне блока с данными box: работает и при загрузке, и при ошибке; пока грузится выбранный
+   * период, прежние числа в box бледнеют (класс is-switch — до update с новыми данными).
    */
   function periodControl(ps, onChange, box) {
-    const turn = () => {
-      box.classList.add('is-switch');
-      haptic.sel();
-      onChange();
-    };
-    const kind = h('span');
     const label = h('span', { class: 'label', 'aria-live': 'polite' }, '…');
     const arrow = (name, text, by) => h('button', { type: 'button', class: 'icon-btn', 'aria-label': text, onclick: () => {
       if (ps.offset + by > 0 || ps.offset + by < -500) return;
       ps.offset += by;
-      turn();
+      box.classList.add('is-switch');
+      haptic.sel();
+      onChange();
     } }, icon(name));
     const prev = arrow('back', 'Предыдущий период', -1);
     const next = arrow('next', 'Следующий период', 1);
     next.disabled = ps.offset >= 0;
-    const paint = () => setText(kind, PERIOD_KINDS.find((k) => k.value === ps.kind).label);
-    const pick = h('button', { type: 'button', class: 'period-pick', 'aria-haspopup': 'dialog', onclick: () => menuSheet('Период', PERIOD_KINDS.map((k) => ({
-      icon: k.value === ps.kind ? 'check' : 'calendar', text: k.label, on: k.value === ps.kind,
-      run() {
-        if (k.value === ps.kind && !ps.offset) return;  // тот же вид: из прошлого периода — к текущему
-        ps.kind = k.value;
-        ps.offset = 0;
-        paint();
-        setText(label, '…');
-        turn();
-      },
-    }))) }, h('span', { class: 'k' }, kind, icon('next', 'ic-sm')), label);
-    paint();
+    const seg = segmented(PERIOD_KINDS, ps.kind, (kind) => {
+      ps.kind = kind;
+      ps.offset = 0;
+      setText(label, '…');
+      box.classList.add('is-switch');
+      onChange();
+    }, 'Период');
     return {
-      el: h('div', { class: 'period-nav' }, prev, pick, next),
+      el: h('div', { class: 'period-nav' }, seg.el, h('div', { class: 'period-row' }, prev, label, next)),
       update(period) {
         box.classList.remove('is-switch');
         if (!period) return;
-        const short = period.short + ' ';  // «Неделя 12.10–18.10.2026»: вид уже написан строкой выше
+        const short = period.short + ' ';  // «Неделя 12.10–18.10.2026»: вид уже выбран сегментом выше
         setText(label, period.label.indexOf(short) ? period.label : period.label.slice(short.length));
         prev.disabled = !period.has_prev;
         next.disabled = !period.has_next;
@@ -5175,6 +5183,7 @@
     "Оставить текущий ({u})": "Joriy muddatni qoldirish ({u})",
     "Выбрать файлы": "Fayllarni tanlash",
     "Добавить ещё": "Yana qoʻshish",
+    "Добавить план (число)": "Reja (son) qoʻshish",
     "Прислать файлы в чат": "Fayllarni chatga yuborish",
     "Файлы ({})": "Fayllar ({})",
     "Файлы · {}": "Fayllar · {}",
